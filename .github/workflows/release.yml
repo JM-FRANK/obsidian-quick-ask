@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 jobs:
   draft:
     runs-on: ubuntu-latest
@@ -13,7 +15,23 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Rebuild installation assets
+        run: npm run build
       - run: npm test
-      - run: npm run release:draft
+      - run: npm run release:check
+      - name: Attest the exact installation files
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: Record private preparation limitation
+        if: ${{ github.event.repository.private }}
+        run: echo 'Private preparation draft; rerun after making the repository public to attest the installation assets.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Create or refresh draft from the same files
+        run: npm run release:draft
         env:
           GH_TOKEN: ${{ github.token }}
+          QUICK_ASK_ATTESTED: ${{ !github.event.repository.private }}

@@ -2,7 +2,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '../..');
-const { quickAskDependencies, composerModule } = require('../../scripts/quick-ask-runtime.cjs')(root);
+const { quickAskDependencies, composerModule, bundledPackageDirectories } = require('../../scripts/quick-ask-runtime.cjs')(root);
+const projectLicense = fs.readFileSync(path.join(__dirname, "LICENSE"), "utf8");
+const projectNotice = fs.readFileSync(path.join(__dirname, "NOTICE"), "utf8");
+const notices = require("./build-notices.cjs")(bundledPackageDirectories);
 const check = process.argv.includes('--check');
 const outIndex = process.argv.indexOf('--out');
 const out = outIndex >= 0 ? path.resolve(process.argv[outIndex + 1]) : path.join(root, 'dist/quick-ask');
@@ -19,7 +22,7 @@ const factories = names.map(name => {
   });
   return `${JSON.stringify(name.slice(0, -3))}: function(module, exports, require) {\n${mapped}\n}`;
 }).join(',\n');
-const main = `// Generated from the Scholar Workbench Quick Ask sources.\nmodule.exports = (() => {\n` +
+const main = (projectNotice + "\n" + projectLicense + "\n" + notices).split("\n").map(line => ("// " + line).trimEnd()).join("\n") + "\n" + `// Generated from the Scholar Workbench Quick Ask sources.\nmodule.exports = (() => {\n` +
 `const factories = {${factories},\n${composerModule.replace('"./quick-ask/composer-view"', '"src/quick-ask/composer-view"')},\n${quickAskDependencies}};\n` +
 `const cache = Object.create(null);\nfunction load(id) {\n` +
 `if (id === 'obsidian' || id.startsWith('@codemirror/')) return require(id);\n` +
@@ -30,6 +33,7 @@ const main = `// Generated from the Scholar Workbench Quick Ask sources.\nmodule
 new vm.Script(main);
 const files = {
   'main.js': main,
+  'THIRD_PARTY_NOTICES.md': notices,
   'styles.css': fs.readFileSync(path.join(root, 'src/quick-ask/styles.css'), 'utf8'),
   'manifest.json': fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'),
 };

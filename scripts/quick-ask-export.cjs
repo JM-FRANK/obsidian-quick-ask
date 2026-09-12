@@ -29,18 +29,22 @@ function exportQuickAsk({ source, ref, out, worktree = false }) {
   const managed = new Map();
   for (const name of [...available].sort()) {
     if (name.startsWith('src/quick-ask/') && /\.(js|css)$/.test(name) ||
-        name.startsWith('release/quick-ask/') && /\.(js|cjs|json|md|yml)$/.test(name)) managed.set(name, read(name));
+        name.startsWith('release/quick-ask/') && (/\.(js|cjs|json|md|yml)$/.test(name) || ['release/quick-ask/LICENSE', 'release/quick-ask/NOTICE'].includes(name))) managed.set(name, read(name));
   }
   for (const name of ['scripts/quick-ask-runtime.cjs', 'scripts/quick-ask-export.cjs', 'scripts/quick-ask-release.cjs', ...tests]) {
     managed.set(name, read(name));
   }
-  for (const name of ['package.json', 'package-lock.json', 'manifest.json', 'versions.json', 'README.md']) {
+  for (const name of ['package.json', 'package-lock.json', 'manifest.json', 'versions.json', 'README.md', 'CHANGELOG.md']) {
     managed.set(name, read(`release/quick-ask/${name}`));
+  }
+  for (const name of [...available].filter(name => name.startsWith('release/quick-ask/docs/') && name.endsWith('.md'))) {
+    managed.set(name.replace('release/quick-ask/', ''), read(name));
   }
   for (const name of ['verify.yml', 'release.yml', 'sync.yml']) managed.set(`.github/workflows/${name}`, read(`release/quick-ask/workflows/${name}`));
   if (available.has('release/quick-ask/LICENSE') || worktree && fs.existsSync(path.join(source, 'release/quick-ask/LICENSE'))) {
     managed.set('LICENSE', read('release/quick-ask/LICENSE'));
   }
+  if (available.has('release/quick-ask/NOTICE')) managed.set('NOTICE', read('release/quick-ask/NOTICE'));
   managed.set('.gitignore', Buffer.from('node_modules/\ndist/\n'));
   const sourceHashes = Object.fromEntries([...managed].map(([name, bytes]) => [name, hash(bytes)]));
   const provenance = {
@@ -96,7 +100,23 @@ if (require.main === module) {
   const ref = option('--ref');
   const out = option('--out');
   if (!source || !ref || !out) throw new Error('Usage: --source <local upstream checkout> --ref <commit/tag> --out <directory> [--worktree (preview only)]');
-  const result = exportQuickAsk({ source: path.resolve(source), ref, out, worktree: args.includes('--worktree') });
-  console.log(`Exported ${result.upstreamCommit}${result.preview ? ' (uncommitted preview; cannot release)' : ''}`);
+  // The downstream is only a launcher. Use the selected upstream revision's
+  // exporter so newly introduced files/rules take effect on the first sync.
+  if (fs.existsSync(path.resolve(__dirname, '..', 'upstream.json'))) {
+    const resolvedSource = path.resolve(source);
+    const commit = execFileSync('git', ['-C', resolvedSource, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8' }).trim();
+    const code = args.includes('--worktree')
+      ? fs.readFileSync(path.join(resolvedSource, 'scripts/quick-ask-export.cjs'))
+      : execFileSync('git', ['-C', resolvedSource, 'show', `${commit}:scripts/quick-ask-export.cjs`]);
+    const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'quick-ask-exporter-'));
+    try {
+      const launcher = path.join(temp, 'export.cjs');
+      fs.writeFileSync(launcher, code);
+      execFileSync(process.execPath, [launcher, ...args], { stdio: 'inherit' });
+    } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+  } else {
+    const result = exportQuickAsk({ source: path.resolve(source), ref, out, worktree: args.includes('--worktree') });
+    console.log(`Exported ${result.upstreamCommit}${result.preview ? ' (uncommitted preview; cannot release)' : ''}`);
+  }
 }
 module.exports = { exportQuickAsk };

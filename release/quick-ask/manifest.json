@@ -5,5 +5,6 @@
   "minAppVersion": "1.13.7",
   "description": "Ask AI about selected Markdown text and files, with local conversation history and explicit context control.",
   "author": "FRANK-SMITH",
-  "isDesktopOnly": true
+  "isDesktopOnly": true,
+  "authorUrl": "https://github.com/JM-FRANK"
 }

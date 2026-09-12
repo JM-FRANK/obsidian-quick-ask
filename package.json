@@ -7,7 +7,8 @@
     "check": "node release/quick-ask/build.cjs --out . --check",
     "test": "node --test --test-concurrency=1 tests/quick-ask-composer-state.cjs tests/quick-ask-file-picker.cjs tests/quick-ask-file-input.cjs tests/quick-ask-sessions.cjs tests/quick-ask-settings.cjs tests/quick-ask-session-navigation.cjs tests/quick-ask-composer-layout.cjs tests/quick-ask-pending-context.cjs tests/quick-ask-conversation.cjs tests/quick-ask-conversation-messages.cjs tests/quick-ask-stream-presentation.cjs tests/quick-ask-compaction.cjs tests/quick-ask-compaction-integration.cjs tests/quick-ask-tokens.cjs",
     "sync": "node scripts/quick-ask-export.cjs --out .",
-    "release:draft": "node scripts/quick-ask-release.cjs"
+    "release:draft": "node scripts/quick-ask-release.cjs",
+    "release:check": "node scripts/quick-ask-release.cjs --check"
   },
   "dependencies": {
     "@lezer/markdown": "1.7.2",
@@ -20,5 +21,23 @@
     "@codemirror/state": "6.5.0",
     "@codemirror/view": "6.38.6",
     "esbuild": "0.25.9"
-  }
+  },
+  "description": "Ask AI about selected Markdown text and files in Obsidian.",
+  "main": "main.js",
+  "author": "FRANK-SMITH",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/JM-FRANK/obsidian-quick-ask",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JM-FRANK/obsidian-quick-ask.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JM-FRANK/obsidian-quick-ask/issues"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "ai",
+    "markdown"
+  ]
 }

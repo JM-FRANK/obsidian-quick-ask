@@ -2,7 +2,7 @@ const { createQuickAskEnvironment } = require("./environment");
 const { normalizeQuickAskSettings } = require("./settings");
 const { QuickAskSessionStore, parseLog, CURRENT_SCHEMA_VERSION } = require("./sessions");
 const { Plugin, ItemView } = require("obsidian");
-const { QUICK_ASK_VIEW_TYPE, quickAskViewType } = require("./view-type");
+const { QUICK_ASK_VIEW_TYPE, quickAskViewType, quickAskCommandId } = require("./view-type");
 const { createConversation } = require("./conversation");
 const { createContextTracker } = require("./tracking");
 const { createPreservedCopy, buildExport, parseExport, planImport, clearQuickAskData } = require("./portability");
@@ -190,8 +190,8 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
       }
     }).addClass("scholar-quick-ask-ribbon");
     registrations.addCommand({
-      id: "open-quick-ask",
-      name: t(settings(), "command.openSidebar"),
+      id: quickAskCommandId(plugin.manifest?.id),
+      name: t(settings(), plugin.manifest?.id === "quick-ask" ? "command.openStandaloneSidebar" : "command.openSidebar"),
       // Check the current setting even if an already-open palette retains
       // the previous command object during deactivation.
       checkCallback: (checking) => {

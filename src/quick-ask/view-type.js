@@ -6,4 +6,8 @@ function quickAskViewType(pluginId) {
   return pluginId === "quick-ask" ? "quick-ask-view" : QUICK_ASK_VIEW_TYPE;
 }
 
-module.exports = { QUICK_ASK_VIEW_TYPE, quickAskViewType };
+function quickAskCommandId(pluginId) {
+  return pluginId === "quick-ask" ? "open" : "open-quick-ask";
+}
+
+module.exports = { QUICK_ASK_VIEW_TYPE, quickAskViewType, quickAskCommandId };

@@ -3,6 +3,7 @@ const DEFAULT_LANGUAGE = "en";
 const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
+  "command.openStandaloneSidebar": "Open sidebar",
   "settings.hub.quickAsk": "Quick Ask",
   "settings.group.quickAsk": "Quick Ask",
   "settings.page.quickAsk.name": "Quick Ask",
@@ -158,6 +159,7 @@ const EN = {
 };
 
 const ZH_CN = {
+  "command.openStandaloneSidebar": "打开侧栏",
   "settings.hub.quickAsk": "快速提问",
   "settings.group.quickAsk": "快速提问",
   "settings.page.quickAsk.name": "快速提问",
