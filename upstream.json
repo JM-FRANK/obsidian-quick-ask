@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "upstreamCommit": "ed385d6352748b3ae9bd0c2085b28b8804742742",
+  "upstreamCommit": "486ff7bf398cae1597222166d588fcef0f24cc71",
   "preview": false,
-  "sourceTreeSha256": "102689b745fc7ce3c3ee3be22f7dbd9a5dd54c03223bd98aa1334c2ce510a72f",
+  "sourceTreeSha256": "444fe0d127f31d3c59a566edfdeb61b135529d038ffa88516e7713d35dbb11a0",
   "files": {
     "release/quick-ask/CHANGELOG.md": "572f9951c724e365b8d2d34b208f453caa8da37d239744963c3e854dba0eda97",
     "release/quick-ask/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
@@ -10,7 +10,7 @@
     "release/quick-ask/README.md": "703fa68f05be7364197677343a4af15c2a91adccf6efebcf41718945f50f8b2f",
     "release/quick-ask/build-notices.cjs": "bb5a79430a58018f8386a2dbdf9fa11947dd87d5f45af089a55ca29cc406e0b9",
     "release/quick-ask/build.cjs": "dfd6deb3be47df206630014a8ebbc377b5480b8f6e3caa2681dc2a7f01245fcb",
-    "release/quick-ask/docs/community-submission.md": "7235d12120260e20e7e48b6c5a7407bfa7a7e5ecdae62b9402fafc8e288f6491",
+    "release/quick-ask/docs/community-submission.md": "8eb6f1f9318099d8f8a931f17c79f828656fdd2afa35f1c352982ebb27cccbdc",
     "release/quick-ask/docs/compatibility.md": "ab2af349c1420f94f14556d8541c54145eb99299ec1e483aa646e791a5838f01",
     "release/quick-ask/docs/maintaining.md": "a82a60b43621ba20e4f20c403cf8dc6753c0a1927c63e1f580ccd292d840440b",
     "release/quick-ask/main.js": "04572e0a15c1a5bbbb4dd146a276c965e3ec3f72a96e88398e6aafff0f8ebeb9",
@@ -76,7 +76,7 @@
     "versions.json": "a45a2a5d75d28505a9b29cad922ee8797b4f1608381d99d341508c5cf403619b",
     "README.md": "703fa68f05be7364197677343a4af15c2a91adccf6efebcf41718945f50f8b2f",
     "CHANGELOG.md": "572f9951c724e365b8d2d34b208f453caa8da37d239744963c3e854dba0eda97",
-    "docs/community-submission.md": "7235d12120260e20e7e48b6c5a7407bfa7a7e5ecdae62b9402fafc8e288f6491",
+    "docs/community-submission.md": "8eb6f1f9318099d8f8a931f17c79f828656fdd2afa35f1c352982ebb27cccbdc",
     "docs/compatibility.md": "ab2af349c1420f94f14556d8541c54145eb99299ec1e483aa646e791a5838f01",
     "docs/maintaining.md": "a82a60b43621ba20e4f20c403cf8dc6753c0a1927c63e1f580ccd292d840440b",
     ".github/workflows/verify.yml": "a741c0cf0394b1888ed0015049b65984d82d680333c747305fea82c6498fadca",

@@ -36,13 +36,13 @@
 ## 发布前状态
 
 - 发布材料、Apache-2.0 许可证、NOTICE、依赖许可证及版本元数据已准备。
-- 本仓库当前为私有；准备阶段的草稿不等于可供社区安装的公开 Release。
-- 普通 GitHub 计划的私有仓库不支持 artifact attestations。公开仓库后重新运行 **Prepare Quick Ask release**，确认 attestation 步骤成功，再发布草稿。不要把私有阶段的跳过状态当作已生成证明。
+- 本仓库已公开；当前仍为草稿 Release，尚未正式发布或提交社区目录。
+- 普通 GitHub 计划的私有仓库不支持 artifact attestations。本仓库公开后的 **Prepare Quick Ask release** 已成功生成来源证明；每次刷新安装附件都应通过该流程生成并验证对应证明。不要把早先私有阶段的跳过状态当作已生成证明。
 - 独立版原生设置、实际 API 请求、会话迁移和禁用／重载仍需维护者人工验证，见 [兼容性记录](compatibility.md)。主仓库 Citation 的 Windows 验收不能替代 Quick Ask 独立版验收。
 
 ## 正式提交流程
 
-1. 完成人工验收，将 GitHub 仓库设为公开；检查公开范围只包含该独立发行版。
+1. 完成人工验收；GitHub 仓库已经公开，检查公开范围只包含该独立发行版。
 2. 运行 **Prepare Quick Ask release**，确认构建、测试、版本检查及来源证明成功。草稿附件包含必需的 `main.js`、`manifest.json`、`styles.css`，另外提供许可证、NOTICE、第三方声明及 SHA256SUMS。
 3. 从草稿下载 `main.js`、`styles.css`，分别运行 `gh attestation verify 文件名 -R JM-FRANK/obsidian-quick-ask` 验证。发布标签必须是 `1.0.0`，不加 `v`，与默认分支根目录的 manifest 版本完全一致。
 4. 检查并发布 GitHub 草稿 Release。首次发行版本在此之前不增加历史发布日期。
