@@ -36,7 +36,7 @@
 ## 发布前状态
 
 - 发布材料、Apache-2.0 许可证、NOTICE、依赖许可证及版本元数据已准备。
-- 本仓库已公开；当前仍为草稿 Release，尚未正式发布或提交社区目录。
+- 本仓库已公开，[1.0.0 已正式发布](https://github.com/JM-FRANK/obsidian-quick-ask/releases/tag/1.0.0)，安装附件来源证明已验证；尚未提交社区目录。
 - 普通 GitHub 计划的私有仓库不支持 artifact attestations。本仓库公开后的 **Prepare Quick Ask release** 已成功生成来源证明；每次刷新安装附件都应通过该流程生成并验证对应证明。不要把早先私有阶段的跳过状态当作已生成证明。
 - 独立版原生设置、实际 API 请求、会话迁移和禁用／重载仍需维护者人工验证，见 [兼容性记录](compatibility.md)。主仓库 Citation 的 Windows 验收不能替代 Quick Ask 独立版验收。
 
