@@ -1,0 +1,719 @@
+/* Quick Ask: the sidebar, its two pending-context stacks, the owned composer,
+   the file picker, and the token and compaction surfaces. Every value comes
+   from an Obsidian CSS variable so the feature follows the active theme. */
+
+.scholar-quick-ask-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.view-content.scholar-quick-ask-view {
+  padding: 0;
+  padding-bottom: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--background-primary);
+}
+.scholar-quick-ask-header {
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  padding: var(--size-2-2) var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.scholar-quick-ask-view button.scholar-quick-ask-session-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  text-align: left;
+  height: 30px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: var(--text-normal);
+  font-weight: var(--font-medium);
+}
+.scholar-quick-ask-session-select > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.scholar-quick-ask-conversation {
+  --scholar-bubble-base: color-mix(in oklch, var(--text-normal) 8%, var(--background-primary));
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: auto;
+  padding: var(--size-4-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--scholar-chat-message-spacing, 12px);
+  font-size: var(--scholar-chat-font-size, 14px);
+  --font-text-size: var(--scholar-chat-font-size, 14px);
+  line-height: var(--scholar-chat-line-height, 1.5);
+  --line-height-normal: var(--scholar-chat-line-height, 1.5);
+  --p-spacing: var(--scholar-chat-paragraph-spacing, 0.65em);
+}
+
+.scholar-quick-ask-message {
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+/* Preserve whitespace only for raw text. Markdown already represents its
+   paragraphs/lists as blocks; pre-wrap would add HTML whitespace to margins. */
+.scholar-quick-ask-message-assistant { white-space: normal; }
+.scholar-quick-ask-message-assistant.is-streaming { white-space: pre-wrap; }
+.scholar-quick-ask-stream-text { white-space: pre-wrap; }
+.scholar-quick-ask-message-body :is(p, ul, ol, blockquote) {
+  margin-block: var(--scholar-chat-paragraph-spacing, 0.65em);
+}
+.scholar-quick-ask-message-body > :first-child { margin-top: 0; }
+.scholar-quick-ask-message-body > :last-child { margin-bottom: 0; }
+.scholar-quick-ask-message-body, .scholar-quick-ask-reasoning-text {
+  user-select: text;
+  -webkit-user-select: text;
+}
+.scholar-quick-ask-view.hide-reasoning .scholar-quick-ask-reasoning,
+.scholar-quick-ask-view.hide-usage .scholar-quick-ask-token-pill { display: none; }
+.scholar-quick-ask-view button.scholar-quick-ask-copy {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-copy:hover { background: var(--background-modifier-hover); }
+
+.scholar-quick-ask-message-user {
+  --scholar-bubble-surface: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 16%, var(--scholar-bubble-base));
+  align-self: flex-end;
+  max-width: 90%;
+}
+.scholar-quick-ask-message-assistant {
+  --scholar-bubble-surface: color-mix(in oklch, var(--scholar-assistant-bubble-tint, #39c5bb) 12%, var(--scholar-bubble-base));
+  align-self: flex-start;
+  width: calc(100% - 6px);
+}
+.scholar-quick-ask-message-user,
+.scholar-quick-ask-message-assistant {
+  position: relative;
+  border: none;
+  border-radius: 16px;
+  background: var(--scholar-bubble-surface);
+  margin-bottom: 4px;
+}
+/* The small lower tail is the visual role marker. Role names remain accessible. */
+.scholar-quick-ask-message-user::before,
+.scholar-quick-ask-message-assistant::before {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  width: 10px;
+  height: 8px;
+  background: var(--scholar-bubble-surface);
+  pointer-events: none;
+}
+.scholar-quick-ask-message-user::before {
+  right: 12px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+  border-bottom-right-radius: 4px;
+}
+.scholar-quick-ask-message-assistant::before {
+  left: 12px;
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+  border-bottom-left-radius: 4px;
+}
+.scholar-quick-ask-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.scholar-quick-ask-live { display: flex; flex-direction: column; gap: 8px; }
+.scholar-quick-ask-history {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  gap: var(--scholar-chat-message-spacing, 12px);
+}
+.scholar-quick-ask-live { flex: none; }
+.scholar-quick-ask-live[hidden] { display: none; }
+.scholar-quick-ask-error[hidden],
+.scholar-quick-ask-tool-status[hidden],
+.scholar-quick-ask-reasoning[hidden] { display: none; }
+.scholar-quick-ask-reasoning-body { white-space: normal; }
+.scholar-quick-ask-reasoning-text { max-height: 240px; overflow-y: auto; }
+.scholar-quick-ask-reasoning-pages { display: flex; align-items: center; gap: 6px; padding-top: 6px; }
+.scholar-quick-ask-view .scholar-quick-ask-reasoning-pages button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 3px;
+  box-shadow: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+}
+
+.scholar-quick-ask-message-assistant.is-streaming::after {
+  content: "▍";
+  color: var(--text-muted);
+  animation: scholar-quick-ask-cursor 1s steps(2, start) infinite;
+}
+
+@keyframes scholar-quick-ask-cursor {
+  to { visibility: hidden; }
+}
+
+.scholar-quick-ask-reasoning {
+  border-left: 2px solid var(--background-modifier-border);
+  padding-left: var(--size-4-2);
+  color: var(--text-muted);
+  font-size: 0.9em;
+  margin-bottom: 8px;
+}
+
+.scholar-quick-ask-error {
+  color: var(--text-error);
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+}
+
+.scholar-quick-ask-pending {
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px 0;
+  min-height: 0;
+  max-height: 35%;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+.scholar-quick-ask-pending[hidden] { display: none; }
+
+.scholar-quick-ask-context-panel {
+  flex: none;
+  min-width: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  overflow: clip;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-expand-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: auto;
+  min-height: 30px;
+  padding: 5px 10px;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  white-space: normal;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-expand-bar:hover {
+  background: var(--background-modifier-hover);
+}
+.scholar-quick-ask-expand-icon { display: flex; margin-left: auto; }
+.scholar-quick-ask-file-group + .scholar-quick-ask-selection-group {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.scholar-quick-ask-file-row,
+.scholar-quick-ask-selection-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-2-2);
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+}
+.scholar-quick-ask-file-row + .scholar-quick-ask-file-row,
+.scholar-quick-ask-selection-row + .scholar-quick-ask-selection-row {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.scholar-quick-ask-view button.scholar-quick-ask-selection-text {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-normal);
+  font: inherit;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-selection-text:hover {
+  color: var(--text-accent);
+}
+.scholar-quick-ask-pending.is-collapsed .scholar-quick-ask-selection-text > span {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.scholar-quick-ask-file-row .internal-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  margin: 0 0 0 auto;
+  padding: 3px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+}
+.scholar-quick-ask-view button.scholar-quick-ask-remove:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.scholar-quick-ask-composer {
+  --scholar-composer-surround: var(--background-primary);
+  padding: 8px 10px 6px;
+  background: transparent;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.scholar-quick-ask-composer-shell {
+  position: relative;
+  padding: 20px 10px 44px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 16px;
+  background: var(--background-primary);
+  transition: border-color 120ms ease;
+}
+.scholar-quick-ask-composer-shell:focus-within {
+  border-color: var(--interactive-accent);
+}
+.scholar-quick-ask-resize-handle {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  border-radius: 16px 16px 0 0;
+  cursor: ns-resize;
+  -webkit-app-region: no-drag;
+  touch-action: none;
+  user-select: none;
+}
+.scholar-quick-ask-resize-handle::before {
+  content: "";
+  position: absolute;
+  width: 36px;
+  height: 3px;
+  left: calc(50% - 18px);
+  top: 4px;
+  border-radius: 3px;
+  background: var(--text-faint);
+}
+.scholar-quick-ask-resize-handle:hover::before,
+.scholar-quick-ask-resize-handle.is-resizing::before,
+.scholar-quick-ask-resize-handle:focus-visible::before {
+  background: var(--interactive-accent);
+}
+.scholar-quick-ask-input {
+  height: 112px;
+  min-height: 64px;
+  overflow: hidden;
+}
+.scholar-quick-ask-composer .cm-editor {
+  height: 100%;
+  min-height: 0;
+  background: transparent;
+}
+.scholar-quick-ask-composer .cm-editor.cm-focused { outline: none; }
+.scholar-quick-ask-composer .cm-scroller {
+  overflow: auto;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-medium);
+  line-height: 1.5;
+}
+.scholar-quick-ask-composer .cm-content {
+  padding: 2px 0;
+}
+
+.scholar-quick-ask-chip {
+  display: inline-block;
+  border-radius: var(--radius-l);
+  background-color: var(--background-modifier-hover);
+  padding: 0 var(--size-2-2);
+  color: var(--link-color);
+  font-size: 95%;
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
+.scholar-quick-ask-chip.is-selected {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  outline: 1px solid var(--interactive-accent);
+}
+
+/* The controls form a rounded notch rising from the bottom edge. The input
+   surface surrounds their top, left and right instead of leaving a loose bar. */
+.scholar-quick-ask-composer-controls {
+  position: absolute;
+  right: 12px;
+  bottom: -1px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-bottom: none;
+  border-radius: 16px 16px 0 0;
+  background: var(--scholar-composer-surround);
+}
+.scholar-quick-ask-composer-shell:focus-within .scholar-quick-ask-composer-controls {
+  border-color: var(--interactive-accent);
+}
+.scholar-quick-ask-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: none;
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+}
+.scholar-quick-ask-send:hover { background: var(--interactive-accent-hover); }
+.scholar-quick-ask-send:disabled { opacity: 0.5; }
+.scholar-quick-ask-occupancy {
+  --scholar-quick-ask-occupancy: 0%;
+  --scholar-ring-color: var(--interactive-accent);
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+}
+.scholar-quick-ask-occupancy::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: conic-gradient(var(--scholar-ring-color) var(--scholar-quick-ask-occupancy), var(--background-modifier-border) 0);
+  mask: radial-gradient(transparent 52%, #000 56%);
+}
+.scholar-quick-ask-occupancy.is-warning { --scholar-ring-color: var(--color-orange); }
+.scholar-quick-ask-occupancy.is-error { --scholar-ring-color: var(--color-red); }
+.scholar-quick-ask-composer-controls .scholar-quick-ask-token-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: var(--layer-popover);
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: var(--shadow-s);
+}
+.scholar-quick-ask-composer-controls .scholar-quick-ask-token-panel[hidden] { display: none; }
+
+/* Only each rendered row is ours; the popup, scrolling and selection come
+   from Obsidian's public AbstractInputSuggest component. */
+.scholar-quick-ask-native-suggestion { min-width: 0; }
+.scholar-quick-ask-native-path {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+.scholar-quick-ask-pending.is-drag-over,
+.scholar-quick-ask-composer.is-drag-over {
+  outline: 2px solid var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.scholar-quick-ask-token-pill {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-1);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  background: transparent;
+  box-shadow: none;
+}
+
+.scholar-quick-ask-token-panel {
+  background-color: var(--background-secondary);
+  border-radius: var(--radius-s);
+  padding: var(--size-2-2) var(--size-2-3);
+}
+
+.scholar-quick-ask-token-detail {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--size-2-1) var(--size-2-3);
+  margin: 0;
+  font-size: var(--font-ui-smaller);
+}
+
+.scholar-quick-ask-compaction-running,
+.scholar-quick-ask-compaction-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-2-2);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: var(--size-2-2) 0;
+}
+
+.scholar-quick-ask-compaction-divider {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.scholar-quick-ask-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.scholar-quick-ask-new-session,
+.scholar-quick-ask-remove {
+  background: transparent;
+  box-shadow: none;
+  padding: var(--size-2-2);
+}
+
+.scholar-quick-ask-remove {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.scholar-quick-ask-remove:hover {
+  color: var(--text-normal);
+}
+
+.scholar-quick-ask-reasoning-text {
+  white-space: pre-wrap;
+  padding-top: var(--size-2-1);
+}
+
+.scholar-quick-ask-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--size-2-2);
+}
+
+.scholar-quick-ask-send.is-running {
+  color: var(--text-error);
+}
+
+.scholar-quick-ask-tool-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Quiet toolbar and an owned, anchored session list. Native Menu handles the
+   per-session actions; no host-private menu DOM or CSS is styled here. */
+.scholar-quick-ask-view button.scholar-quick-ask-new-session {
+  width: 30px;
+  height: 30px;
+  padding: 5px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  box-shadow: none;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-session-select:hover,
+.scholar-quick-ask-view button.scholar-quick-ask-new-session:hover { background: var(--background-modifier-hover); }
+.scholar-quick-ask-session-panel {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 10px;
+  right: 10px;
+  z-index: 1;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+.scholar-quick-ask-session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+.scholar-quick-ask-session-row:hover,
+.scholar-quick-ask-session-row:focus-within { background: var(--background-modifier-hover); }
+.scholar-quick-ask-view button.scholar-quick-ask-session-name,
+.scholar-quick-ask-view button.scholar-quick-ask-session-more {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 5px 7px;
+  margin: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+}
+.scholar-quick-ask-view button.scholar-quick-ask-session-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+}
+.scholar-quick-ask-session-name > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scholar-quick-ask-session-state { display: flex; flex: 0 0 14px; --icon-size: 14px; }
+.scholar-quick-ask-session-row.is-current .scholar-quick-ask-session-name { font-weight: var(--font-semibold); }
+.scholar-quick-ask-view button.scholar-quick-ask-session-more {
+  flex: 0 0 28px;
+  justify-content: center;
+  color: var(--text-muted);
+  --icon-size: 16px;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-session-more:hover { background: var(--background-modifier-hover); }
+.scholar-quick-ask-view button.scholar-quick-ask-send,
+.scholar-quick-ask-view button.scholar-quick-ask-occupancy {
+  width: 32px;
+  height: 32px;
+  border: 1px solid color-mix(in oklch, var(--text-normal) 12%, var(--background-primary));
+  box-shadow: 0 2px 4px var(--background-modifier-box-shadow), inset 0 1px 0 rgb(255 255 255 / 14%);
+  transition: box-shadow 120ms ease, transform 80ms ease;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-send {
+  border-color: color-mix(in oklch, var(--interactive-accent) 80%, var(--text-normal));
+  background: linear-gradient(180deg, color-mix(in oklch, var(--interactive-accent) 86%, var(--text-on-accent)), var(--interactive-accent));
+  color: var(--text-on-accent);
+}
+.scholar-quick-ask-view button.scholar-quick-ask-send.is-running { color: var(--text-on-accent); }
+.scholar-quick-ask-view button.scholar-quick-ask-occupancy {
+  background: linear-gradient(180deg, rgb(255 255 255 / 12%), transparent), color-mix(in oklch, var(--text-normal) 4%, var(--background-primary));
+}
+.scholar-quick-ask-view button.scholar-quick-ask-send:hover:not(:disabled),
+.scholar-quick-ask-view button.scholar-quick-ask-occupancy:hover:not(:disabled) {
+  box-shadow: 0 3px 6px var(--background-modifier-box-shadow), inset 0 1px 0 rgb(255 255 255 / 22%);
+}
+.scholar-quick-ask-view button.scholar-quick-ask-send:active:not(:disabled),
+.scholar-quick-ask-view button.scholar-quick-ask-occupancy:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px var(--background-modifier-box-shadow), inset 0 1px 2px var(--background-modifier-box-shadow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .scholar-quick-ask-view button.scholar-quick-ask-send,
+  .scholar-quick-ask-view button.scholar-quick-ask-occupancy { transition: none; }
+}
+
+/* A quiet secondary action inside the existing context detail popover. */
+.scholar-quick-ask-context-actions {
+  margin-top: var(--size-4-3);
+  padding-top: var(--size-4-2);
+  border-top: 1px solid var(--background-modifier-border);
+}
+.scholar-quick-ask-compact-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--size-4-2);
+  width: 100%;
+  padding: var(--size-4-2);
+  height: auto;
+  color: var(--text-normal);
+  background: transparent;
+  box-shadow: none;
+  border-radius: var(--radius-m);
+  font-size: var(--font-ui-small);
+  white-space: normal;
+}
+.scholar-quick-ask-compact-action:hover:not(:disabled) { background: var(--background-modifier-hover); }
+.scholar-quick-ask-compact-action:disabled { color: var(--text-faint); }
+.scholar-quick-ask-compact-action svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--text-muted); }
+.scholar-quick-ask-compact-hint { display: block; margin: var(--size-2-1) var(--size-4-2); color: var(--text-muted); line-height: 1.45; }
+
+.scholar-quick-ask-native-directory {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.scholar-quick-ask-chip.is-unsupported {
+  color: var(--text-error);
+  background: color-mix(in oklch, var(--text-error) 10%, var(--background-primary));
+  border-color: color-mix(in oklch, var(--text-error) 45%, var(--background-modifier-border));
+}

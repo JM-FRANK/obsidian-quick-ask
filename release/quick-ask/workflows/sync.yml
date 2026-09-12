@@ -1,0 +1,62 @@
+name: Pull Quick Ask from upstream
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_commit:
+        description: Full 40-character Scholar Workbench commit SHA
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: quick-ask-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: downstream
+      - name: Validate upstream configuration
+        env:
+          UPSTREAM_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY }}
+          UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+        run: |
+          test -n "$UPSTREAM_REPOSITORY" || { echo 'Configure UPSTREAM_REPOSITORY first'; exit 1; }
+          [[ "$UPSTREAM_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.UPSTREAM_REPOSITORY }}
+          ref: ${{ inputs.upstream_commit }}
+          token: ${{ secrets.UPSTREAM_READ_TOKEN || github.token }}
+          persist-credentials: false
+          path: upstream
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Export, test and rebuild
+        env:
+          UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+        run: |
+          node upstream/scripts/quick-ask-export.cjs --source upstream --ref "$UPSTREAM_COMMIT" --out downstream
+          cd downstream
+          npm ci
+          npm run build
+          npm test
+          npm run check
+      - name: Open synchronization PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+        run: |
+          cd downstream
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .
+          git diff --cached --quiet && exit 0
+          branch="sync/quick-ask-$UPSTREAM_COMMIT"
+          git switch -c "$branch"
+          git commit -m "Sync Quick Ask from $UPSTREAM_COMMIT"
+          git push origin "$branch"
+          gh pr create --head "$branch" --title "Sync Quick Ask from $UPSTREAM_COMMIT" --body 'Generated and tested from the upstream commit. Review and merge before preparing a release.'

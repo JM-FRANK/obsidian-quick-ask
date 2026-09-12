@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-quick-ask",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node release/quick-ask/build.cjs --out .",
+    "check": "node release/quick-ask/build.cjs --out . --check",
+    "test": "node --test --test-concurrency=1 tests/quick-ask-composer-state.cjs tests/quick-ask-file-picker.cjs tests/quick-ask-file-input.cjs tests/quick-ask-sessions.cjs tests/quick-ask-settings.cjs tests/quick-ask-session-navigation.cjs tests/quick-ask-composer-layout.cjs tests/quick-ask-pending-context.cjs tests/quick-ask-conversation.cjs tests/quick-ask-conversation-messages.cjs tests/quick-ask-stream-presentation.cjs tests/quick-ask-compaction.cjs tests/quick-ask-compaction-integration.cjs tests/quick-ask-tokens.cjs",
+    "sync": "node scripts/quick-ask-export.cjs --out .",
+    "release:draft": "node scripts/quick-ask-release.cjs"
+  },
+  "dependencies": {
+    "@lezer/markdown": "1.7.2",
+    "diff": "8.0.2",
+    "eventsource-parser": "3.0.6",
+    "zustand": "5.0.8"
+  },
+  "devDependencies": {
+    "@codemirror/commands": "6.8.1",
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "esbuild": "0.25.9"
+  }
+}
