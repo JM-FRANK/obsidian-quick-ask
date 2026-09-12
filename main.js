@@ -401,7 +401,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 //
-// ## diff 8.0.2 (BSD-3-Clause)
+// ## diff 8.0.3 (BSD-3-Clause)
 //
 // BSD 3-Clause License
 //
@@ -31580,7 +31580,7 @@ var require_word = __commonJS({
     exports2.diffWordsWithSpace = diffWordsWithSpace;
     var base_js_12 = require_base();
     var string_js_1 = require_string();
-    var extendedWordChars = "a-zA-Z0-9_\\u{C0}-\\u{FF}\\u{D8}-\\u{F6}\\u{F8}-\\u{2C6}\\u{2C8}-\\u{2D7}\\u{2DE}-\\u{2FF}\\u{1E00}-\\u{1EFF}";
+    var extendedWordChars = "a-zA-Z0-9_\\u{AD}\\u{C0}-\\u{D6}\\u{D8}-\\u{F6}\\u{F8}-\\u{2C6}\\u{2C8}-\\u{2D7}\\u{2DE}-\\u{2FF}\\u{1E00}-\\u{1EFF}";
     var tokenizeIncludingWhitespace = new RegExp("[".concat(extendedWordChars, "]+|\\s+|[^").concat(extendedWordChars, "]"), "ug");
     var WordDiff = (
       /** @class */
@@ -31606,9 +31606,16 @@ var require_word = __commonJS({
             if (segmenter.resolvedOptions().granularity != "word") {
               throw new Error('The segmenter passed must have a granularity of "word"');
             }
-            parts = Array.from(segmenter.segment(value), function(segment) {
-              return segment.segment;
-            });
+            parts = [];
+            for (var _i = 0, _a = Array.from(segmenter.segment(value)); _i < _a.length; _i++) {
+              var segmentObj = _a[_i];
+              var segment = segmentObj.segment;
+              if (parts.length && /\s/.test(parts[parts.length - 1]) && /\s/.test(segment)) {
+                parts[parts.length - 1] += segment;
+              } else {
+                parts.push(segment);
+              }
+            }
           } else {
             parts = value.match(tokenizeIncludingWhitespace) || [];
           }
@@ -32235,9 +32242,9 @@ var require_parse = __commonJS({
           if (/^(---|\+\+\+|@@)\s/.test(line)) {
             break;
           }
-          var header = /^(?:Index:|diff(?: -r \w+)+)\s+(.+?)\s*$/.exec(line);
-          if (header) {
-            index.index = header[1];
+          var headerMatch = /^(?:Index:|diff(?: -r \w+)+)\s+/.exec(line);
+          if (headerMatch) {
+            index.index = line.substring(headerMatch[0].length).trim();
           }
           i++;
         }
@@ -32258,14 +32265,14 @@ var require_parse = __commonJS({
         }
       }
       function parseFileHeader(index) {
-        var fileHeader = /^(---|\+\+\+)\s+(.*)\r?$/.exec(diffstr[i]);
-        if (fileHeader) {
-          var data = fileHeader[2].split("	", 2), header = (data[1] || "").trim();
+        var fileHeaderMatch = /^(---|\+\+\+)\s+/.exec(diffstr[i]);
+        if (fileHeaderMatch) {
+          var prefix = fileHeaderMatch[1], data = diffstr[i].substring(3).trim().split("	", 2), header = (data[1] || "").trim();
           var fileName = data[0].replace(/\\\\/g, "\\");
-          if (/^".*"$/.test(fileName)) {
+          if (fileName.startsWith('"') && fileName.endsWith('"')) {
             fileName = fileName.substr(1, fileName.length - 2);
           }
-          if (fileHeader[1] === "---") {
+          if (prefix === "---") {
             index.oldFileName = fileName;
             index.oldHeader = header;
           } else {
@@ -32630,11 +32637,27 @@ var require_create = __commonJS({
       return __assign.apply(this, arguments);
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.OMIT_HEADERS = exports2.FILE_HEADERS_ONLY = exports2.INCLUDE_HEADERS = void 0;
     exports2.structuredPatch = structuredPatch;
     exports2.formatPatch = formatPatch;
     exports2.createTwoFilesPatch = createTwoFilesPatch;
     exports2.createPatch = createPatch;
     var line_js_12 = require_line();
+    exports2.INCLUDE_HEADERS = {
+      includeIndex: true,
+      includeUnderline: true,
+      includeFileHeaders: true
+    };
+    exports2.FILE_HEADERS_ONLY = {
+      includeIndex: false,
+      includeUnderline: false,
+      includeFileHeaders: true
+    };
+    exports2.OMIT_HEADERS = {
+      includeIndex: false,
+      includeUnderline: false,
+      includeFileHeaders: false
+    };
     function structuredPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, options) {
       var optionsObj;
       if (!options) {
@@ -32745,17 +32768,29 @@ var require_create = __commonJS({
         };
       }
     }
-    function formatPatch(patch) {
+    function formatPatch(patch, headerOptions) {
+      if (!headerOptions) {
+        headerOptions = exports2.INCLUDE_HEADERS;
+      }
       if (Array.isArray(patch)) {
-        return patch.map(formatPatch).join("\n");
+        if (patch.length > 1 && !headerOptions.includeFileHeaders) {
+          throw new Error("Cannot omit file headers on a multi-file patch. (The result would be unparseable; how would a tool trying to apply the patch know which changes are to which file?)");
+        }
+        return patch.map(function(p) {
+          return formatPatch(p, headerOptions);
+        }).join("\n");
       }
       var ret = [];
-      if (patch.oldFileName == patch.newFileName) {
+      if (headerOptions.includeIndex && patch.oldFileName == patch.newFileName) {
         ret.push("Index: " + patch.oldFileName);
       }
-      ret.push("===================================================================");
-      ret.push("--- " + patch.oldFileName + (typeof patch.oldHeader === "undefined" ? "" : "	" + patch.oldHeader));
-      ret.push("+++ " + patch.newFileName + (typeof patch.newHeader === "undefined" ? "" : "	" + patch.newHeader));
+      if (headerOptions.includeUnderline) {
+        ret.push("===================================================================");
+      }
+      if (headerOptions.includeFileHeaders) {
+        ret.push("--- " + patch.oldFileName + (typeof patch.oldHeader === "undefined" ? "" : "	" + patch.oldHeader));
+        ret.push("+++ " + patch.newFileName + (typeof patch.newHeader === "undefined" ? "" : "	" + patch.newHeader));
+      }
       for (var i = 0; i < patch.hunks.length; i++) {
         var hunk = patch.hunks[i];
         if (hunk.oldLines === 0) {
@@ -32781,14 +32816,14 @@ var require_create = __commonJS({
         if (!patchObj) {
           return;
         }
-        return formatPatch(patchObj);
+        return formatPatch(patchObj, options === null || options === void 0 ? void 0 : options.headerOptions);
       } else {
         var callback_2 = options.callback;
         structuredPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, __assign(__assign({}, options), { callback: function(patchObj2) {
           if (!patchObj2) {
             callback_2(void 0);
           } else {
-            callback_2(formatPatch(patchObj2));
+            callback_2(formatPatch(patchObj2, options.headerOptions));
           }
         } }));
       }
@@ -32873,7 +32908,7 @@ var require_xml = __commonJS({
 
 // node_modules/diff/libcjs/index.js
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.canonicalize = exports.convertChangesToXML = exports.convertChangesToDMP = exports.reversePatch = exports.parsePatch = exports.applyPatches = exports.applyPatch = exports.formatPatch = exports.createPatch = exports.createTwoFilesPatch = exports.structuredPatch = exports.arrayDiff = exports.diffArrays = exports.jsonDiff = exports.diffJson = exports.cssDiff = exports.diffCss = exports.sentenceDiff = exports.diffSentences = exports.diffTrimmedLines = exports.lineDiff = exports.diffLines = exports.wordsWithSpaceDiff = exports.diffWordsWithSpace = exports.wordDiff = exports.diffWords = exports.characterDiff = exports.diffChars = exports.Diff = void 0;
+exports.canonicalize = exports.convertChangesToXML = exports.convertChangesToDMP = exports.reversePatch = exports.parsePatch = exports.applyPatches = exports.applyPatch = exports.OMIT_HEADERS = exports.FILE_HEADERS_ONLY = exports.INCLUDE_HEADERS = exports.formatPatch = exports.createPatch = exports.createTwoFilesPatch = exports.structuredPatch = exports.arrayDiff = exports.diffArrays = exports.jsonDiff = exports.diffJson = exports.cssDiff = exports.diffCss = exports.sentenceDiff = exports.diffSentences = exports.diffTrimmedLines = exports.lineDiff = exports.diffLines = exports.wordsWithSpaceDiff = exports.diffWordsWithSpace = exports.wordDiff = exports.diffWords = exports.characterDiff = exports.diffChars = exports.Diff = void 0;
 var base_js_1 = require_base();
 exports.Diff = base_js_1.default;
 var character_js_1 = require_character();
@@ -32964,6 +32999,15 @@ Object.defineProperty(exports, "createPatch", { enumerable: true, get: function(
 } });
 Object.defineProperty(exports, "formatPatch", { enumerable: true, get: function() {
   return create_js_1.formatPatch;
+} });
+Object.defineProperty(exports, "INCLUDE_HEADERS", { enumerable: true, get: function() {
+  return create_js_1.INCLUDE_HEADERS;
+} });
+Object.defineProperty(exports, "FILE_HEADERS_ONLY", { enumerable: true, get: function() {
+  return create_js_1.FILE_HEADERS_ONLY;
+} });
+Object.defineProperty(exports, "OMIT_HEADERS", { enumerable: true, get: function() {
+  return create_js_1.OMIT_HEADERS;
 } });
 var dmp_js_1 = require_dmp();
 Object.defineProperty(exports, "convertChangesToDMP", { enumerable: true, get: function() {

@@ -14,7 +14,7 @@ Ask AI about Markdown text and files you explicitly choose, directly in an Obsid
 
 ## Installation
 
-Quick Ask [1.0.0 is publicly available](https://github.com/JM-FRANK/obsidian-quick-ask/releases/tag/1.0.0). It is not yet listed in the community directory:
+Quick Ask is available from [GitHub Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases). It is not yet listed in the community directory:
 
 1. Download `main.js`, `manifest.json` and `styles.css` from [Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases).
 2. Create `.obsidian/plugins/quick-ask/` inside your Vault (use your Vault's actual configuration directory if customized).

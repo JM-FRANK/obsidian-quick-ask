@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — Community review fixes
+
+- Upgrade diff to 8.0.3, fixing GHSA-73rr-hh4g-fpgx in the bundled dependency.
+- Replace clip-path bubble tails with CSS border triangles and use traditional clipping for screen-reader-only labels.
+- Preserve the 1.13.7 minimum Obsidian version and accessible role labels.
+
 ## 1.0.0 — First standalone release
 
 - Ask AI about explicitly selected Markdown text and referenced files in a dedicated sidebar.
