@@ -1,3 +1,6 @@
+const { RENDERER_VERSION } = require("./prompt-renderer");
+const { REASONING_LEVELS, nextReasoningEffort } = require("./reasoning");
+const { safeSourceUrl } = require("./web-search");
 const { sessionNavigation, createSessionActionQueue, adoptUnassignedDraft } = require("./session-navigation");
 const { prepareSubmission, recoverSubmittedDraft } = require("./submission-state");
 const { createScrollFollow } = require("./stream-presentation");
@@ -202,7 +205,7 @@ class QuickAskView {
       }
       const body = ui.createEl(bubble, "div", { cls: "scholar-quick-ask-message-body" });
       if (entry.role === "assistant" && entry.settled !== false) {
-        void ui.renderMarkdown(body, entry.text, entry.sourcePath ?? "").then(() => this.scheduleFollow()).catch(() => {
+        void ui.renderMarkdown(body, entry.displayText ?? entry.text, entry.sourcePath ?? "").then(() => this.scheduleFollow()).catch(() => {
           body.style.whiteSpace = "pre-wrap"; ui.setText(body, entry.text); this.scheduleFollow();
         });
         if (entry.text) this.renderCopyButton(bubble, entry.text);
@@ -211,11 +214,44 @@ class QuickAskView {
         const retry = ui.createEl(bubble, "button", { text: this.t(this.getSettings(), "submission.retry"), attributes: { type: "button" } });
         retry.addEventListener("click", () => { void this.send(entry.retry); });
       }
+      if (entry.role === "assistant" && entry.sources?.length) this.renderSearchSources(bubble, entry.sources);
+      if (entry.role === "assistant" && entry.searchStatuses?.some(status => status.status === "failed"))
+        ui.createEl(bubble, "small", { cls: "scholar-quick-ask-search-status", text: this.t(this.getSettings(), "search.failed") });
       if (entry.role === "assistant" && entry.usage?.total) this.renderUsagePill(area, entry);
     }
     this.renderedMessages = [...this.messages];
     this.renderLive();
     if (this.scrollFollow.following) this.scrollToBottom();
+  }
+
+  renderSearchSources(parent, sources) {
+    const details = this.ui.createEl(parent, "details", { cls: "scholar-quick-ask-search-sources" });
+    this.ui.createEl(details, "summary", { text: this.t(this.getSettings(), "search.sources") });
+    for (const source of sources) {
+      const url = safeSourceUrl(source.url);
+      if (!url) continue;
+      this.ui.createEl(details, "a", { text: source.title || url,
+        attributes: { href: url, target: "_blank", rel: "noopener noreferrer", title: url } });
+    }
+  }
+
+  renderSearchButton(controls) {
+    const id = this.activeSessionId;
+    const enabled = id ? this.runtime?.searchEnabled?.(id) === true : false;
+    const route = id ? this.runtime?.nextSearchRoute?.(id) : null;
+    const button = this.ui.createEl(controls, "button", { cls: `scholar-quick-ask-web-search${enabled ? " is-active" : ""}`,
+      attributes: { type: "button", "aria-pressed": String(enabled) } });
+    this.ui.setIcon(button, "globe");
+    this.ui.setTooltip(button, `${this.t(this.getSettings(), enabled ? "search.on" : "search.off")}${enabled ? ` · ${route?.provider ?? ""}` : ""}`, { placement: "top" });
+    button.disabled = !id || this.loadingSessions || this.sessionActions.busy;
+    button.addEventListener("click", () => { void this.setWebSearch(!enabled); });
+  }
+
+  async setWebSearch(enabled) {
+    if (!this.activeSessionId) return;
+    try { await this.runtime.setSearchEnabled(this.activeSessionId, enabled); }
+    catch { this.ui.notice(this.t(this.getSettings(), "search.saveFailed")); }
+    if (this.mounted) this.renderSendButton();
   }
 
   makeReasoning(parent) {
@@ -350,6 +386,7 @@ class QuickAskView {
     }
     root.classList.toggle("hide-reasoning", !display.showReasoning);
     root.classList.toggle("hide-usage", !display.showUsage);
+    this.renderSendButton();
     this.scheduleConversationPaint();
   }
 
@@ -468,6 +505,14 @@ class QuickAskView {
       this.renderSendButton();
       return;
     }
+    if (projection.kind === "search-state" || projection.kind === "reasoning-effort") { this.renderSendButton(); return; }
+    if (projection.kind === "search-route" || projection.kind === "search-status") {
+      if (!this.roots.searchStatus) this.roots.searchStatus = this.ui.createEl(this.roots.composer, "div", { cls: "scholar-quick-ask-search-status", attributes: { role: "status" } });
+      const label = projection.kind === "search-route" ? (projection.route === "off" ? "search.off" : "search.route")
+        : projection.status === "running" ? "search.running" : projection.status === "failed" ? "search.failed" : "search.complete";
+      this.ui.setText(this.roots.searchStatus, `${this.t(this.getSettings(), label)}${projection.provider && projection.provider !== "off" ? ` · ${projection.provider}` : ""}${projection.code ? ` (${projection.code})` : ""}`);
+      return;
+    }
     if (projection.kind === "compaction-idle") {
       this.compacting = false;
       this.resetLive(); this.renderConversation();
@@ -500,6 +545,7 @@ class QuickAskView {
       this.renderSendButton();
       return;
     }
+    if (projection.kind === "tool-status" && projection.status?.kind === "search") return;
     if (projection.kind === "tool-status") {
       this.toolStatus = projection.status;
       this.renderConversation();
@@ -620,6 +666,8 @@ class QuickAskView {
       unsupportedLabel: this.t(settings, "composer.unsupportedFile"),
       createFileSuggester: this.environment.ui.createFileSuggester,
       onSubmit: () => { void this.send(); },
+      commandAvailable: command => command !== "compact" || (!this.compacting && !this.sending && this.runtime?.snapshot?.(this.activeSessionId)?.status !== "running"),
+      onCommand: command => { if (command === "web_search") void this.setWebSearch(true); else if (command === "compact") void this.compactContext(); },
       onChange: () => {
         const draft = this.drafts.get(this.activeSessionId);
         if (draft?.failedSubmission) draft.failedSubmission.restored = false;
@@ -649,7 +697,19 @@ class QuickAskView {
     // Capture before CodeMirror handles a URI as plain text. Files may land
     // anywhere in this Quick Ask pane; selected prose keeps its narrower target.
     dropRegion.addEventListener("drop", event => { void this.handleDrop(event, event.target); }, true);
-    const controls = this.ui.createEl(this.roots.shell, "div", { cls: "scholar-quick-ask-composer-controls" });
+    const footer = this.ui.createEl(this.roots.shell, "div", { cls: "scholar-quick-ask-composer-footer" });
+    const effort = this.ui.createEl(footer, "span", {
+      cls: "scholar-quick-ask-effort", attributes: { role: "button", tabindex: "0" },
+    });
+    this.roots.effort = effort;
+    const cycle = () => {
+      if (this.activeSessionId && this.runtime) this.runtime.setReasoningEffort(this.activeSessionId, nextReasoningEffort(this.runtime.reasoningEffort(this.activeSessionId)));
+    };
+    effort.addEventListener("click", cycle);
+    effort.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); cycle(); }
+    });
+    const controls = this.ui.createEl(footer, "div", { cls: "scholar-quick-ask-composer-controls" });
     this.roots.controls = controls;
     this.renderSendButton();
 
@@ -747,11 +807,18 @@ class QuickAskView {
     const ui = this.ui;
     const controls = this.roots.controls;
     if (!controls) return;
+    if (this.roots.effort) {
+      const level = this.runtime?.reasoningEffort(this.activeSessionId) ?? "high";
+      this.roots.effort.textContent = REASONING_LEVELS[level];
+      this.roots.effort.setAttribute("aria-label", `${this.t(this.getSettings(), "reasoning.effort")}: ${REASONING_LEVELS[level]}`);
+      this.ui.setTooltip(this.roots.effort, this.t(this.getSettings(), "reasoning.cycle"), { placement: "top" });
+    }
     // One rebuild of the whole action row keeps the ring and the action from
     // accumulating duplicates across repeated renders.
     if (this.roots.occupancyPanel) this.tokenPanels?.delete(this.roots.occupancyPanel);
     ui.clear(controls);
     this.renderOccupancyRing(controls);
+    this.renderSearchButton(controls);
     const running = this.streaming?.status === "running" || this.sending;
     const compacting = this.compacting === true;
     const button = ui.createEl(controls, "button", {
@@ -856,14 +923,20 @@ class QuickAskView {
     if (!retrySubmission && this.composer?.isEditingReference) return null;
     if (this.runtime.snapshot?.(this.activeSessionId)?.status === "running") return null;
     const sessionId = this.activeSessionId;
+    const webSearch = this.runtime.searchEnabled(sessionId);
+    const webSearchRevision = this.runtime.searchRevision(sessionId);
+    const reasoning = this.runtime.reasoningEffort(sessionId);
     const captured = this.captureDraft();
     const submission = retrySubmission ?? {
       draft: captured.composer, pending: captured.pending,
       question: (this.composer?.text ?? "").trim(), references: [...(this.composer?.paths ?? [])],
     };
     if (!submission.question) return null;
+    submission.rendererVersion ??= RENDERER_VERSION;
     const validation = this.runtime.validateForSend?.(this.runtime.stateFor(sessionId));
     if (validation && !validation.valid) { this.showValidationError(validation.errors); return { status: "invalid" }; }
+    const searchValidation = this.runtime.validateSearchForSend(sessionId, webSearch);
+    if (!searchValidation.valid) { this.showValidationError(searchValidation.errors); return { status: "invalid", errors: searchValidation.errors }; }
     this.roots.validation?.remove?.(); this.roots.validation = null;
     this.sending = true;
     const prepared = prepareSubmission(this.messages,
@@ -886,7 +959,7 @@ class QuickAskView {
     try {
       const additions = submission.additions ?? await this.stagedMutations(submission.references, submission.pending.selections, sessionId);
       submission.additions = additions;
-      result = await this.runtime.send(sessionId, submission.question, { additions });
+      result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion });
     } catch {
       result = { status: "failed", accepted: false };
       this.environment.ui.notice(this.t(this.getSettings(), "composer.failed"));
@@ -913,6 +986,7 @@ class QuickAskView {
       this.settlingReasoning = this.liveParts?.reasoning ?? null;
       if (result.text || result.reasoning) this.messages.push({
         role: "assistant", text: result.text ?? "", reasoning: result.reasoning ?? "", settled: true,
+        sources: result.sources ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
         usage: this.usage ?? null, model: (this.getConfig?.(sessionId) ?? {}).model ?? null,
       });
       this.streaming = null;
@@ -939,7 +1013,7 @@ class QuickAskView {
     if (failed?.submission || this.lastSubmission) return this.send(failed?.submission ?? this.lastSubmission);
     const turn = this.runtime.stateFor(this.activeSessionId)?.turn;
     if (turn?.question) return this.send({ question: turn.question, draft: turn.question, references: [],
-      pending: { files: [], selections: [] }, additions: turn.additions ?? [] });
+      pending: { files: [], selections: [] }, additions: turn.additions ?? [], rendererVersion: turn.rendererVersion });
     return null;
   }
 
@@ -998,7 +1072,7 @@ class QuickAskView {
   }
 
   showValidationError(errors) {
-    const key = errors?.baseUrl ? "composer.validationBaseUrl"
+    const key = errors?.protocol ? "composer.validationProtocol" : errors?.searchServer ? "search.invalidServer" : errors?.searchProvider ? "search.invalidProvider" : errors?.searchSecret ? "search.missingSecret" : errors?.baseUrl ? "composer.validationBaseUrl"
       : errors?.contextWindowTokens ? "composer.validationContextWindow"
         : "composer.validationRequired";
     this.roots.validation?.remove?.();
@@ -1079,6 +1153,7 @@ class QuickAskView {
   // reconciles still-tracked files with one cached read each.
   async activateSession(id, { recover = false } = {}) {
     const generation = ++this.activationGeneration;
+    this.roots.searchStatus?.remove(); this.roots.searchStatus = null;
     this.lastSubmission = null;
     this.settlingReasoning = null;
     this.cancelConversationPaint();
@@ -1315,17 +1390,19 @@ class QuickAskView {
   }
 }
 
-function createQuickAskViewClass(ItemView) {
+// Obsidian calls getViewType() during super(leaf). Keep host-facing metadata
+// in the class closure, where it exists before any instance/controller fields.
+function createQuickAskViewClass(ItemView, { viewType = QUICK_ASK_VIEW_TYPE, getDisplayText = () => "Quick Ask" } = {}) {
   return class QuickAskItemView extends ItemView {
     constructor(leaf, options) {
       super(leaf);
       this.contentEl.addClass("scholar-quick-ask-view");
-      this.controller = new QuickAskView(leaf, options);
+      this.controller = new QuickAskView(leaf, { ...options, viewType });
       this.controller.contentEl = this.contentEl;
     }
-    getViewType() { return this.controller.getViewType(); }
-    getDisplayText() { return this.controller.getDisplayText(); }
-    getIcon() { return this.controller.getIcon(); }
+    getViewType() { return viewType; }
+    getDisplayText() { return getDisplayText(); }
+    getIcon() { return "message-circle-question"; }
     async onOpen() { await this.controller.onOpen(); }
     async onClose() { await this.controller.onClose(); }
   };

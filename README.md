@@ -1,20 +1,30 @@
 # Quick Ask
 
+**English** · [简体中文](README_zh.md)
+
 [Repository](https://github.com/JM-FRANK/obsidian-quick-ask) · [Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases) · [Changelog](CHANGELOG.md)
 
 Ask AI about Markdown text and files you explicitly choose, directly in an Obsidian sidebar. Keep conversation history locally and control what becomes context for each conversation.
 
-## Features
+![Quick Ask sidebar with a tracked file, a selected passage and a streamed answer](ui-showcase.png)
 
-- Add selected Markdown text or reference Markdown files with `[[` (also `【【` with a Chinese IME).
-- Stream answers, show reasoning summaries when supplied by the provider, and manage multiple conversations.
-- Track changes to files already added to a conversation and compact long conversation context.
-- Customize display preferences and export/import local sessions.
-- Open the sidebar from the ribbon or the **Quick Ask: Open sidebar** command; assign a hotkey in Obsidian if desired.
+## Why Quick Ask
+
+- **Lightweight.** One focused sidebar plugin: about 1.3 MiB installed (≈306 KiB gzipped), no plugin telemetry and no developer-operated backend. It runs no background timers or polling, downloads nothing at runtime, and contacts your provider only when you submit. Conversations are plain append-only JSONL files under the plugin folder — a new session starts under 1 KB and grows with the full text you track — and never leave your Vault.
+- **Ask and answer immediately.** Open the sidebar, type a question and submit it; selected text and referenced files are staged and sent in a single step.
+- **Comfortable drag and drop.** Drag a text selection or a file from the file explorer straight into the composer, and remove any staged reference before sending.
+- **Refined interface.** Native Obsidian controls with theme-aware bubbles, readable reasoning, and a configurable display style (assistant tint, font size and paragraph spacing).
+- **Token-efficient context.** You decide what enters a conversation; tracked files send only their changed text and long conversations compact automatically, so each request stays small.
 
 ## Installation
 
-Quick Ask is available from [GitHub Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases). It is not yet listed in the community directory:
+Quick Ask is available in the Obsidian community plugin directory. Installing it from there is recommended:
+
+1. Open **Settings → Community plugins → Browse**.
+2. Search for **Quick Ask** and select **Install**.
+3. Enable **Quick Ask**, open its settings and configure your provider before submitting a question.
+
+You can also install it manually from [GitHub Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases):
 
 1. Download `main.js`, `manifest.json` and `styles.css` from [Releases](https://github.com/JM-FRANK/obsidian-quick-ask/releases).
 2. Create `.obsidian/plugins/quick-ask/` inside your Vault (use your Vault's actual configuration directory if customized).
@@ -25,7 +35,13 @@ Quick Ask is available from [GitHub Releases](https://github.com/JM-FRANK/obsidi
 
 Requires **Obsidian 1.13.7+ on desktop**. Mobile is not supported. Settings use Obsidian's 1.13 declarative settings and named secret storage.
 
-Configure a **Base URL**, **model**, and **named API secret**. For OpenAI, an example Base URL is `https://api.openai.com/v1`; do not append `/responses`. Other endpoints must support the Responses API used by this plugin. A Chat Completions-only endpoint is not sufficient. No model or API access is included with the plugin.
+Configure a **request protocol**, **Base URL**, **model**, and **named API secret**. Choose Responses (default) or Chat Completions explicitly to match your service. For OpenAI, an example Base URL is `https://api.openai.com/v1`; do not append `/responses` or `/chat/completions`. Protocol changes apply to new sessions only; existing sessions keep their protocol and the plugin never auto-switches after errors. No model or API access is included with the plugin.
+
+Chat Completions uses local conversation replay and model-generated structured summaries for compaction. Server-side search is unavailable for that protocol; select DuckDuckGo or a configured independent search API instead.
+
+Use the plain effort label inside the Composer to cycle Off / Low / High / XHigh / Max, or use the command palette's Quick Ask reasoning-effort command. High is the default. Changes apply to the next question; the provider decides which requested levels it supports. Readable Chat Completions reasoning is shown when returned by the API.
+
+New file context and full-file tool results include physical line numbers for citations. Source notes remain unchanged. Search/effort clicks stay in memory until a question starts, so unsent choices are not retained across plugin restart.
 
 Select Markdown text or add a Markdown file as context, type a question and submit it. The model may request the complete contents of files already included in that conversation. It cannot search arbitrary files or edit your notes. PDF/image input is not supported in this release. Interface language supports English and Simplified Chinese, with some remaining English interface text.
 
@@ -33,7 +49,7 @@ Select Markdown text or add a Markdown file as context, type a question and subm
 
 The plugin itself is free and requires no Quick Ask account. Your selected AI provider may require an account, API key or paid credits; its API usage and pricing apply separately. An AI chat subscription does not necessarily include API access.
 
-Quick Ask connects to the **Base URL you configure**, such as OpenAI or another Responses-compatible service. It sends prompts, selected text, referenced file content and conversation context to generate answers and support token counting/compaction. During an active request, follow-up model/tool calls may send updated or complete contents of previously added files. Recovery or deletion of older provider-stored responses can also contact that configured service. Merely opening/enabling the sidebar does not submit note content.
+Quick Ask connects to the **Base URL you configure**, such as OpenAI or another service compatible with the selected protocol. It sends prompts, selected text, referenced file content and conversation context to generate answers and support token counting/compaction. During an active request, follow-up model/tool calls may send updated or complete contents of previously added files. Recovery or deletion of older provider-stored responses can also contact that configured service. Merely opening/enabling the sidebar does not submit note content.
 
 No plugin telemetry, analytics, ads or separate developer-operated backend is included. The provider's own retention and privacy policies apply to data sent to it. Review your chosen provider's policies before using sensitive notes. The plugin does not install/update itself or download executable dependencies at runtime.
 
@@ -44,15 +60,9 @@ No plugin telemetry, analytics, ads or separate developer-operated backend is in
 - Optional preserved copies write plaintext backups to a Vault folder you choose. Clipboard export/import contains conversation content; secret values are excluded.
 - The plugin accesses files in the current Vault and its own plugin-data directory; it does not read files outside the Vault. Vault sync/backup tools may copy these files according to their own configuration.
 
-## Switching from Scholar Workbench
+## Development
 
-Quick Ask is generated from the same upstream feature implementation maintained in Scholar Workbench. It works independently; Scholar Workbench and ZotLit are not prerequisites.
-
-Disable Scholar Workbench's built-in Quick Ask when switching. Export sessions from its Quick Ask settings and import them into this plugin. Select the named API secret and configure the new plugin's endpoint/model again. Source sessions remain intact. Both installations have separate view identities and plugin directories; there is no automatic shared-history synchronization. Use separate plaintext backup directories if both remain enabled.
-
-## Development and releases
-
-Use Node.js 22:
+Clone this repository to develop or try changes locally:
 
 ```sh
 npm ci
@@ -61,9 +71,7 @@ npm test
 npm run check
 ```
 
-Make all feature and release-material changes in **Scholar Workbench** and synchronize a fixed commit. `upstream.json` records the source commit and file hashes; direct downstream source edits are rejected by the next sync. See [Maintainer workflow](docs/maintaining.md).
-
-For release preparation and the submission form, see [Community submission](docs/community-submission.md) and [Compatibility and validation](docs/compatibility.md). A draft release or passing tests does not imply community approval or complete manual platform validation.
+For bugs, questions or feature requests, [open an issue](https://github.com/JM-FRANK/obsidian-quick-ask/issues). Filing an issue is preferred: describe the behavior and how to reproduce it before proposing code changes.
 
 ## License
 

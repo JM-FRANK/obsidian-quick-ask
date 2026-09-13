@@ -1,10 +1,11 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EditorState } = require('@codemirror/state');
 const {
   fileReferenceField, referencesOf, referencesFrom, scanMarkers,
   stageReference, choosePath, questionText, referencedPaths, referenceAt, labelFor,
-  referenceDeletion, editingReferenceField, openReferenceEffect, closeReferenceEffect,
+  referenceDeletion, editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery,
 } = require('../src/quick-ask/composer-state');
 
 // A composer state is a real CodeMirror EditorState; the chip list is derived
@@ -275,4 +276,10 @@ test('a file dropped into an unfinished picker replaces the query instead of nes
   assert.equal(state.doc.toString(), 'Explain [[notes/a.md]] [[images/a.png]]');
   assert.equal(questionText(state), 'Explain');
   assert.deepEqual(referencedPaths(state, path => path.endsWith('.md')), ['notes/a.md']);
+});
+
+test('slash commands are confined to line starts and preserve other text', () => {
+  assert.deepEqual(slashQuery('draft\n/web', 10), { kind: 'command', query: 'web', from: 6, to: 10 });
+  assert.equal(slashQuery('https://x/web', 13), null);
+  assert.equal(slashQuery('words /web', 10), null);
 });

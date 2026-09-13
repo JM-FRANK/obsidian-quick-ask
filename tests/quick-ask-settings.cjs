@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
@@ -138,6 +139,7 @@ test('a session snapshots endpoint, model, credential reference, prompt, and cap
   };
   const snapshot = sessionConfigSnapshot(settings, { createdAt: '2026-09-12T00:00:00.000Z' });
   assert.deepEqual(snapshot, {
+    protocol: 'responses',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-chat',
     secretId: 'deepseek-key',
@@ -164,6 +166,39 @@ test('settings that leave the machine carry the secret reference only, never a v
   }
   assert.equal(JSON.stringify(redacted).includes('sk-live-secret-value'), false);
   assert.deepEqual(Object.keys(redacted).sort(), [
-    'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'model', 'preservedCopy', 'secretId', 'systemPrompt',
+    'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'model', 'preservedCopy', 'protocol', 'secretId', 'systemPrompt', 'webSearch',
   ]);
+});
+
+test('search preferences patch independently and export only named secrets',()=>{
+ const {applyQuickAskPatch}=require('../src/quick-ask/settings');
+ const {quickAskControlPatch,quickAskControlValue}=require('../src/quick-ask/settings-controls');
+ const target=normalizeQuickAskSettings({webSearch:{provider:'exa',secretId:'search-reference',defaultEnabled:true,apiKey:'PRIVATE_KEY'}});
+ applyQuickAskPatch(target,quickAskControlPatch('quickAsk.webSearch.defaultEnabled',false));
+ assert.equal(quickAskControlValue({quickAsk:target},'quickAsk.webSearch.defaultEnabled'),false);
+ assert.equal(target.webSearch.provider,'exa');assert.equal(target.webSearch.secretId,'search-reference');
+ assert.equal(JSON.stringify(redactQuickAskSettings(target)).includes('PRIVATE_KEY'),false);
+});
+
+
+test('search method defaults to DuckDuckGo and keeps provider secret references separate',()=>{
+ const {applyQuickAskPatch}=require('../src/quick-ask/settings');
+ const settings=normalizeQuickAskSettings({webSearch:{provider:'exa',secretId:'exa-ref'}});
+ assert.equal(normalizeQuickAskSettings({}).webSearch.provider,'duckduckgo');
+ applyQuickAskPatch(settings,{webSearch:{provider:'parallel'}});
+ assert.equal(settings.webSearch.secretId,'');
+ applyQuickAskPatch(settings,{webSearch:{secretId:'parallel-ref'}});
+ applyQuickAskPatch(settings,{webSearch:{provider:'exa'}});
+ assert.equal(settings.webSearch.secretId,'exa-ref');
+ assert.equal(settings.webSearch.secretIds.parallel,'parallel-ref');
+});
+
+test('search settings expose only the selected method configuration',()=>{
+ const {searchSettingsPage}=require('../src/quick-ask/settings-ui');
+ const make=provider=>{const data={language:'en',quickAsk:normalizeQuickAskSettings({webSearch:{provider}})};return searchSettingsPage({settings:data,current:()=>data},class {});};
+ assert.equal(make('duckduckgo').items.some(i=>i.render),false);
+ assert.equal(make('server').items.some(i=>i.render),false);
+ const exa=make('exa');assert.equal(exa.items.filter(i=>i.render).length,2);
+ assert.ok(exa.items.some(i=>i.name==='Exa API Key'));
+ assert.equal(exa.items.some(i=>i.name==='Parallel API Key'),false);
 });

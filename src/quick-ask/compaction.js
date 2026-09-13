@@ -1,3 +1,4 @@
+const { isUserMessage, callsFromItem, isToolOutput, toolOutputId } = require("./protocol");
 // Conversation compaction. The older canonical-item prefix is replaced by a
 // checkpoint at an explicit prefix discontinuity; the complete append-only
 // local history is never rewritten.
@@ -8,11 +9,15 @@
 // structured summary is requested through ordinary Responses instead.
 
 const { estimateItems, estimateText } = require("./tokens");
+const {
+  responsesCompactUrl, responsesInputTokensUrl, responsesResponseUrl,
+  isResponsesFunctionCall, isResponsesFunctionCallOutput,
+  isResponsesMessage, responsesMessageText, responsesInputTokenCount,
+} = require("./transport");
 
 const FALLBACK_SUMMARY_MAX_TOKENS = 8192;
 const TOOL_RESULT_CHARACTER_LIMIT = 2000;
 const RETAIN_RATIO = 0.16;
-const COMPACT_ENDPOINT = "/responses/compact";
 
 const SUMMARY_SECTIONS = [
   "Goal",
@@ -74,17 +79,17 @@ function chooseRetainedTail({ items = [], capacityTokens = 0 } = {}) {
     const size = estimateItems([item]);
     // A function call is never separated from its output: take the pair, or
     // neither.
-    if (item?.type === "function_call_output") {
+    if (isResponsesFunctionCallOutput(item)) {
       const call = items[index - 1];
-      const pairSize = size + (call?.type === "function_call" ? estimateItems([call]) : 0);
+      const pairSize = size + (isResponsesFunctionCall(call) ? estimateItems([call]) : 0);
       if (used + pairSize > budget && tail.length > 0) break;
       tail.unshift(item);
-      if (call?.type === "function_call") tail.unshift(call);
+      if (isResponsesFunctionCall(call)) tail.unshift(call);
       used += pairSize;
-      index -= call?.type === "function_call" ? 1 : 0;
+      index -= isResponsesFunctionCall(call) ? 1 : 0;
       continue;
     }
-    if (item?.type === "function_call") continue; // handled with its output
+    if (isResponsesFunctionCall(item)) continue; // handled with its output
     if (used + size > budget && tail.length > 0) break;
     tail.unshift(item);
     used += size;
@@ -110,6 +115,11 @@ function selectCompactionRange({ items = [], retained = [] } = {}) {
   // stays retained, so it never enters the compacted prefix; a prefix the
   // budget already chose is never shrunk.
   split = split === 0 ? minimumRetained : Math.min(split, minimumRetained);
+  // A native Chat Completions assistant message may call several tools.
+  // Move the split before the whole batch rather than leave orphaned outputs.
+  if (items.some(item => item?.role === "tool")) {
+    while (split > 0 && !isStructurallyBalanced(items.slice(0, split))) split--;
+  }
   const older = items.slice(0, split);
   const range = { from: 0, to: older.length - 1, items: older, retainedFrom: split };
   range.balanced = isStructurallyBalanced(older);
@@ -121,7 +131,7 @@ function selectCompactionRange({ items = [], retained = [] } = {}) {
 function newestTurnStart(items) {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    if (item?.type === "message" && item.role === "user") return index;
+    if (isUserMessage(item)) return index;
   }
   return Math.max(0, items.length - 1);
 }
@@ -131,9 +141,12 @@ function newestTurnStart(items) {
 function isStructurallyBalanced(items) {
   const calls = new Map();
   for (const item of items) {
-    if (item?.type === "function_call") calls.set(item.call_id ?? item.id, false);
-    if (item?.type === "function_call_output") {
-      const key = item.call_id ?? item.id;
+    for (const call of callsFromItem(item)) {
+      if (!call.callId || calls.has(call.callId)) return false;
+      calls.set(call.callId, false);
+    }
+    if (isToolOutput(item)) {
+      const key = toolOutputId(item);
       if (!calls.has(key)) return false;
       calls.set(key, true);
     }
@@ -279,7 +292,7 @@ function capabilityFromResponse(status, body) {
 async function requestOfficialCompaction({ network, baseUrl, apiKey, body, signal = null }) {
   let response;
   try { response = await network.request({
-    url: `${baseUrl}${COMPACT_ENDPOINT}`,
+    url: responsesCompactUrl(baseUrl),
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(body),
@@ -310,7 +323,7 @@ async function requestResponseRetrieval({ network, baseUrl, apiKey, responseId, 
   let response;
   try {
     response = await network.request({
-      url: `${baseUrl}/responses/${encodeURIComponent(responseId)}`,
+      url: responsesResponseUrl(baseUrl, responseId),
       method: "GET",
       headers: { Authorization: `Bearer ${apiKey}` },
       signal,
@@ -329,11 +342,7 @@ async function requestResponseRetrieval({ network, baseUrl, apiKey, responseId, 
   if (state === "in_progress" || state === "queued") return { status: "in_progress", raw: parsed };
   if (state === "completed" || state === "incomplete") {
     const output = Array.isArray(parsed.output) ? parsed.output : [];
-    const text = output
-      .filter((item) => item?.type === "message")
-      .flatMap((item) => item.content ?? [])
-      .map((block) => block.text ?? "")
-      .join("");
+    const text = output.filter(isResponsesMessage).map(responsesMessageText).join("");
     return { status: "completed", text, output, raw: parsed };
   }
   return { status: "error", error: `unrecognized response status ${state}` };
@@ -345,7 +354,7 @@ async function requestResponseRetrieval({ network, baseUrl, apiKey, responseId, 
 async function requestResponseDeletion({ network, baseUrl, apiKey, responseId, signal = null }) {
   try {
     const response = await network.request({
-      url: `${baseUrl}/responses/${encodeURIComponent(responseId)}`,
+      url: responsesResponseUrl(baseUrl, responseId),
       method: "DELETE",
       headers: { Authorization: `Bearer ${apiKey}` },
       signal,
@@ -372,13 +381,11 @@ function measureText(text) {
 // billed-free counting call, so it is attempted only near the configured limit
 // and only once per endpoint. An unsupported answer falls back to the marked
 // local estimate and lets /responses make the authoritative decision.
-const INPUT_TOKENS_ENDPOINT = "/responses/input_tokens";
-
 async function requestInputTokens({ network, baseUrl, apiKey, body, signal = null }) {
   let response;
   try {
     response = await network.request({
-      url: `${baseUrl}${INPUT_TOKENS_ENDPOINT}`,
+      url: responsesInputTokensUrl(baseUrl),
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -393,8 +400,9 @@ async function requestInputTokens({ network, baseUrl, apiKey, body, signal = nul
   if (capability === false) return { supported: false, status };
   if (!ok) return { supported: capability, status, error: safeParse(response?.text) };
   const parsed = typeof response.json === "object" && response.json !== null ? response.json : safeParse(response.text);
-  if (Number.isFinite(parsed?.input_tokens)) {
-    return { supported: true, inputTokens: parsed.input_tokens, raw: parsed };
+  const inputTokens = responsesInputTokenCount(parsed);
+  if (Number.isFinite(inputTokens)) {
+    return { supported: true, inputTokens, raw: parsed };
   }
   return { supported: null, status, error: "no input_tokens in the response" };
 }
@@ -403,8 +411,6 @@ module.exports = {
   FALLBACK_SUMMARY_MAX_TOKENS,
   TOOL_RESULT_CHARACTER_LIMIT,
   RETAIN_RATIO,
-  COMPACT_ENDPOINT,
-  INPUT_TOKENS_ENDPOINT,
   SUMMARY_SECTIONS,
   SUMMARY_PREAMBLE,
   buildSummaryInstruction,

@@ -242,16 +242,18 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       highlightMatches(element, text, matches) {
         renderMatches(element, text, matches);
       },
-      createFileSuggester({ input, getQuery, getPaths, onChoose }) {
+      createFileSuggester({ input, getQuery, getPaths, onChoose, commandAvailable = () => true }) {
         let visible = false;
         let disposed = false;
         let paths = null;
         let trigger = null;
         class FileSuggest extends AbstractInputSuggest {
-          getValue() { const query = getQuery(); return query ? `[[${query.query}` : ""; }
+          getValue() { const query = getQuery(); return query ? `${query.kind === "command" ? "/" : "[["}${query.query}` : ""; }
           getSuggestions() {
             const query = getQuery();
             if (!query) { paths = null; trigger = null; return []; }
+            if (query.kind === "command") return ["web_search", "compact"].filter(command => command.startsWith(query.query)).map(command => ({ kind: "command", command,
+              path: `/${command}`, label: `/${command}`, matches: [], disabled: !commandAvailable(command) }));
             if (!paths || trigger !== query.from) { paths = getPaths(); trigger = query.from; }
             const search = query.query ? prepareFuzzySearch(query.query) : null;
             return pickerOptions(paths, query.query, text => search?.(text) ?? null);
@@ -261,6 +263,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
             element.addClass("scholar-quick-ask-native-suggestion");
             element.style.maxWidth = `${Math.max(120, input.clientWidth - 16)}px`;
             element.setAttribute("title", option.path);
+            element.toggleClass("is-disabled", option.disabled === true);
+            element.setAttribute("aria-disabled", String(option.disabled === true));
             const label = element.createSpan({ cls: "scholar-quick-ask-native-path" });
             renderMatches(label, option.label, option.matches);
             if (option.directory) {
@@ -272,7 +276,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
             // Enter and Escape belong to the IME while it is composing, so a
             // composing key event never chooses a file even when the picker is
             // still rendered. A plain mouse selection is unaffected.
-            if (isCompositionEvent(event)) return;
+            if (isCompositionEvent(event) || option.disabled) return;
             event?.preventDefault();
             event?.stopPropagation();
             this.close();

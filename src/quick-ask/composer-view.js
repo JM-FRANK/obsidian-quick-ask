@@ -6,7 +6,7 @@ const { EditorView, ViewPlugin, WidgetType, Decoration, keymap, placeholder } = 
 const atomicRanges = EditorView.atomicRanges;
 const {
   fileReferenceField, referencesOf, choosePath, stageReferences, questionText, referencedPaths, referenceDeletion, labelFor,
-  editingReferenceField, openReferenceEffect, closeReferenceEffect,
+  editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery,
 } = require("./composer-state");
 const { activePickerQuery } = require("./file-picker");
 
@@ -119,6 +119,7 @@ const VISIBLE_ROWS = 6;
 
 function createComposerEditor({ parent, sidebar = parent, paths = [], createFileSuggester = null,
   isSupported = () => true, unsupportedLabel = "Unsupported file type",
+  onCommand = null, commandAvailable = () => true,
   placeholderText = "", onChange = () => {}, onSubmit = null,
 }) {
   let filePaths = paths;
@@ -127,6 +128,8 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   let refreshPending = false;
   const ownerDocument = parent.ownerDocument;
   function queryFor(state) {
+    const command = onCommand ? slashQuery(state.doc.toString(), state.selection.main.head) : null;
+    if (command) return command;
     const editing = state.field(editingReferenceField, false);
     const query = activePickerQuery(state.doc.toString(), state.selection.main.head, { editingFrom: editing?.from });
     return query ? { ...query, to: editing?.from === query.from ? editing.to : query.to } : null;
@@ -209,9 +212,15 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
       // its uncommitted text into the document, which must not be ranked.
       getQuery: () => (view.composing ? null : queryFor(view.state)),
       getPaths: () => typeof filePaths === "function" ? filePaths() : filePaths,
+      commandAvailable,
       onChoose: option => {
         const query = queryFor(view.state);
         if (!query || disposed) return;
+        if (option.kind === "command") {
+          if (!commandAvailable(option.command)) return;
+          view.dispatch({ changes: { from: query.from, to: query.to, insert: "" }, selection: { anchor: query.from } });
+          view.focus(); onCommand(option.command); return;
+        }
         view.dispatch(choosePath(view.state, option, query));
         view.focus();
       },

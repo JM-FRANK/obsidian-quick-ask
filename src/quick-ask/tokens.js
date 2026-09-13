@@ -5,6 +5,11 @@
 // The estimator uses the dsh-web rule of four characters per token plus a fixed
 // structural overhead per role and content block.
 
+const {
+  responsesUsageInputTokens, responsesUsageOutputTokens, responsesUsageTotalTokens,
+  responsesUsageCachedInputTokens, responsesUsageReasoningTokens,
+} = require("./transport");
+
 const CHARACTERS_PER_TOKEN = 4;
 const STRUCTURAL_OVERHEAD_TOKENS = 4;
 const ROLE_OVERHEAD_TOKENS = 4;
@@ -20,6 +25,9 @@ function estimateText(text) {
 // its payload directly rather than in a content array.
 function estimateItem(item) {
   if (!item || typeof item !== "object") return 0;
+  if ((typeof item.role === "string" && !item.type) || item.function) {
+    return STRUCTURAL_OVERHEAD_TOKENS + ROLE_OVERHEAD_TOKENS + estimateText(JSON.stringify(item));
+  }
   let tokens = STRUCTURAL_OVERHEAD_TOKENS + ROLE_OVERHEAD_TOKENS;
   const content = Array.isArray(item.content) ? item.content : [];
   for (const block of content) {
@@ -129,15 +137,23 @@ function createTurnUsage() {
     totals() {
       const included = [...attempts.values()].map((entry) => entry.terminal ?? entry.stream).filter(Boolean);
       if (included.length === 0) return { attempts: 0 };
-      const sum = (field) => included.reduce((total, usage) => total + (Number.isFinite(usage?.[field]) ? usage[field] : 0), 0);
+      const sum = (read) => included.reduce((total, usage) => {
+        const value = read(usage);
+        return total + (Number.isFinite(value) ? value : 0);
+      }, 0);
       const reports = (read) => included.every((usage) => Number.isFinite(read(usage)));
-      const totals = { attempts: included.length, input: sum("input_tokens"), output: sum("output_tokens"), total: sum("total_tokens") };
+      const totals = {
+        attempts: included.length,
+        input: sum(u => u.prompt_tokens ?? responsesUsageInputTokens(u)),
+        output: sum(u => u.completion_tokens ?? responsesUsageOutputTokens(u)),
+        total: sum(responsesUsageTotalTokens),
+      };
       // A nested detail counts as reported only when every attempt carries it,
       // and cached input is a detail of input rather than an extra input.
-      if (reports((usage) => usage?.input_tokens_details?.cached_tokens)) {
-        totals.cachedInput = included.reduce((total, usage) => total + usage.input_tokens_details.cached_tokens, 0);
-      }
-      if (reports((usage) => usage?.reasoning_tokens)) totals.reasoning = sum("reasoning_tokens");
+      const cachedInput = u => u.prompt_tokens_details?.cached_tokens ?? responsesUsageCachedInputTokens(u);
+      const reasoning = u => u.completion_tokens_details?.reasoning_tokens ?? responsesUsageReasoningTokens(u);
+      if (reports(cachedInput)) totals.cachedInput = sum(cachedInput);
+      if (reports(reasoning)) totals.reasoning = sum(reasoning);
       return totals;
     },
     attempts: () => attempts.size,

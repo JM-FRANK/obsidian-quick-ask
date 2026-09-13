@@ -1,7 +1,8 @@
+const { REASONING_LEVELS } = require("./reasoning");
 const { createQuickAskEnvironment } = require("./environment");
 const { normalizeQuickAskSettings } = require("./settings");
-const { QuickAskSessionStore, parseLog, CURRENT_SCHEMA_VERSION } = require("./sessions");
-const { Plugin, ItemView } = require("obsidian");
+const { QuickAskSessionStore, parseLog, isSupportedSession } = require("./sessions");
+const { Plugin, ItemView, SuggestModal } = require("obsidian");
 const { QUICK_ASK_VIEW_TYPE, quickAskViewType, quickAskCommandId } = require("./view-type");
 const { createConversation } = require("./conversation");
 const { createContextTracker } = require("./tracking");
@@ -144,7 +145,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     if (registered) return;
     // The view module loads only while registering on desktop.
     const { createQuickAskViewClass } = require("./view");
-    const View = createQuickAskViewClass(ItemView);
+    const View = createQuickAskViewClass(ItemView, { viewType, getDisplayText: () => t(settings(), "view.displayName") });
     registeredCreator = (leaf) => new View(leaf, {
       environment,
       viewType,
@@ -201,6 +202,28 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
         });
         if (available && !checking) environment.workspace.openView(viewType);
         return available;
+      },
+    });
+    let effortPicker = null;
+    registrations.register(() => effortPicker?.close());
+    registrations.addCommand({
+      id: "set-reasoning-effort",
+      name: t(settings(), "command.reasoningEffort"),
+      checkCallback: checking => {
+        const sessionId = sessionStore.index?.activeSessionId;
+        if (!registered || !sessionId) return false;
+        if (!checking) {
+          class EffortPicker extends SuggestModal {
+            getSuggestions(query) { return Object.keys(REASONING_LEVELS).filter(value => REASONING_LEVELS[value].toLowerCase().includes(query.toLowerCase())); }
+            renderSuggestion(value, element) { element.setText(`${REASONING_LEVELS[value]}${conversation.reasoningEffort(sessionId) === value ? " ✓" : ""}`); }
+            onChooseSuggestion(value) { if (registered && sessionStore.index?.sessions.some(session => session.id === sessionId)) conversation.setReasoningEffort(sessionId, value); }
+          }
+          effortPicker?.close();
+          const picker = effortPicker = new EffortPicker(plugin.app);
+          picker.setPlaceholder(t(settings(), "reasoning.effort"));
+          picker.open();
+        }
+        return true;
       },
     });
     registered = true;
@@ -283,7 +306,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
       for (const source of parsed.export.sessions) {
         if (!source || !/^[A-Za-z0-9_-]+$/.test(source.id) || !source.header || !Array.isArray(source.records) || source.header.sessionId !== source.id) return { status: "invalid", reason: "invalid-session" };
         const replay = parseLog([source.header, ...source.records].map(line => JSON.stringify(line)).join("\n") + "\n");
-        if (replay.damaged || replay.version !== CURRENT_SCHEMA_VERSION) return { status: "invalid", reason: "invalid-session" };
+        if (!isSupportedSession(replay)) return { status: "invalid", reason: "invalid-session" };
         source.title = replay.title;
       }
       const planned = planImport({
@@ -318,7 +341,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
         .map((record) => record.payload.responseId);
       const config = parsed.header?.config ?? {};
       let remoteFailures = 0;
-      if (responseIds.length > 0 && config.baseUrl) {
+      if ((config.protocol ?? "responses") === "responses" && responseIds.length > 0 && config.baseUrl) {
         for (const responseId of responseIds) {
           const result = await requestResponseDeletion({
             network: environment.network,
@@ -342,7 +365,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     retrieveResponse: async (sessionId, responseId) => {
       const parsed = await sessionStore.readLog(sessionId);
       const config = parsed.header?.config ?? {};
-      if (!config.baseUrl) return null;
+      if (!config.baseUrl || (config.protocol ?? "responses") !== "responses") return null;
       return requestResponseRetrieval({
         network: environment.network,
         baseUrl: config.baseUrl,

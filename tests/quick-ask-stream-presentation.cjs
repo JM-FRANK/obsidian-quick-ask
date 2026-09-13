@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createProjectionPublisher, reasoningPage, REASONING_PAGE_SIZE, createScrollFollow } = require('../src/quick-ask/stream-presentation');

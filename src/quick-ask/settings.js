@@ -1,3 +1,4 @@
+const { normalizeSearchSettings } = require("./web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("./i18n");
 const DISPLAY_FIELDS = {
   fontSize: { default: 14, min: 12, max: 24, step: 1 },
@@ -74,6 +75,8 @@ function defaultQuickAskSettings() {
   return {
     enable: true,
     display: normalizeDisplaySettings(),
+    webSearch: normalizeSearchSettings(),
+    protocol: "responses",
     baseUrl: "",
     secretId: "",
     model: "",
@@ -108,6 +111,8 @@ function normalizeQuickAskSettings(saved) {
   const values = {
     enable: typeof saved.enable === "boolean" ? saved.enable : defaults.enable,
     display: normalizeDisplaySettings(saved.display),
+    webSearch: normalizeSearchSettings(saved.webSearch),
+    protocol: typeof saved.protocol === "string" ? saved.protocol : defaults.protocol,
     baseUrl: normalizeBaseUrl(saved.baseUrl),
     secretId: typeof saved.secretId === "string" ? saved.secretId : defaults.secretId,
     model: typeof saved.model === "string" ? saved.model.trim() : defaults.model,
@@ -138,7 +143,7 @@ function baseUrlError(baseUrl) {
   const scheme = match[1].toLowerCase();
   if (scheme !== "http" && scheme !== "https") return "baseUrlScheme";
   const path = match[3] ?? "";
-  if (/\/responses\/?$/i.test(path)) return "baseUrlResponses";
+  if (/\/(?:responses|chat\/completions)\/?$/i.test(path)) return "baseUrlResponses";
   return null;
 }
 
@@ -148,6 +153,7 @@ function baseUrlError(baseUrl) {
 function validateQuickAskSettings(settings) {
   const values = normalizeQuickAskSettings(settings);
   const errors = {};
+  if (!["responses", "chat-completions"].includes(values.protocol)) errors.protocol = "protocol";
   const urlError = baseUrlError(values.baseUrl);
   if (urlError) errors.baseUrl = urlError;
   if (values.model.length === 0) errors.model = "model";
@@ -163,6 +169,7 @@ function validateQuickAskSettings(settings) {
 function sessionConfigSnapshot(settings, { createdAt } = {}) {
   const values = normalizeQuickAskSettings(settings);
   return {
+    protocol: values.protocol,
     baseUrl: values.baseUrl,
     model: values.model,
     secretId: values.secretId,
@@ -182,6 +189,8 @@ function redactQuickAskSettings(settings) {
   return {
     enable: values.enable,
     display: { ...values.display },
+    webSearch: { ...values.webSearch },
+    protocol: values.protocol,
     baseUrl: values.baseUrl,
     model: values.model,
     systemPrompt: values.systemPrompt,
@@ -220,9 +229,12 @@ module.exports = {
 
 function applyQuickAskPatch(target, patch) {
   if (!patch || typeof patch !== "object") return 0;
-  const normalized = normalizeQuickAskSettings({ ...target, ...patch, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
+  const search = { ...target.webSearch, ...patch.webSearch, secretIds: { ...target.webSearch?.secretIds, ...patch.webSearch?.secretIds } };
+  if (Object.hasOwn(patch.webSearch ?? {}, "secretId")) search.secretIds[search.provider] = patch.webSearch.secretId;
+  if (Object.hasOwn(patch.webSearch ?? {}, "provider") && patch.webSearch.provider !== target.webSearch?.provider) search.secretId = search.secretIds[patch.webSearch.provider] ?? "";
+  const normalized = normalizeQuickAskSettings({ ...target, ...patch, webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
   let applied = 0;
-  for (const field of ["enable", "baseUrl", "secretId", "model", "systemPrompt", "contextWindowTokens", "callLimit"]) {
+  for (const field of ["enable", "protocol", "baseUrl", "secretId", "model", "systemPrompt", "contextWindowTokens", "callLimit"]) {
     if (Object.hasOwn(patch, field) && target[field] !== normalized[field]) {
       target[field] = normalized[field];
       applied += 1;
@@ -235,6 +247,9 @@ function applyQuickAskPatch(target, patch) {
         applied += 1;
       }
     }
+  }
+  if (patch.webSearch && typeof patch.webSearch === "object" && JSON.stringify(target.webSearch) !== JSON.stringify(normalized.webSearch)) {
+    target.webSearch = normalized.webSearch; applied++;
   }
   if (patch.display && typeof patch.display === "object") {
     for (const field of Object.keys(normalized.display)) {

@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { activePickerQuery, isCompositionEvent, rankFiles, pickerOptions, MAX_RESULTS } = require('../src/quick-ask/file-picker');

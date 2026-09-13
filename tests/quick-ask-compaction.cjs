@@ -1,11 +1,13 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildSummaryInstruction, frameSummary, truncateToolResult, chooseRetainedTail,
   selectCompactionRange, isStructurallyBalanced, shrinkGate, CompactionTransaction,
   replayCompactionSurface, requestOfficialCompaction, measureItems, measureText,
-  TOOL_RESULT_CHARACTER_LIMIT, RETAIN_RATIO, SUMMARY_SECTIONS, SUMMARY_PREAMBLE, COMPACT_ENDPOINT,
+  TOOL_RESULT_CHARACTER_LIMIT, RETAIN_RATIO, SUMMARY_SECTIONS, SUMMARY_PREAMBLE,
 } = require('../src/quick-ask/compaction');
+const { responsesCompactUrl } = require('../src/quick-ask/transport');
 
 function message(text, role = 'user') {
   return { type: 'message', role, content: [{ type: 'input_text', text }] };
@@ -174,7 +176,7 @@ test('an explicit unsupported compact endpoint is a capability result, not an er
   const network = { request: async (options) => { calls.push(options); return { status: 404, text: 'not found' }; } };
   const result = await requestOfficialCompaction({ network, baseUrl: 'https://api.example.com/v1', apiKey: 'sk', body: {} });
   assert.equal(result.supported, false);
-  assert.equal(calls[0].url, `https://api.example.com/v1${COMPACT_ENDPOINT}`);
+  assert.equal(calls[0].url, responsesCompactUrl('https://api.example.com/v1'));
   assert.equal(calls[0].method, 'POST');
   assert.equal(calls[0].headers.Authorization, 'Bearer sk');
 });

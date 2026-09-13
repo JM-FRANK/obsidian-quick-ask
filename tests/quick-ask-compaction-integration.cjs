@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createConversation } = require('../src/quick-ask/conversation');
@@ -315,8 +316,8 @@ test('local replay sends the compacted surface and reintroduces still-tracked fi
     'the opaque Compaction Item is preserved exactly');
   // Every still-tracked Context File is reintroduced from its latest complete
   // original text, not from the diff history.
-  assert.equal(texts.some((text) => text.includes('# Alpha\nfull text\n')), true,
-    'the tracked file content is reintroduced verbatim');
+  assert.equal(texts.some((text) => text.includes('1 | # Alpha\n2 | full text\n3 | ')), true,
+    'the complete tracked file is reintroduced with physical line numbers');
 });
 
 test('replay closes an unmatched compaction bracket with an interrupted marker', async () => {

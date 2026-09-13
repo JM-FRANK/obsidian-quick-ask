@@ -191,6 +191,15 @@ function referenceDeletion(state, side) {
   return reference ? { selection: { anchor: reference.from, head: reference.to } } : null;
 }
 
+// The composer's own `/command` token: a slash command only lives at a line
+// start, so ordinary text and URLs never open the command picker.
+function slashQuery(text, caret) {
+  const before = String(text).slice(0, caret);
+  const from = before.lastIndexOf('\n') + 1;
+  const match = /^\/([a-z_]*)$/.exec(before.slice(from));
+  return match ? { kind: 'command', query: match[1], from, to: caret } : null;
+}
+
 module.exports = {
   fileReferenceField,
   editingReferenceField,
@@ -205,6 +214,7 @@ module.exports = {
   questionText,
   referencedPaths,
   referenceAt,
+  slashQuery,
   referenceDeletion,
   markerFor,
   labelFor,

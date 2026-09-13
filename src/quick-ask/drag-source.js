@@ -93,8 +93,8 @@ async function validateDrop({ capture, vault, normalizePath }) {
       from: at,
       to: at + capture.text.length,
       text: capture.text,
-      startLine: capture.startLine ?? null,
-      startColumn: capture.startColumn ?? null,
+      startLine: current.slice(0, at).split(/\r\n|\n|\r/).length,
+      startColumn: current.slice(0, at).split(/\r\n|\n|\r/).at(-1).length,
     },
   };
 }

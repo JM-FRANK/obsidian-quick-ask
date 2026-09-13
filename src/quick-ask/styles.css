@@ -330,8 +330,11 @@
 }
 
 .scholar-quick-ask-composer-shell {
+  --scholar-composer-button-size: 28.8px;
+  --scholar-composer-controls-top: 7px;
+  --scholar-composer-controls-bottom: 5px;
   position: relative;
-  padding: 20px 10px 44px;
+  padding: 20px 10px calc(var(--scholar-composer-button-size) + var(--scholar-composer-controls-top) + var(--scholar-composer-controls-bottom));
   border: 1px solid var(--background-modifier-border);
   border-radius: 16px;
   background: var(--background-primary);
@@ -411,13 +414,12 @@
 /* The controls form a rounded notch rising from the bottom edge. The input
    surface surrounds their top, left and right instead of leaving a loose bar. */
 .scholar-quick-ask-composer-controls {
-  position: absolute;
-  right: 12px;
+  position: relative;
   bottom: -1px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px 5px;
+  padding: var(--scholar-composer-controls-top) 10px var(--scholar-composer-controls-bottom);
   border: 1px solid var(--background-modifier-border);
   border-bottom: none;
   border-radius: 16px 16px 0 0;
@@ -715,3 +717,43 @@
   background: color-mix(in oklch, var(--text-error) 10%, var(--background-primary));
   border-color: color-mix(in oklch, var(--text-error) 45%, var(--background-modifier-border));
 }
+
+/* Search sits in the existing Composer action notch; the two original controls
+   are 90% of their former 32px size. */
+.scholar-quick-ask-view button.scholar-quick-ask-send,
+.scholar-quick-ask-view button.scholar-quick-ask-occupancy,
+.scholar-quick-ask-view button.scholar-quick-ask-web-search { width: var(--scholar-composer-button-size); height: var(--scholar-composer-button-size); min-width: var(--scholar-composer-button-size); padding: 5px; }
+.scholar-quick-ask-web-search {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--background-modifier-border); border-radius: 50%;
+  background: var(--background-secondary); color: var(--text-muted); box-shadow: var(--shadow-s);
+}
+.scholar-quick-ask-web-search.is-active {
+  color: var(--interactive-accent); border-color: var(--interactive-accent);
+  background: color-mix(in oklch, var(--interactive-accent) 15%, var(--background-primary));
+}
+.scholar-quick-ask-search-status { color: var(--text-muted); font-size: var(--font-ui-smaller); padding: 3px 6px; overflow-wrap: anywhere; }
+.scholar-quick-ask-search-sources { margin-top: 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scholar-quick-ask-search-sources a { display: block; overflow-wrap: anywhere; margin-top: 4px; }
+.scholar-quick-ask-native-suggestion.is-disabled { opacity: 0.45; }
+
+/* Effort is plain text on the Composer surface, outside the controls' notch. */
+.scholar-quick-ask-composer-footer {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  max-width: calc(100% - 20px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.scholar-quick-ask-effort {
+  flex: 0 0 auto;
+  padding: 4px 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  user-select: none;
+}
+.scholar-quick-ask-effort:hover { color: var(--text-normal); }
+.scholar-quick-ask-effort:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 3px; border-radius: 3px; }

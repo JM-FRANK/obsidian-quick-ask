@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
@@ -303,4 +304,23 @@ test('session ordering is deterministic for equal activity and creation times', 
     { id: 'old', created: '2026-09-01T00:00:00.000Z', lastActivity: '2026-09-01T00:00:00.000Z' },
     { id: 'new', created: '2026-09-09T00:00:00.000Z', lastActivity: '2026-09-09T00:00:00.000Z' },
   ]).map((session) => session.id), ['new', 'old']);
+});
+
+test('Chat Completions logs have a version boundary while existing Responses logs remain writable', async () => {
+  const { store } = makeStore();
+  const responses = await store.createSession({ config: { protocol: 'responses' } });
+  const chat = await store.createSession({ config: { protocol: 'chat-completions' } });
+  assert.equal(responses.header.schemaVersion, 1);
+  assert.equal(chat.header.schemaVersion, 2);
+  await store.append(responses.id, 'turn/started', { turnId: 'r' });
+  await store.append(chat.id, 'turn/started', { turnId: 'c' });
+  assert.equal((await store.readLog(chat.id)).records.length, 1);
+});
+
+test('import preserves a Chat Completions version and rejects a protocol/version mismatch', async () => {
+  const { store } = makeStore();
+  const header = { kind: 'header', schemaVersion: 2, sessionId: 'cc-import', title: 'CC', config: { protocol: 'chat-completions' } };
+  await store.importSession({ id: 'cc-import', header, records: [], title: 'CC' });
+  assert.equal((await store.readLog('cc-import')).header.config.protocol, 'chat-completions');
+  await assert.rejects(store.importSession({ id: 'bad-import', header: { ...header, schemaVersion: 1 }, records: [], title: 'CC' }), /unsupported/);
 });

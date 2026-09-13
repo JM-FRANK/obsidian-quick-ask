@@ -1,3 +1,4 @@
+const { normalizeSearchSettings } = require("./web-search");
 const { t } = require("./i18n");
 const { quickAskDisplayPage, baseUrlError, normalizeBaseUrl } = require("./settings");
 
@@ -41,6 +42,61 @@ function renderQuickAskDataActions(host, setting) {
     }));
 }
 
+const SEARCH_INFO = {
+  firecrawl: { name: "Firecrawl", url: "https://www.firecrawl.dev/", placeholder: "fc-…" },
+  exa: { name: "Exa", url: "https://dashboard.exa.ai/api-keys", placeholder: "API key" },
+  parallel: { name: "Parallel", url: "https://platform.parallel.ai/", placeholder: "API key" },
+  perplexity: { name: "Perplexity Search", url: "https://docs.perplexity.ai/", placeholder: "pplx-…" },
+};
+function searchSettingsPage(host, SecretComponent) {
+  const values = normalizeSearchSettings(host.current().quickAsk?.webSearch);
+  const info = SEARCH_INFO[values.provider];
+  const tr = key => t(host.settings, key);
+  const items = [
+    { name: tr("search.provider"), desc: tr("search.manualDescription"), control: { type: "dropdown", key: "quickAsk.webSearch.provider", options: {
+      duckduckgo: "DuckDuckGo", server: tr("search.serverOption"), ...Object.fromEntries(Object.entries(SEARCH_INFO).map(([id, info]) => [id, info.name])),
+    } } },
+    { name: tr("search.default"), desc: tr("search.defaultDescription"), control: { type: "toggle", key: "quickAsk.webSearch.defaultEnabled" } },
+  ];
+  if (values.provider === "duckduckgo") items.push({ name: "DuckDuckGo", desc: tr("search.duckHelp") });
+  else if (values.provider === "server") items.push({ name: tr("search.serverOption"), desc: tr("search.serverHelp") });
+  else if (info) {
+    items.push({ name: `${info.name} API Key`, desc: tr("search.keyHelp"), render: setting => {
+      setting.descEl.createEl("a", { text: tr("search.openProvider"), attr: { href: info.url, target: "_blank", rel: "noopener noreferrer" } });
+      let key = "", keyInput;
+      setting.addText(text => {
+        keyInput = text;
+        text.inputEl.type = "password";
+        text.inputEl.autocomplete = "new-password";
+        text.setPlaceholder(info.placeholder).onChange(value => { key = value; });
+      });
+      // Raw key stays in this transient password control and goes directly to
+      // public SecretStorage, never through the settings writer or a log.
+      setting.addButton(button => button.setButtonText(tr("search.saveKey")).onClick(async () => {
+        if (!key.trim()) { setting.setErrorMessage(tr("search.missingSecret")); return; }
+        if (host.current().quickAsk.webSearch.provider !== values.provider) return;
+        button.setDisabled(true);
+        try {
+          const id = `${host.plugin?.manifest?.id ?? "quick-ask"}-search-${values.provider}`;
+          host.app.secretStorage.setSecret(id, key.trim());
+          key = "";
+          keyInput.setValue("");
+          await host.setControlValue("quickAsk.webSearch.secretId", id);
+        } catch { setting.setErrorMessage(tr("search.saveFailed")); }
+        finally { button.setDisabled(false); }
+      }));
+    } });
+    items.push({ name: tr("search.savedKey"), desc: tr("search.savedKeyHelp"), render: setting => {
+      const validate = id => setting.setErrorMessage(host.app.secretStorage.getSecret(id ?? "")?.trim() ? "" : tr("search.missingSecret"));
+      new SecretComponent(host.app, setting.controlEl).setValue(values.secretId).onChange(async id => {
+        await host.setControlValue("quickAsk.webSearch.secretId", id ?? ""); validate(id);
+      });
+      validate(values.secretId);
+    } });
+  } else items.push({ name: tr("search.invalidProvider"), desc: tr("search.manualDescription") });
+  return { type: "page", name: tr("search.title"), desc: tr("search.manualDescription"), items };
+}
+
 function quickAskPage(host, SecretComponent) {
   const values = host.current().quickAsk;
   const quickAsk = host.quickAskIntegration;
@@ -51,6 +107,7 @@ function quickAskPage(host, SecretComponent) {
     desc: t(host.settings, "settings.page.quickAsk.desc"),
     items: [
       quickAskDisplayPage(host.settings),
+      searchSettingsPage(host, SecretComponent),
       {
         type: "group",
         heading: t(host.settings, "settings.group.quickAsk"),
@@ -59,6 +116,11 @@ function quickAskPage(host, SecretComponent) {
             name: t(host.settings, "settings.quickAsk.enable.name"),
             desc: t(host.settings, "settings.quickAsk.enable.desc"),
             control: { type: "toggle", key: "quickAsk.enable" },
+          },
+          {
+            name: t(host.settings, "settings.quickAsk.protocol.name"),
+            desc: t(host.settings, "settings.quickAsk.protocol.desc"),
+            control: { type: "dropdown", key: "quickAsk.protocol", options: { responses: "Responses", "chat-completions": "Chat Completions" } },
           },
           {
             name: t(host.settings, "settings.quickAsk.baseUrl.name"),
@@ -153,4 +215,4 @@ function quickAskPage(host, SecretComponent) {
 }
 
 
-module.exports = { quickAskPage };
+module.exports = { quickAskPage, searchSettingsPage };

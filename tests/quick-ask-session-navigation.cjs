@@ -1,3 +1,4 @@
+// quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { sessionNavigation, createSessionActionQueue, adoptUnassignedDraft, sessionMenuEntries } = require('../src/quick-ask/session-navigation');

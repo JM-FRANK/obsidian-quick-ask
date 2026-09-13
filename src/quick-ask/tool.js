@@ -30,12 +30,12 @@ function createToolExecutor({
   }
 
   function schedule(execute) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       queue.push({
         run: async () => {
           try {
             resolve(await execute());
-          } finally {
+          } catch (error) { reject(error); } finally {
             active -= 1;
             runNext();
           }
@@ -81,7 +81,18 @@ function createToolExecutor({
 
   // Execute one tool call from the model. `normalizePath` comes from the host's
   // public normalizePath so the requested path matches the allowlist exactly.
-  async function executeCall(call, { question, normalizePath = (value) => value, fitsInContext = () => true } = {}) {
+  async function executeCall(call, { question, normalizePath = (value) => value, fitsInContext = () => true, search = null, signal = null } = {}) {
+    if (call?.name === "web_search") {
+      return schedule(async () => {
+        if (signal?.aborted) return { ok: false, output: "Search cancelled", search: true };
+        if (!search) return { ok: false, output: "Web search is disabled for this question", search: true };
+        if (question.callsUsed >= question.callLimit) return { ok: false, output: "Tool call limit reached", search: true };
+        question.callsUsed++;
+        const result = await search(call.arguments?.query);
+        return { ok: result.ok, search: true, result, output: JSON.stringify({ untrusted: true, ...result }) };
+      });
+    }
+    if (signal?.aborted) return { ok: false, output: "Cancelled" };
     const requested = typeof call?.arguments?.path === "string"
       ? call.arguments.path
       : typeof call?.path === "string" ? call.path : "";

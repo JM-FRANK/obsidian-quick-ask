@@ -1,13 +1,21 @@
+const { normalizeReasoningEffort } = require("./reasoning");
+const { protocolFor, isUserMessage, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
+const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("./web-search");
+const { createSearchClient } = require("./search-client");
 const { createStore } = require("zustand/vanilla");
 const { createProjectionPublisher } = require("./stream-presentation");
-const { deriveTitle } = require("./sessions");
-const { buildRequestBody, streamAttempt, createRetryPolicy, normalizeError } = require("./transport");
-const { renderTurn, buildInstructions, GET_FULL_FILE_TOOL } = require("./prompt-renderer");
+const { deriveTitle, isSupportedSession } = require("./sessions");
+const {
+  streamAttempt, createRetryPolicy, normalizeError,
+  isResponsesFunctionCall,
+  isResponsesWebSearchCall, responsesBuiltInTools,
+  parseToolArguments, isResponsesStateUnsupported, responsesUsageInputTokens,
+} = require("./transport");
+const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, GET_FULL_FILE_TOOL } = require("./prompt-renderer");
 const { validateQuickAskSettings, normalizeQuickAskSettings, ANSWER_RESERVE_TOKENS } = require("./settings");
-const { createToolLoop } = require("./tool-loop");
+const { createToolLoop, TOOL_NAMES } = require("./tool-loop");
 const { createToolExecutor } = require("./tool");
 const { createAbortController } = require("./transport");
-const { parseArguments } = require("./tool-loop");
 const {
   priceProspectiveRequest, capacityBudget, contextOccupancy, shouldCompact,
   createTurnUsage, createSessionUsage,
@@ -48,6 +56,49 @@ function createConversation(options) {
     getContextBudget = () => null,
   } = options;
 
+  const searchClient = createSearchClient(environment);
+  function toolsFor(state) {
+    const route = state.requestSearch;
+    return [protocolFor(state.config).functionTool(GET_FULL_FILE_TOOL), ...(route && route.kind !== "off" ? [route.kind === "server" ? route.tool : protocolFor(state.config).functionTool(WEB_SEARCH_TOOL)] : [])];
+  }
+  function searchEnabled(sessionId) {
+    const state = stateFor(sessionId);
+    return typeof state.searchEnabled === "boolean" ? state.searchEnabled : normalizeSearchSettings(getSettings()?.quickAsk?.webSearch).defaultEnabled;
+  }
+  // Draft controls stay in memory. Their request/post-send state is committed
+  // once in turn/started, after validation, rather than on every click.
+  async function setSearchEnabled(sessionId, enabled) {
+    const state = stateFor(sessionId);
+    state.searchRevision = (state.searchRevision ?? 0) + 1;
+    state.searchEnabled = enabled === true;
+    state.searchDirty = true;
+    pushProjection(state, { kind: "search-state", enabled: state.searchEnabled });
+    return state.searchEnabled;
+  }
+  function reasoningEffort(sessionId) {
+    const state = stateFor(sessionId);
+    return normalizeReasoningEffort(state.reasoningEffort ?? state.config?.reasoningEffort);
+  }
+  function setReasoningEffort(sessionId, value) {
+    const state = stateFor(sessionId);
+    state.reasoningEffort = normalizeReasoningEffort(value);
+    state.reasoningDirty = true;
+    pushProjection(state, { kind: "reasoning-effort", value: state.reasoningEffort });
+    return state.reasoningEffort;
+  }
+  function nextSearchRoute(sessionId) {
+    const state = stateFor(sessionId);
+    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), state.config);
+  }
+  function validateSearchForSend(sessionId, enabled = searchEnabled(sessionId)) {
+    const state = stateFor(sessionId);
+    const settings = normalizeSearchSettings(getSettings()?.quickAsk?.webSearch);
+    const route = searchRoute(enabled, settings, state.config);
+    const errors = {};
+    if (route.kind === "invalid") errors[route.error] = true;
+    if (route.kind === "independent" && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
+    return { valid: Object.keys(errors).length === 0, errors, route };
+  }
   // Per-session live state. Everything durable also lands in the JSONL log.
   const sessionStores = new Map();
   const publishers = new Map();
@@ -88,8 +139,15 @@ function createConversation(options) {
     const state = stateFor(sessionId);
     if (parsed.missing) throw new Error(`Quick Ask session ${sessionId} does not exist`);
     if (state.activeController || state.turn?.controller) return { state, parsed };
-    if (parsed.damaged || !parsed.header || parsed.version > 1) throw new Error("Quick Ask session is unavailable");
-    state.config = parsed.header?.config ?? null;
+    if (!parsed.header || !isSupportedSession(parsed)) throw new Error("Quick Ask session is unavailable");
+    state.config = { ...parsed.header?.config, protocol: parsed.header?.config?.protocol ?? "responses" };
+    protocolFor(state.config);
+    const draftSearch = state.searchDirty ? state.searchEnabled : undefined;
+    const draftEffort = state.reasoningDirty ? state.reasoningEffort : undefined;
+    state.reasoningEffort = undefined;
+    state.usage = createTurnUsage();
+    state.sessionUsage = createSessionUsage();
+    state.searchEnabled = undefined;
     state.items = [];
     state.compactedSurface = null;
     state.compactedItems = [];
@@ -98,6 +156,8 @@ function createConversation(options) {
     for (const record of parsed.records ?? []) {
       applyRecord(state, record);
     }
+    if (draftSearch !== undefined) state.searchEnabled = draftSearch;
+    if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
     return { state, parsed };
   }
@@ -105,6 +165,9 @@ function createConversation(options) {
   function applyRecord(state, record) {
     const payload = record.payload ?? {};
     switch (record.kind) {
+      case "session/search-state":
+        state.searchEnabled = payload.enabled === true;
+        break;
       case "item/input":
       case "item/output":
         if (payload.item) {
@@ -125,11 +188,18 @@ function createConversation(options) {
       case "turn/response-created":
         state.lastResponseId = payload.responseId ?? state.lastResponseId;
         break;
+      case "turn/usage":
+        recordUsage(state, [payload]);
+        break;
       case "turn/started":
+        if (typeof payload.nextSearchEnabled === "boolean") state.searchEnabled = payload.nextSearchEnabled;
+        if (payload.reasoningEffort) state.reasoningEffort = normalizeReasoningEffort(payload.reasoningEffort);
+        state.usage = createTurnUsage();
         state.turn = {
           turnId: payload.turnId,
           question: payload.question ?? "",
           additions: payload.additions ?? [],
+          rendererVersion: payload.rendererVersion ?? 1,
           status: "running",
           text: "",
           reasoning: "",
@@ -137,6 +207,7 @@ function createConversation(options) {
         };
         break;
       case "turn/finished":
+        state.sessionUsage.addTurn(state.usage.totals());
         if (state.turn && state.turn.turnId === payload.turnId) {
           state.turn = {
             ...state.turn,
@@ -155,7 +226,7 @@ function createConversation(options) {
   function requestInput(state, staged) {
     const turn = staged.continuation
       ? staged.continuation
-      : (staged.question ? renderTurn({ mutations: staged.additions, question: staged.question }) : []);
+      : (staged.question ? renderTurn({ mutations: staged.additions, question: staged.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: staged.rendererVersion ?? RENDERER_VERSION }) : []);
     if (state.storedState && state.lastResponseId) {
       // Server state is preferred: send only the new input.
       return { input: turn, previousResponseId: state.lastResponseId };
@@ -186,7 +257,7 @@ function createConversation(options) {
     const framed = checkpoint.checkpoint?.framed ?? checkpoint.framed;
     return [
       ...(checkpoint.providerOutput ?? []),
-      ...(framed ? [{ type: "message", role: "user", content: [{ type: "input_text", text: framed }] }] : []),
+      ...(framed ? [protocolFor(state.config).userMessage(framed)] : []),
       ...(state.compactedItems ?? []),
     ];
   }
@@ -202,24 +273,21 @@ function createConversation(options) {
     const tracked = typeof trackerFor(state.sessionId).trackedFiles === "function" ? trackerFor(state.sessionId).trackedFiles() : [];
     return tracked
       .filter((file) => typeof file.observedRawText === "string" && file.status !== "staged")
-      .map((file) => ({
-        type: "message",
-        role: "user",
-        content: [{
-          type: "input_text",
-          text: `<quick_ask_context>\n<context_file path="${file.path}" content_length="${file.observedRawText.length}">\n${file.observedRawText}\n</context_file>\n</quick_ask_context>`,
-        }],
-      }));
+      .map(file => protocolFor(state.config).userMessage(renderContextEnvelope([
+        { kind: "file", path: file.path, text: file.observedRawText },
+      ], { rendererVersion: RENDERER_VERSION })));
+
   }
 
   function buildBody(state, staged) {
     const config = state.config ?? {};
     const settings = normalizeQuickAskSettings(getSettings()?.quickAsk ?? config);
     const { input, previousResponseId } = requestInput(state, staged);
-    return buildRequestBody({
-      instructions: buildInstructions({ customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
+    return protocolFor(state.config).buildRequestBody({
+      reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
+      instructions: buildInstructions({ rendererVersion: staged.rendererVersion ?? RENDERER_VERSION, customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
       input,
-      tools: [GET_FULL_FILE_TOOL],
+      tools: toolsFor(state),
       toolChoice: "auto",
       parallelToolCalls: true,
       previousResponseId,
@@ -255,15 +323,15 @@ function createConversation(options) {
 
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
-  async function pricePendingRequest(state, { question, additions, allowCompaction = true }) {
+  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
     const items = state.compactedSurface ? activeSurface(state) : state.items;
     const price = priceProspectiveRequest({
-      instructions: buildInstructions({ customSystemPrompt: state.config?.systemPrompt ?? "" }),
-      tools: [GET_FULL_FILE_TOOL],
+      instructions: buildInstructions({ rendererVersion, customSystemPrompt: state.config?.systemPrompt ?? "" }),
+      tools: toolsFor(state),
       items,
-      additions,
+      additions: additions.length ? renderTurn({ mutations: additions, question: "", userMessage: protocolFor(state.config).userMessage, rendererVersion }).slice(0, -1) : [],
       question,
       reserveTokens: budget.configured ? RESERVE : 0,
     });
@@ -281,12 +349,12 @@ function createConversation(options) {
 
     const nearLimit = Math.max(price.total, occupancy.tokens) > budget.inputBudget * 0.8;
     let exactInput = null;
-    if (nearLimit && !state.inputTokensUnsupported) {
+    if (nearLimit && protocolFor(state.config).inputTokens && !state.inputTokensUnsupported) {
       const exact = await requestInputTokens({
         network: environment.network,
         baseUrl: state.config?.baseUrl ?? settings.baseUrl,
         apiKey: resolveApiKey(state),
-        body: buildBody(state, { question, additions }),
+        body: buildBody(state, { question, additions, rendererVersion }),
         signal: state.activeController?.signal,
       });
       if (exact.supported === true) {
@@ -342,6 +410,7 @@ function createConversation(options) {
     const controller = createAbortController(environment.network);
     state.preparing = true;
     state.manualCompacting = true;
+    state.requestEffort = reasoningEffort(sessionId);
     state.activeController = controller;
     state.task = (async () => {
       const result = await compactSession(state, { reason: "manual" });
@@ -482,7 +551,7 @@ function createConversation(options) {
   function remeasureAfterCompaction(state, budget) {
     if (!budget.configured) return { overThreshold: false, tokens: 0 };
     const surface = measureItems(activeSurface(state));
-    const instructions = measureText(buildInstructions({ customSystemPrompt: state.config?.systemPrompt ?? "" })) + measureItems([GET_FULL_FILE_TOOL]);
+    const instructions = measureText(buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: state.config?.systemPrompt ?? "" })) + measureItems([GET_FULL_FILE_TOOL]);
     const tokens = surface + instructions;
     return { overThreshold: tokens >= budget.compactionThreshold, tokens, surface, instructions };
   }
@@ -493,7 +562,7 @@ function createConversation(options) {
     const start = (() => {
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const item = items[index];
-        if (item?.type === "message" && item.role === "user") return index;
+        if (isUserMessage(item)) return index;
       }
       return Math.max(0, items.length - 1);
     })();
@@ -501,7 +570,7 @@ function createConversation(options) {
   }
 
   function officialSupported(state) {
-    if (state.officialUnsupported) return false;
+    if (!protocolFor(state.config).remoteCompaction || state.officialUnsupported) return false;
     const cached = state.officialCapability;
     const key = `${state.config?.baseUrl ?? ""}|${state.config?.model ?? ""}`;
     if (cached && cached.key === key) return cached.supported;
@@ -514,23 +583,24 @@ function createConversation(options) {
   async function requestFallbackSummary(state, range) {
     const allowlist = typeof trackerFor(state.sessionId).allowlist === "function" ? trackerFor(state.sessionId).allowlist() : [];
     // An earlier fallback checkpoint in the selected range is consolidated.
-    const hasEarlierCheckpoint = range.items.some((item) => typeof item?.content?.[0]?.text === "string"
-      && item.content[0].text.includes("<compacted-summary>"));
+    const hasEarlierCheckpoint = range.items.some((item) => messageText(item).includes("<compacted-summary>"));
     const instruction = buildSummaryInstruction({ hasEarlierCheckpoint });
     const input = [
-      ...range.items.map((item) => item.type === "function_call_output"
-        ? { ...item, output: truncateToolResult(item.output) }
+      ...range.items.map((item) => isToolOutput(item)
+        ? truncateOutput(item, truncateToolResult)
         : item),
-      { type: "message", role: "user", content: [{ type: "input_text", text: instruction }] },
+      protocolFor(state.config).userMessage(instruction),
     ];
     const result = await streamAttempt({
+      protocol: protocolFor(state.config),
       network: environment.network,
       scheduler: environment.scheduler,
       baseUrl: state.config?.baseUrl ?? normalizeQuickAskSettings(getSettings()?.quickAsk).baseUrl,
-      body: buildRequestBody({
-        instructions: buildInstructions({ customSystemPrompt: state.config?.systemPrompt ?? "" }),
+      body: protocolFor(state.config).buildRequestBody({
+        reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
+        instructions: buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: state.config?.systemPrompt ?? "" }),
         input,
-        tools: [GET_FULL_FILE_TOOL],
+        tools: [protocolFor(state.config).functionTool(GET_FULL_FILE_TOOL)],
         toolChoice: "none",
         parallelToolCalls: false,
         previousResponseId: null,
@@ -568,10 +638,13 @@ function createConversation(options) {
 
   function recordUsage(state, samples) {
     if (!Array.isArray(samples)) return;
+    const attemptId = `attempt-${state.usage.attempts() + 1}`;
     for (const sample of samples) {
-      state.usage.record(sample, { attemptId: sample.attemptId ?? `attempt-${state.usage.attempts() + 1}` });
-      if (sample.usage && Number.isFinite(sample.usage.input_tokens)) {
-        state.occupancyAnchor = { inputTokens: sample.usage.input_tokens };
+      sample.attemptId ??= attemptId;
+      state.usage.record(sample, { attemptId: sample.attemptId });
+      const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
+      if (sample.usage && Number.isFinite(inputTokens)) {
+        state.occupancyAnchor = { inputTokens };
       }
     }
   }
@@ -581,7 +654,7 @@ function createConversation(options) {
   }
 
   // One user turn: durable pending state, then the streamed attempt.
-  async function send(sessionId, question, { signal = null, additions = null } = {}) {
+  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION } = {}) {
     const state = stateFor(sessionId);
     // All asynchronous phases resolve only their owning session's tracker.
     if (!isEnabled()) return { status: "disabled" };
@@ -591,8 +664,23 @@ function createConversation(options) {
     if (runningTurns() >= MAX_CONCURRENT_TURNS) {
       return { status: "busy", error: normalizeError({ kind: "protocol", message: "Three Quick Ask turns are already running" }) };
     }
+    // An explicit retry carries the original submission's renderer. Unknown
+    // versions remain readable in history but must never silently re-render.
+    if (![1, 2].includes(rendererVersion)) return { status: "failed", accepted: false,
+      error: { code: "RENDERER", message: `Unsupported Quick Ask renderer version: ${rendererVersion}. Update the plugin or submit a new question.` } };
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };
+
+    const effort = normalizeReasoningEffort(reasoning ?? reasoningEffort(sessionId));
+    state.requestEffort = effort;
+    const searchRevision = webSearchRevision ?? state.searchRevision ?? 0;
+    const searchSettings = normalizeSearchSettings(getSettings()?.quickAsk?.webSearch);
+    const enabled = typeof webSearch === "boolean" ? webSearch : searchEnabled(sessionId);
+    const searchValidation = validateSearchForSend(sessionId, enabled);
+    if (!searchValidation.valid) return { status: "invalid", errors: searchValidation.errors };
+    const selectedSearch = searchValidation.route;
+    state.requestSearch = selectedSearch;
+    pushProjection(state, { kind: "search-route", route: selectedSearch.kind, provider: selectedSearch.provider });
 
     // Reserve the session before the first read or preflight await. Every
     // network phase shares the same abort lifetime, including compaction.
@@ -607,15 +695,22 @@ function createConversation(options) {
       const stagedAdditions = additions ?? (typeof trackerFor(sessionId).mutationsForSend === "function"
         ? await trackerFor(sessionId).mutationsForSend() : []);
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
-      const preflight = await pricePendingRequest(state, { question, additions: stagedAdditions });
+      const preflight = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion });
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
       if (preflight.blocked) return preflight;
       const turnId = `turn-${environment.scheduler.now?.() ?? Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       state.usage = createTurnUsage();
       state.pendingMutations = stagedAdditions;
-      const turn = { turnId, question, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller };
+      const turn = { turnId, question, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
-      await sessionStore.append(sessionId, "turn/started", { turnId, question, additions: stagedAdditions });
+      await sessionStore.append(sessionId, "turn/started", { turnId, question, additions: stagedAdditions, webSearch: enabled, nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
+      // Read the current toggle here so a manual change made during preflight
+      // cannot be overwritten by consuming this question's one-shot permission.
+      if ((state.searchRevision ?? 0) === searchRevision) {
+        if (!searchSettings.defaultEnabled && enabled) await setSearchEnabled(sessionId, false);
+        state.searchDirty = false;
+      }
+      if (reasoningEffort(sessionId) === effort) state.reasoningDirty = false;
       pushProjection(state, { kind: "turn", status: "running", turnId });
       const parsed = await sessionStore.readLog(sessionId);
       if (!parsed.title && sessionStore.rename) {
@@ -634,7 +729,7 @@ function createConversation(options) {
         }
         // Include the checkpoint, reintroduced files AND the pending question
         // and additions. Never send an oversized request after shrinking history.
-        const after = await pricePendingRequest(state, { question, additions: stagedAdditions, allowCompaction: false });
+        const after = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, allowCompaction: false });
         if (controller.signal.aborted || !isEnabled()) return await finishTurn(state, turn, "stopped");
         if (after.blocked) return await finishTurn(state, turn, "failed", { error: after.error });
       }
@@ -660,7 +755,14 @@ function createConversation(options) {
     for (;;) {
       if (!isEnabled() || signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
       const body = buildBody(state, turn);
+      if (turn.toolQuestion && turn.toolQuestion.state.callsUsed >= turn.toolQuestion.state.callLimit) {
+        body.tools = responsesBuiltInTools(body.tools);
+        if (protocolFor(state.config).emptyToolsAreInvalid && body.tools.length === 0) {
+          delete body.tools; delete body.tool_choice; delete body.parallel_tool_calls;
+        }
+      }
       const result = await streamAttempt({
+        protocol: protocolFor(state.config),
         network: environment.network,
         scheduler: environment.scheduler,
         baseUrl: (state.config?.baseUrl ?? normalizeQuickAskSettings(getSettings()?.quickAsk).baseUrl),
@@ -673,6 +775,8 @@ function createConversation(options) {
         onEvent: (event) => handleStreamEvent(state, turn, event),
       });
 
+      if (result.output) turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
+
       // The endpoint demonstrably needed the non-streaming transport; remember
       // it for the rest of the plugin lifecycle.
       if (result.nonStreaming) {
@@ -680,7 +784,7 @@ function createConversation(options) {
         retryAfterNonStreaming = true;
       }
       if (result.status === "aborted") {
-        return await finishTurn(state, turn, "stopped", { text: result.text || turn.text, error: result.error });
+        return await finishTurn(state, turn, "stopped", { text: result.text || turn.text, error: result.error, usage: result.usageSamples, reasoning: turn.reasoning || result.reasoning || "", output: result.output });
       }
       // Without a configured capacity, a provider-reported context-window
       // overflow is the only pressure signal. Switch this turn to the
@@ -699,7 +803,7 @@ function createConversation(options) {
         }
         return await finishTurn(state, turn, result.status === "completed" ? "complete" : "incomplete", {
           text: result.text ?? turn.text,
-          reasoning: result.reasoning ?? turn.reasoning,
+          reasoning: turn.reasoning || result.reasoning || "",
           output: result.output,
           usage: result.usageSamples,
         });
@@ -711,7 +815,7 @@ function createConversation(options) {
       // state. The session durably switches to local replay and continues
       // without a new session; auth, limits, timeouts, and network failures are
       // never capability evidence.
-      if (state.storedState && !result.accepted && !state.storedStateSwitched && isStateUnsupported(error)) {
+      if (state.storedState && !result.accepted && !state.storedStateSwitched && isResponsesStateUnsupported(error)) {
         state.storedStateSwitched = true;
         applyStateFallback(state.sessionId);
         pushProjection(state, { kind: "state-mode", mode: "local-replay" });
@@ -738,7 +842,7 @@ function createConversation(options) {
       }
       // An accepted attempt that did not finish keeps its partial output and
       // never resubmits, so Context is not accepted twice.
-      return await finishTurn(state, turn, "failed", { text: result.text || turn.text, error, retryable: true });
+      return await finishTurn(state, turn, "failed", { text: result.text || turn.text, error, retryable: true, usage: result.usageSamples, reasoning: turn.reasoning || result.reasoning || "", output: result.output });
     }
   }
 
@@ -748,7 +852,7 @@ function createConversation(options) {
   async function runToolContinuation(state, turn, result, signal, nonStreaming) {
     if (!turn.question || !isEnabled()) return null;
     await acceptQueue;
-    const ownToolLoop = createToolLoop({ executor: toolExecutor, tracker: trackerFor(state.sessionId), config: {} });
+    const ownToolLoop = createToolLoop({ executor: toolExecutor, tracker: trackerFor(state.sessionId), config: { ...state.config, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION } });
     const question = turn.toolQuestion ?? (turn.toolQuestion = ownToolLoop.beginQuestion({
       allowlist: typeof trackerFor(state.sessionId).allowlist === "function" ? trackerFor(state.sessionId).allowlist() : [],
       callLimit: state.config?.callLimit ?? state.config?.fullFileCallLimit ?? 3,
@@ -756,74 +860,64 @@ function createConversation(options) {
     // The transport reports completed calls on the attempt result; each one
     // carries its raw argument JSON so the canonical item stays byte-faithful.
     const calls = (Array.isArray(result.functionCalls) ? result.functionCalls : [])
-      .filter((call) => call?.name === GET_FULL_FILE_TOOL.name)
+      .filter((call) => protocolFor(state.config).answersEveryToolCall || TOOL_NAMES.includes(call?.name))
       .map((call) => ({
         id: call.id ?? null,
         callId: call.callId ?? null,
         name: call.name,
-        arguments: parseArguments(call.arguments),
+        arguments: parseToolArguments(call.arguments),
         rawArguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}),
       }));
     if (calls.length === 0) return null;
     const { items, results } = await ownToolLoop.runBatch(calls, question, {
       normalizePath: (path) => environment.vault.normalizePath(path),
       fitsInContext: (path) => getContextBudget(path, state.sessionId) !== false,
+      signal,
+      search: turn.searchEnabled && state.requestSearch?.kind !== "off" ? async query => {
+        let route = state.requestSearch;
+        pushProjection(state, { kind: "search-status", status: "running", provider: route.provider });
+        let result = await searchClient.search(query, route, { signal, config: state.config });
+        turn.searchSources = normalizeSources([...turn.searchSources, ...(result.sources ?? [])]);
+        const status = { status: result.ok ? "complete" : "failed", provider: route.provider, code: result.code ?? null };
+        turn.searchStatuses.push(status);
+        if (!result.ok && result.code !== "QUERY") turn.searchFailure = { code: "SEARCH_FAILED", message: `Search failed (${route.provider}: ${result.code}${result.status ? ` HTTP ${result.status}` : ""}). Check the selected search method and its API key; no other service was used.` };
+        await sessionStore.append(state.sessionId, "search/result", { turnId: turn.turnId, query, ...status, sources: result.sources ?? [] });
+        pushProjection(state, { kind: "search-status", ...status });
+        return result;
+      } : null,
     });
     const providerOutput = Array.isArray(result.output) ? result.output : [];
-    const providerCallIds = new Set(providerOutput.filter(item => item.type === "function_call").map(item => item.call_id));
-    const canonical = [...providerOutput, ...items.filter(item => item.type !== "function_call" || !providerCallIds.has(item.call_id))];
+    const providerCallIds = new Set(providerOutput.filter(isResponsesFunctionCall).map(item => item.call_id));
+    const canonical = [...providerOutput, ...items.filter(item => !isResponsesFunctionCall(item) || !providerCallIds.has(item.call_id))];
     for (const item of canonical) {
       appendCanonicalItem(state, item);
       await sessionStore.append(state.sessionId, "item/output", { item, tool: true });
       pushProjection(state, { kind: "tool", item, turnId: turn.turnId });
     }
     recordUsage(state, result.usageSamples);
-    for (const sample of result.usageSamples ?? []) await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage });
+    for (const sample of result.usageSamples ?? []) await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
     for (const status of question.statuses) {
       pushProjection(state, { kind: "tool-status", turnId: turn.turnId, status });
     }
+    if (signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
+    if (turn.searchFailure) return await finishTurn(state, turn, "failed", { text: turn.text, error: turn.searchFailure });
     // The continuation request carries only the new tool items while server
     // state is supported, and the rebuilt history otherwise.
     turn.toolContinuation = items;
-    const followUp = await streamAttempt({
-      network: environment.network,
-      scheduler: environment.scheduler,
-      baseUrl: state.config?.baseUrl ?? normalizeQuickAskSettings(getSettings()?.quickAsk).baseUrl,
-      body: buildBody(state, {
-        question: "",
-        additions: [],
-        continuation: items,
-      }),
-      apiKey: resolveApiKey(state),
-      signal,
-      idleTimeoutMs,
-      policy,
-      nonStreaming,
-      onEvent: (event) => handleStreamEvent(state, turn, event),
-    });
-    void results;
-    if (followUp.status === "completed" || followUp.status === "incomplete") {
-      // A further tool request is not chased: the question's budget bounds it.
-      return await finishTurn(state, turn, followUp.status === "completed" ? "complete" : "incomplete", {
-        text: followUp.text ?? turn.text,
-        reasoning: followUp.reasoning ?? turn.reasoning,
-        output: followUp.output,
-        usage: followUp.usageSamples,
-      });
-    }
-    if (followUp.status === "aborted") {
-      return await finishTurn(state, turn, "stopped", { text: followUp.text || turn.text, error: followUp.error });
-    }
-    return await finishTurn(state, turn, "failed", {
-      text: followUp.text || turn.text,
-      error: followUp.error ?? normalizeError({ kind: "transport", message: "tool continuation failed" }),
-      retryable: !followUp.accepted,
-    });
+    turn.toolRounds = (turn.toolRounds ?? 0) + 1;
+    if (turn.toolRounds > (state.config?.callLimit ?? 3) + 1)
+      return await finishTurn(state, turn, "failed", { text: turn.text, error: { code: "TOOL_LIMIT", message: "The model continued requesting tools after the question limit." } });
+    turn.continuation = true;
+    return await runAttempt(state, turn, signal);
   }
 
   function handleStreamEvent(state, turn, event) {
     if (!event || typeof event !== "object") return;
     switch (event.type) {
+      case "search-progress":
+        turn.serverSearchStarted = true;
+        pushProjection(state, { kind: "search-status", status: "running", provider: state.requestSearch?.provider });
+        break;
       case "created":
         turn.responseId = event.responseId ?? turn.responseId;
         // `response.created` is the acceptance checkpoint: it is what moves
@@ -862,7 +956,7 @@ function createConversation(options) {
       await sessionStore.append(state.sessionId, "turn/accepted", { turnId: turn.turnId });
       // Accepted input precedes every assistant output, including after a
       // restart. Persist the original request exactly once at its checkpoint.
-      for (const item of renderTurn({ mutations: turn.additions, question: turn.question })) {
+      for (const item of renderTurn({ mutations: turn.additions, question: turn.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION })) {
         appendCanonicalItem(state, item);
         await sessionStore.append(state.sessionId, "item/input", { item });
       }
@@ -871,11 +965,26 @@ function createConversation(options) {
     return acceptQueue;
   }
 
-  async function finishTurn(state, turn, status, { text = "", reasoning = "", error = null, output = null, usage = null } = {}) {
+  async function finishTurn(state, turn, status, { text = "", reasoning = turn.reasoning ?? "", error = null, output = null, usage = null } = {}) {
     await acceptQueue;
+    if (turn.serverSearchStarted || output?.some(isResponsesWebSearchCall)) {
+      const searchStatus = { status: status === "complete" ? "complete" : "failed", provider: state.requestSearch?.provider, code: status === "complete" ? null : status };
+      turn.searchStatuses ??= []; turn.searchStatuses.push(searchStatus);
+      pushProjection(state, { kind: "search-status", ...searchStatus });
+    }
     const canonical = Array.isArray(output) && output.length > 0 ? output : text.length > 0 || reasoning.length > 0
-      ? [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }]
+      ? [protocolFor(state.config).assistantMessage(text)]
       : [];
+    if (protocolFor(state.config).answersEveryToolCall) {
+      // Keep every native call in the log, with an explicit non-execution result
+      // if the model did not finish a usable tool batch. This also keeps the
+      // next local replay valid after a length/content-filter termination.
+      const unfinishedCalls = canonical.flatMap(callsFromItem);
+      canonical.push(...protocolFor(state.config).toolContinuationItems({
+        calls: unfinishedCalls,
+        outputs: unfinishedCalls.map(() => "Tool call not executed because the response did not complete a tool request."),
+      }));
+    }
     if (canonical.length > 0) {
       for (const item of canonical) {
         appendCanonicalItem(state, item);
@@ -886,7 +995,7 @@ function createConversation(options) {
     if (Array.isArray(usage)) {
       recordUsage(state, usage);
       for (const sample of usage) {
-        await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage });
+        await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
       }
     }
     const turnTotals = state.usage.totals();
@@ -899,6 +1008,7 @@ function createConversation(options) {
       text,
       reasoning,
       error: error ? { code: error.code, message: error.message, status: error.status ?? null } : null,
+      sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
     });
     turn.status = status;
     turn.text = text;
@@ -906,7 +1016,7 @@ function createConversation(options) {
     turn.error = error;
     turn.controller = null;
     pushProjection(state, { kind: "turn", status, turnId: turn.turnId });
-    return { status, text, reasoning, error, accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
+    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
   }
 
   // Stop aborts only the owning session's current turn and commits whatever
@@ -945,7 +1055,7 @@ function createConversation(options) {
     const responseId = responseRecord?.responseId ?? null;
     // Older releases stored Responses remotely. Recovery of those historical
     // runs remains possible, independently of how new requests carry history.
-    if (responseRecord?.stored !== false && responseId && typeof retrieve === "function") {
+    if (protocolFor(state.config).storedResponses && responseRecord?.stored !== false && responseId && typeof retrieve === "function") {
       const recovered = await retrieve(responseId);
       if (recovered?.status === "completed") {
         return await finishTurn(state, state.turn, "complete", { text: recovered.text ?? "", output: recovered.output });
@@ -1011,13 +1121,7 @@ function createConversation(options) {
     };
   }
 
-  // The protocol results that mean server-side state is not usable here.
-  function isStateUnsupported(error) {
-    if (!error) return false;
-    const text = `${error.code ?? ""} ${error.message ?? ""}`;
-    return /previous_response_not_found|previous_response_id|unsupported.*store|store.*not supported/i.test(text);
-  }
-
+  // Permanently switch this session from server-side chaining to local replay.
   function applyStateFallback(sessionId) {
     const state = stateFor(sessionId);
     state.storedState = false;
@@ -1045,10 +1149,13 @@ function createConversation(options) {
     compactNow,
     pricePendingRequest,
     applyStateFallback,
-    isStateUnsupported,
+    isStateUnsupported: isResponsesStateUnsupported,
     runningTurns,
     stateFor,
     validateForSend,
+    reasoningEffort, setReasoningEffort,
+    searchEnabled, setSearchEnabled, nextSearchRoute, validateSearchForSend,
+    searchRevision: sessionId => stateFor(sessionId).searchRevision ?? 0,
     MAX_CONCURRENT_TURNS,
     STREAM_EVENT_KINDS,
   };

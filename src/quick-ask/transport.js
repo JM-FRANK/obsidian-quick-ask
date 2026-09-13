@@ -54,6 +54,7 @@ function buildRequestBody({
   store,
   model,
   maxOutputTokens,
+  reasoningEffort,
 } = {}) {
   const body = {
     model,
@@ -63,6 +64,7 @@ function buildRequestBody({
     parallel_tool_calls: parallelToolCalls ?? true,
     truncation: "disabled",
   };
+  if (reasoningEffort !== undefined) body.reasoning = { effort: reasoningEffort, ...(reasoningEffort !== "none" ? { summary: "auto" } : {}) };
   if (Array.isArray(tools) && tools.length > 0) body.tools = tools;
   if (typeof store === "boolean") body.store = store;
   if (typeof previousResponseId === "string" && previousResponseId.length > 0) {
@@ -74,6 +76,205 @@ function buildRequestBody({
     body.max_output_tokens = maxOutputTokens;
   }
   return body;
+}
+
+// ---------------------------------------------------------------------------
+// Responses protocol vocabulary
+// ---------------------------------------------------------------------------
+// transport owns every Responses wire fact: the request body, the endpoint
+// paths, the canonical item shapes, and the SSE-to-event mapping above. Callers
+// build and read items through these constructors and predicates instead of
+// writing Responses literals, so this knowledge lives in one module.
+
+const RESPONSES_PATH = "/responses";
+
+function responsesCreateUrl(baseUrl) {
+  return `${baseUrl}${RESPONSES_PATH}`;
+}
+
+function responsesCompactUrl(baseUrl) {
+  return `${baseUrl}${RESPONSES_PATH}/compact`;
+}
+
+function responsesInputTokensUrl(baseUrl) {
+  return `${baseUrl}${RESPONSES_PATH}/input_tokens`;
+}
+
+// The stored Response resource URL, used for both retrieval and deletion.
+function responsesResponseUrl(baseUrl, responseId) {
+  return `${baseUrl}${RESPONSES_PATH}/${encodeURIComponent(responseId)}`;
+}
+
+// One user or assistant message item. `input_text` and `output_text` are the
+// Responses content-part types for a request and a stored answer.
+function responsesUserMessage(text) {
+  return { type: "message", role: "user", content: [{ type: "input_text", text }] };
+}
+
+function responsesAssistantMessage(text) {
+  return { type: "message", role: "assistant", content: [{ type: "output_text", text }] };
+}
+
+function responsesFunctionCallItem({ id, callId, name, arguments: args } = {}) {
+  return { type: "function_call", id: id ?? undefined, call_id: callId ?? undefined, name, arguments: args };
+}
+
+function responsesFunctionCallOutputItem({ callId, output } = {}) {
+  return { type: "function_call_output", call_id: callId ?? undefined, output: output ?? "" };
+}
+
+function isResponsesFunctionCall(item) {
+  return item?.type === "function_call";
+}
+
+function isResponsesFunctionCallOutput(item) {
+  return item?.type === "function_call_output";
+}
+
+function parseToolArguments(raw) {
+  if (raw == null) return {};
+  if (typeof raw === "object") return raw;
+  try {
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Every function call in one completed Responses output, with its wire
+// arguments parsed. Which tool names matter is caller policy, not protocol
+// knowledge, so this does not filter.
+function responsesFunctionCallsFrom(output) {
+  if (!Array.isArray(output)) return [];
+  return output.filter(isResponsesFunctionCall).map((item) => ({
+    id: item.id ?? null,
+    callId: item.call_id ?? item.callId ?? null,
+    name: item.name,
+    arguments: parseToolArguments(item.arguments),
+  }));
+}
+
+// The canonical continuation items for one executed batch: each wire-ready call
+// paired with its output, exactly as the conversation stores and replays them.
+function responsesToolContinuationItems({ calls, outputs }) {
+  const items = [];
+  calls.forEach((call, index) => {
+    items.push(responsesFunctionCallItem({ id: call.id, callId: call.callId, name: call.name, arguments: call.arguments }));
+    items.push(responsesFunctionCallOutputItem({ callId: call.callId, output: outputs?.[index] ?? "" }));
+  });
+  return items;
+}
+
+// The protocol results that mean server-side state is not usable at this endpoint.
+function isResponsesStateUnsupported(error) {
+  if (!error) return false;
+  const text = `${error.code ?? ""} ${error.message ?? ""}`;
+  return /previous_response_not_found|previous_response_id|unsupported.*store|store.*not supported/i.test(text);
+}
+
+function isResponsesMessage(item) {
+  return item?.type === "message";
+}
+
+// The readable text of a Responses message item: its content parts joined.
+function responsesMessageText(item) {
+  return responsesMessageBlocks(item).map((block) => block.text ?? "").join("");
+}
+
+function isResponsesUserMessage(item) {
+  return isResponsesMessage(item) && item.role === "user";
+}
+
+function isResponsesWebSearchCall(item) {
+  return item?.type === "web_search_call";
+}
+
+// The non-function tools in a request: Responses built-ins such as server-side
+// web search, which are dropped when the per-question tool budget is spent.
+function responsesBuiltInTools(tools) {
+  return tools.filter((tool) => tool.type !== "function");
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+  }
+  return value;
+}
+
+// A function-tool declaration wrapped in the Responses wire shape. The tool's own
+// name, description and parameter schema stay with the feature that owns them.
+function responsesFunctionTool({ name, description, parameters }) {
+  return deepFreeze({ type: "function", name, description, parameters, strict: true });
+}
+
+// Built-in server-side search tools. Only these providers expose one, and each
+// names it differently on the wire; which endpoint/model may select one is
+// caller policy. The three `web_search` providers share one frozen value, so a
+// request's tool bytes stay identical wherever it is selected.
+const RESPONSES_WEB_SEARCH_TOOL = Object.freeze({ type: "web_search" });
+const RESPONSES_SERVER_SEARCH_TOOLS = Object.freeze({
+  openai: RESPONSES_WEB_SEARCH_TOOL,
+  xai: RESPONSES_WEB_SEARCH_TOOL,
+  bailian: RESPONSES_WEB_SEARCH_TOOL,
+  openrouter: Object.freeze({ type: "openrouter:web_search" }),
+});
+
+function responsesServerSearchTool(provider) {
+  return RESPONSES_SERVER_SEARCH_TOOLS[provider] ?? null;
+}
+
+function responsesMessageBlocks(item) {
+  return Array.isArray(item?.content) ? item.content : [];
+}
+
+// The URL citations carried by one content part, flattening the annotation's
+// `url_citation` wrapper. Caller policy decides what to do with them.
+function responsesCitationAnnotations(block) {
+  return (block?.annotations ?? [])
+    .filter((annotation) => annotation.type === "url_citation")
+    .map((annotation) => annotation.url_citation ?? annotation);
+}
+
+// Raw citation rows from one completed Responses output: built-in search action
+// sources first, then per-message inline annotations. Normalization is caller policy.
+function responsesCitationRows(output) {
+  const rows = [];
+  for (const item of output ?? []) {
+    rows.push(...(item?.action?.sources ?? []));
+    for (const block of responsesMessageBlocks(item)) rows.push(...responsesCitationAnnotations(block));
+  }
+  return rows;
+}
+
+// Provider-reported usage field names. Callers keep the token semantics; these
+// only name the wire fields, so a second protocol changes them in one place.
+function responsesUsageInputTokens(usage) {
+  return usage?.input_tokens;
+}
+
+function responsesUsageOutputTokens(usage) {
+  return usage?.output_tokens;
+}
+
+function responsesUsageTotalTokens(usage) {
+  return usage?.total_tokens;
+}
+
+function responsesUsageCachedInputTokens(usage) {
+  return usage?.input_tokens_details?.cached_tokens;
+}
+
+function responsesUsageReasoningTokens(usage) {
+  return usage?.reasoning_tokens;
+}
+
+// The counting endpoint returns its count at the top level rather than inside
+// a response usage object, even though the wire field has the same name.
+function responsesInputTokenCount(payload) {
+  return payload?.input_tokens;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +766,13 @@ function handleFrame(frame, state, emit) {
       state.responseId = response.id;
     }
     const output = response !== null && Array.isArray(response.output) ? response.output : [];
+    output.forEach((item, index) => {
+      if (item?.type !== "function_call") return;
+      const record = callRecordFor(state, item.id ?? null, index);
+      record.id = item.id ?? record.id; record.callId = item.call_id ?? record.callId;
+      record.name = item.name ?? record.name; record.arguments = item.arguments ?? record.arguments;
+      finalizeCall(record, emit);
+    });
     // Keep the canonical items on the attempt state so the caller can persist
     // them for local replay and tool continuations.
     state.terminalOutput = output;
@@ -647,6 +855,10 @@ function handleFrame(frame, state, emit) {
       }
       break;
     }
+    case "response.web_search_call.in_progress":
+    case "response.web_search_call.searching":
+      emit({ type: "search-progress" });
+      break;
     case "response.output_item.added": {
       const item = payload?.item;
       if (item !== null && typeof item === "object" && item.type === "function_call") {
@@ -748,7 +960,7 @@ function attemptResultFrom(state, { status, error, attempts, nonStreaming }) {
     // The endpoint's canonical output items, kept verbatim (including opaque
     // reasoning items) so local replay and tool continuations have the real
     // protocol shapes.
-    output: state.terminalOutput ?? null,
+    output: state.terminalOutput ?? state.wire?.partialOutput?.(state) ?? null,
     usage: state.terminalUsage ?? state.usage,
     usageSamples: state.usageSamples,
     accepted: state.accepted,
@@ -768,8 +980,12 @@ async function runStreamAttempt({
   onEvent,
   idleTimeoutMs,
   attempts,
+  protocol,
 }) {
   const state = emptyAttemptState();
+  // The attempt state carries its protocol adapter so the shared result builder
+  // can ask for a partial output without knowing which protocol produced it.
+  state.wire = protocol;
   // The abort controller is a host global; a test context may not provide one.
   const controller = typeof AbortController === "function"
     ? new AbortController()
@@ -819,7 +1035,7 @@ async function runStreamAttempt({
     response = await network.fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify({ ...body, stream: true }),
+      body: JSON.stringify({ ...body, stream: true, ...protocol.streamBodyExtras }),
       signal: controller.signal,
     });
   } catch (error) {
@@ -866,7 +1082,7 @@ async function runStreamAttempt({
       buffer = parsed.rest;
       for (const frame of parsed.events) {
         state.accepted = true;
-        handleFrame(frame, state, onEvent);
+        protocol.handleFrame(frame, state, onEvent);
       }
       if (state.terminal !== null) break;
     }
@@ -978,8 +1194,9 @@ function derivedEventsFromResponse(payload, state, emit) {
   emit(state.terminal);
 }
 
-async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal, onEvent, attempts }) {
+async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal, onEvent, attempts, protocol }) {
   const state = emptyAttemptState();
+  state.wire = protocol;
   const requestBody = { ...body };
   delete requestBody.stream;
   const headers = {
@@ -1029,7 +1246,9 @@ async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal
     return failedAttempt(state, normalizeError({ kind: "empty", status }), attempts, true);
   }
 
-  derivedEventsFromResponse(payload, state, onEvent);
+  try {
+    protocol.eventsFromResponse(payload, state, onEvent);
+  } catch (error) { return failedAttempt(state, normalizeError(error), attempts, true); }
   if (state.terminal !== null && state.terminal.status === "failed") {
     return failedAttempt(state, state.terminalError, attempts, true);
   }
@@ -1067,6 +1286,26 @@ function waitForDelay(scheduler, signal, milliseconds) {
 // One turn is one or more attempts. Automatic retries happen only before the
 // acceptance checkpoint: as soon as any SSE event or response.created arrives,
 // the endpoint owns the turn and no retry may duplicate it.
+// ---------------------------------------------------------------------------
+// The Responses wire adapter
+// ---------------------------------------------------------------------------
+// Everything protocol-specific about one attempt, in one object: where the
+// request goes, what streaming adds to the body, how frames and finished
+// payloads become the shared event vocabulary, and what a partial output looks
+// like. The transport shell above only ever talks to this interface, so adding
+// a protocol means adding an adapter rather than editing the shell.
+//
+// Responses has no partial-output item: canonical items only exist once the
+// terminal event has been folded, so an interrupted attempt yields none.
+const RESPONSES_WIRE = Object.freeze({
+  id: "responses",
+  createUrl: responsesCreateUrl,
+  streamBodyExtras: Object.freeze({}),
+  handleFrame,
+  eventsFromResponse: derivedEventsFromResponse,
+  partialOutput: () => null,
+});
+
 async function streamAttempt(options = {}) {
   const {
     network,
@@ -1080,7 +1319,16 @@ async function streamAttempt(options = {}) {
     policy = createRetryPolicy(),
     nonStreaming = false,
   } = options;
-  const url = `${baseUrl}/responses`;
+  // The caller supplies the protocol adapter (see src/quick-ask/protocol.js).
+  // The shell never selects one by name, so it holds no protocol knowledge.
+  const protocol = options.protocol ?? RESPONSES_WIRE;
+  if (protocol === null || typeof protocol !== "object" || typeof protocol.createUrl !== "function") {
+    return failedAttempt(emptyAttemptState(), normalizeError({
+      kind: "protocol",
+      message: "A request protocol adapter is required",
+    }), 0, false);
+  }
+  const url = protocol.createUrl(baseUrl);
   // A caller-marked endpoint starts on the non-streaming transport. A pre-event
   // native transport failure switches to it once, and the caller marks the
   // endpoint for the rest of the plugin lifecycle from the result.
@@ -1095,7 +1343,7 @@ async function streamAttempt(options = {}) {
     // A retry always starts a fresh attempt with a fresh response buffer.
     const result = useRequestTransport
       ? await runRequestAttempt({
-        network, scheduler, url, apiKey, body, signal, onEvent, attempts: attempt,
+        network, scheduler, url, apiKey, body, signal, onEvent, attempts: attempt, protocol,
       })
       : await runStreamAttempt({
         network,
@@ -1107,6 +1355,7 @@ async function streamAttempt(options = {}) {
         onEvent,
         idleTimeoutMs,
         attempts: attempt,
+        protocol,
       });
     if (result.ok || result.status === "aborted" || attempt >= MAX_ATTEMPTS) return result;
     const decision = policy.decide({ error: result.error, attempt, accepted: result.accepted });
@@ -1131,4 +1380,33 @@ module.exports = {
   createAbortController,
   RETRYABLE_CODES,
   MAX_ATTEMPTS,
+  RESPONSES_WIRE,
+  responsesCreateUrl,
+  responsesCompactUrl,
+  responsesInputTokensUrl,
+  responsesResponseUrl,
+  responsesUserMessage,
+  responsesAssistantMessage,
+  isResponsesFunctionCall,
+  isResponsesFunctionCallOutput,
+  parseToolArguments,
+  responsesFunctionCallsFrom,
+  responsesToolContinuationItems,
+  isResponsesStateUnsupported,
+  isResponsesMessage,
+  responsesMessageText,
+  isResponsesUserMessage,
+  isResponsesWebSearchCall,
+  responsesBuiltInTools,
+  responsesFunctionTool,
+  responsesServerSearchTool,
+  responsesMessageBlocks,
+  responsesCitationAnnotations,
+  responsesCitationRows,
+  responsesUsageInputTokens,
+  responsesUsageOutputTokens,
+  responsesUsageTotalTokens,
+  responsesUsageCachedInputTokens,
+  responsesUsageReasoningTokens,
+  responsesInputTokenCount,
 };

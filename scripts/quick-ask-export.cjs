@@ -21,22 +21,48 @@ function exportQuickAsk({ source, ref, out, worktree = false }) {
       };
       walk(directory);
     }
+    // Preview suites come from the working tree, including untracked additions
+    // and deletions. Commit exports continue using the selected tree exactly.
+    for (const name of available) {
+      if (/^tests\/quick-ask-.*\.cjs$/.test(name)) available.delete(name);
+    }
+    for (const entry of fs.readdirSync(path.join(source, 'tests'), { withFileTypes: true })) {
+      if (entry.isFile() && /^quick-ask-.*\.cjs$/.test(entry.name)) available.add(`tests/${entry.name}`);
+    }
   }
   const pkg = JSON.parse(read('release/quick-ask/package.json'));
   const manifest = JSON.parse(read('release/quick-ask/manifest.json'));
   if (pkg.version !== manifest.version) throw new Error('Quick Ask package and manifest versions differ');
-  const tests = pkg.scripts.test.split(/\s+/).filter(name => /^tests\/[\w-]+\.cjs$/.test(name));
+  // Which suites travel with the plugin is derived from each file's own
+  // "// quick-ask-suite:" marker, so a new portable suite ships without editing
+  // any list. The scan stays inline because the bootstrap runs this file
+  // standalone from a temporary directory, where a sibling require would fail.
+  const suiteMarker = /^\/\/ quick-ask-suite: (portable|local|manual)\s*$/m;
+  const suites = [...available]
+    .filter(name => /^tests\/quick-ask-.*\.cjs$/.test(name))
+    .sort()
+    .map(name => ({ name, source: read(name).toString() }));
+  const unmarked = suites.filter(entry => !suiteMarker.test(entry.source)).map(entry => entry.name);
+  if (unmarked.length > 0) throw new Error(`Quick Ask suite markers are missing: ${unmarked.join(', ')}`);
+  const tests = suites.filter(entry => /^\/\/ quick-ask-suite: portable\s*$/m.test(entry.source)).map(entry => entry.name);
+  const testCommand = ['node', '--test', '--test-concurrency=1', ...tests].join(' ');
   const managed = new Map();
   for (const name of [...available].sort()) {
     if (name.startsWith('src/quick-ask/') && /\.(js|css)$/.test(name) ||
-        name.startsWith('release/quick-ask/') && (/\.(js|cjs|json|md|yml)$/.test(name) || ['release/quick-ask/LICENSE', 'release/quick-ask/NOTICE'].includes(name))) managed.set(name, read(name));
+        name.startsWith('release/quick-ask/') && (/\.(js|cjs|json|md|yml|png)$/.test(name) || ['release/quick-ask/LICENSE', 'release/quick-ask/NOTICE'].includes(name))) managed.set(name, read(name));
   }
   for (const name of ['scripts/quick-ask-runtime.cjs', 'scripts/quick-ask-export.cjs', 'scripts/quick-ask-release.cjs', ...tests]) {
     managed.set(name, read(name));
   }
-  for (const name of ['package.json', 'package-lock.json', 'manifest.json', 'versions.json', 'README.md', 'CHANGELOG.md']) {
+  for (const name of ['package-lock.json', 'manifest.json', 'versions.json', 'README.md', 'README_zh.md', 'ui-showcase.png', 'CHANGELOG.md']) {
     managed.set(name, read(`release/quick-ask/${name}`));
   }
+  // The standalone test script is generated from the same markers the repository
+  // resolves, so the two can never disagree.
+  managed.set('package.json', Buffer.from(
+    read('release/quick-ask/package.json').toString()
+      .replace(/^(\s*"test":\s*)"[^"]*"/m, (_, prefix) => `${prefix}${JSON.stringify(testCommand)}`),
+  ));
   for (const name of [...available].filter(name => name.startsWith('release/quick-ask/docs/') && name.endsWith('.md'))) {
     managed.set(name.replace('release/quick-ask/', ''), read(name));
   }

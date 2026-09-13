@@ -791,6 +791,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
         from: selection.from,
         to: selection.to,
         text: selection.text,
+        ...(selection.startLine != null ? { startLine: selection.startLine, startColumn: selection.startColumn } : {}),
       });
     }
     return pending;
@@ -830,7 +831,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
   // Stage one dragged Context Selection. The containing file's complete content
   // travels with the next question, so a selection from a file that is not
   // tracked yet also stages that file.
-  function stageSelection({ path, from, to, text } = {}) {
+  function stageSelection({ path, from, to, text, startLine = null, startColumn = null } = {}) {
     const normalized = normalizePath(path);
     if (normalized === null) return { path, staged: false, reason: "path" };
     if (!isMarkdown(normalized)) return { path: normalized, staged: false, reason: "role" };
@@ -839,7 +840,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
     ensureRecord(normalized, "stage");
     const id = `selection-${nextSelectionId}`;
     nextSelectionId += 1;
-    selections.push({ id, path: normalized, from, to, text: selected });
+    selections.push({ id, path: normalized, from, to, text: selected, startLine, startColumn });
     return { path: normalized, staged: true, id };
   }
 
@@ -1064,6 +1065,9 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
       mutations.push({ kind: "reference", path });
     }
     for (const selection of selections) {
+      const raw = files.get(selection.path)?.observedRawText;
+      const current = typeof raw === "string" && Number.isInteger(selection.from) && raw.slice(selection.from, selection.to) === selection.text;
+      const before = current ? raw.slice(0, selection.from).split(/\r\n|\n|\r/) : null;
       mutations.push({
         kind: "selection",
         id: selection.id,
@@ -1071,6 +1075,9 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
         from: selection.from,
         to: selection.to,
         text: selection.text,
+        startLine: before ? before.length : selection.startLine,
+        startColumn: before ? before.at(-1).length : selection.startColumn,
+        lineOrigin: current ? "current" : "capture",
       });
     }
     pendingSend = mutations;

@@ -7,7 +7,19 @@ const { sessionConfigSnapshot } = require("./settings");
 // The store receives a pluginData capability slice and a scheduler slice, so it
 // never touches the Obsidian API and never reads a global.
 
+// Responses keeps its original format. A distinct Chat Completions version
+// makes older plugins refuse to append rather than interpret native chat items
+// as Responses items. No existing log is rewritten during upgrade.
 const CURRENT_SCHEMA_VERSION = 1;
+const CHAT_SCHEMA_VERSION = 2;
+function sessionSchemaVersion(config) {
+  const protocol = config?.protocol ?? "responses";
+  return protocol === "responses" ? CURRENT_SCHEMA_VERSION : protocol === "chat-completions" ? CHAT_SCHEMA_VERSION : null;
+}
+function isSupportedSession(parsed) {
+  const expected = sessionSchemaVersion(parsed.header?.config);
+  return !parsed.damaged && expected !== null && (parsed.version ?? parsed.header?.schemaVersion ?? 1) === expected;
+}
 const INDEX_KIND = "quick-ask-index";
 const SESSIONS_DIRECTORY = "quick-ask/sessions";
 const INDEX_PATH = "quick-ask/index.json";
@@ -40,6 +52,8 @@ const KNOWN_RECORD_KINDS = new Set([
   "compaction/checkpoint",
   "compaction/end",
   "session/renamed",
+  "session/search-state",
+  "search/result",
 ]);
 
 function join(directory, name) {
@@ -291,9 +305,10 @@ class QuickAskSessionStore {
     const created = createdAt ?? new Date(now).toISOString();
     // A restored session (an import) supplies its own id; a new one generates.
     const id = typeof requestedId === "string" && requestedId.length > 0 ? requestedId : this._newId();
+    if (sessionSchemaVersion(config) === null) throw new Error("Unsupported Quick Ask request protocol");
     const header = {
       kind: "header",
-      schemaVersion: CURRENT_SCHEMA_VERSION,
+      schemaVersion: sessionSchemaVersion(config),
       sessionId: id,
       createdAt: created,
       title: normalizeTitle(title),
@@ -328,10 +343,10 @@ class QuickAskSessionStore {
       const parsed = await this.readLog(id);
       if (parsed.missing) throw new Error(`Quick Ask session ${id} does not exist`);
       if (parsed.damaged) throw new Error(`Quick Ask session ${id} is damaged and cannot be appended to`);
-      if (parsed.version > CURRENT_SCHEMA_VERSION) {
+      if (parsed.version > CHAT_SCHEMA_VERSION) {
         throw new Error(`Quick Ask session ${id} was created by a newer Scholar Workbench`);
       }
-      if (parsed.version !== CURRENT_SCHEMA_VERSION) {
+      if (!isSupportedSession(parsed)) {
         throw new Error(`Quick Ask session ${id} has an unsupported format version`);
       }
       if (parsed.tornTail) {
@@ -391,7 +406,7 @@ class QuickAskSessionStore {
     const lines = [importedHeader, ...records];
     let text = lines.map(line => JSON.stringify(line)).join("\n") + "\n";
     const parsed = parseLog(text);
-    if (parsed.damaged || parsed.version !== CURRENT_SCHEMA_VERSION) throw new Error("Invalid or unsupported Quick Ask session");
+    if (parsed.damaged || !isSupportedSession(parsed)) throw new Error("Invalid or unsupported Quick Ask session");
     if (title !== parsed.title) {
       text += JSON.stringify({ seq: parsed.nextSeq, at: new Date(this.scheduler?.now?.() ?? Date.now()).toISOString(), kind: "session/renamed", payload: { title } }) + "\n";
     }
@@ -534,6 +549,8 @@ function parseLog(raw) {
 module.exports = {
   QuickAskSessionStore,
   CURRENT_SCHEMA_VERSION,
+  CHAT_SCHEMA_VERSION,
+  isSupportedSession,
   INDEX_PATH,
   SESSIONS_PATH,
   SESSIONS_DIRECTORY,

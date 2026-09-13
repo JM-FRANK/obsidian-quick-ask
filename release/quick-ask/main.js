@@ -18,7 +18,7 @@ class QuickAskSettingsTab extends PluginSettingTab {
     const patch = key === 'language' ? { language: value } : { quickAsk: quickAskControlPatch(key, value) };
     await this.settings.update(patch);
     if (key === 'quickAsk.enable') this.quickAskIntegration.syncEnabled();
-    if (key.startsWith('quickAsk.display.') || key === 'language') this.quickAskIntegration.refreshAppearance();
+    if (key.startsWith('quickAsk.display.') || key.startsWith('quickAsk.webSearch.') || key === 'language') this.quickAskIntegration.refreshAppearance();
     this.update();
   }
   getSettingDefinitions() {

@@ -1,53 +1,30 @@
+const { protocolFor } = require("./protocol");
 // The read-only tool continuation. When a completed attempt asks for
 // `get-full-file`, Quick Ask executes the calls, appends the canonical
 // function-call and function-call-output items, and continues the same turn.
 // Tool calls, outputs, and the resulting synchronization baselines are
 // append-only additions to the conversation.
 
-const { GET_FULL_FILE_TOOL } = require("./prompt-renderer");
+const { GET_FULL_FILE_TOOL, numberLines } = require("./prompt-renderer");
+const { responsesFunctionCallsFrom } = require("./transport");
+
+// Which calls Quick Ask accepts is domain policy. Reading the wire function
+// calls belongs to transport with the rest of the Responses vocabulary.
+const TOOL_NAMES = Object.freeze([GET_FULL_FILE_TOOL.name, "web_search"]);
 
 function functionCallsFrom(output) {
-  if (!Array.isArray(output)) return [];
-  return output
-    .filter((item) => item?.type === "function_call" && item.name === GET_FULL_FILE_TOOL.name)
-    .map((item) => ({
-      id: item.id ?? null,
-      callId: item.call_id ?? item.callId ?? null,
-      name: item.name,
-      arguments: parseArguments(item.arguments),
-    }));
+  return responsesFunctionCallsFrom(output).filter((call) => TOOL_NAMES.includes(call.name));
 }
 
-function parseArguments(raw) {
-  if (raw == null) return {};
-  if (typeof raw === "object") return raw;
-  try {
-    const parsed = JSON.parse(String(raw));
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-// Turn one batch of calls into the canonical continuation items.
-function continuationItems({ calls, results }) {
-  const items = [];
-  calls.forEach((call, index) => {
-    const result = results[index];
-    items.push({
-      type: "function_call",
-      id: call.id ?? undefined,
-      call_id: call.callId ?? undefined,
-      name: call.name,
-      arguments: typeof call.rawArguments === "string" ? call.rawArguments : JSON.stringify(call.arguments ?? {}),
-    });
-    items.push({
-      type: "function_call_output",
-      call_id: call.callId ?? undefined,
-      output: result?.output ?? "",
-    });
-  });
-  return items;
+// A domain call record becomes a wire-ready call: its arguments are serialized
+// once here, so transport only pairs wire calls with their outputs.
+function wireCalls(calls) {
+  return calls.map((call) => ({
+    id: call.id,
+    callId: call.callId,
+    name: call.name,
+    arguments: typeof call.rawArguments === "string" ? call.rawArguments : JSON.stringify(call.arguments ?? {}),
+  }));
 }
 
 function createToolLoop({ executor, tracker = null, config = {} }) {
@@ -62,19 +39,27 @@ function createToolLoop({ executor, tracker = null, config = {} }) {
   }
 
   // Execute one batch and return the items to append plus the status UI facts.
-  async function runBatch(calls, question, { normalizePath = (value) => value, fitsInContext = () => true } = {}) {
+  async function runBatch(calls, question, { normalizePath = (value) => value, fitsInContext = () => true, search = null, signal = null } = {}) {
     const results = [];
     for (const call of calls) {
-      const result = await executor.executeCall(call, { question: question.state, normalizePath, fitsInContext });
+      const result = TOOL_NAMES.includes(call.name)
+        ? await executor.executeCall(call, { question: question.state, normalizePath, fitsInContext, search, signal })
+        : { ok: false, output: "Unsupported tool; not executed" };
       results.push(result);
-      question.statuses.push(result.ok
+      question.statuses.push(result.search ? { kind: "search", ok: result.ok, code: result.result?.code, sources: result.result?.sources ?? [] } : result.ok
         ? { kind: "read", path: result.path }
         : { kind: "error", path: result.path, output: result.output });
       // A successful read refreshes the synchronization baseline of a still
       // tracked file, and never restores tracking for a removed File Row.
-      if (result.ok && tracker?.applyFullFileResult) tracker.applyFullFileResult(result.path, result.output);
+      if (result.ok && !result.search && tracker?.applyFullFileResult) tracker.applyFullFileResult(result.path, result.output);
     }
-    return { items: continuationItems({ calls, results }), results };
+    return {
+      items: protocolFor(config).toolContinuationItems({
+        calls: wireCalls(calls),
+        outputs: results.map(result => config.rendererVersion >= 2 && result.ok && !result.search ? numberLines(result.output) : result?.output ?? ""),
+      }),
+      results,
+    };
   }
 
   function remaining(question) {
@@ -84,4 +69,4 @@ function createToolLoop({ executor, tracker = null, config = {} }) {
   return { beginQuestion, runBatch, remaining, callLimit };
 }
 
-module.exports = { createToolLoop, functionCallsFrom, continuationItems, parseArguments };
+module.exports = { createToolLoop, functionCallsFrom, TOOL_NAMES };

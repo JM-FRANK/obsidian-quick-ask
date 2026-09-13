@@ -1,6 +1,6 @@
 # Obsidian 社区插件登记准备
 
-本文件提供可填写的登记材料，不表示已经提交、通过审核或上架。
+本文件提供登记材料与发布流程记录。Quick Ask 已上架 Obsidian 社区插件目录。
 
 ## 登记信息
 
@@ -22,7 +22,7 @@
 
 > Ask AI about Markdown text and files you explicitly choose, directly in an Obsidian sidebar. Stream answers, manage local conversations, track changes to referenced files, and export/import session history. Configure a Responses-compatible endpoint, model and named API secret. Provider accounts or usage fees may apply; selected text, file content and conversation context are sent to that provider. Quick Ask includes no plugin telemetry and does not edit your notes. Requires Obsidian 1.13.7 or later on desktop.
 
-2026-09-13 查询官方 `obsidian-releases/community-plugins.json`，未发现 `quick-ask` ID 或 `Quick Ask` 同名条目。这是已发布列表检查，不是保留名称或官方审核通过证明；提交时仍需检查目录结果。
+2026-09-13：Quick Ask 已上架 Obsidian 社区插件目录。此前对官方 `obsidian-releases/community-plugins.json` 的列表查询（未发现同名条目）已被上架结果取代；下方提交流程保留为流程记录。
 
 ## 从 LaTeX 插件上次审核吸取的经验
 
@@ -33,10 +33,10 @@
 - 为安装附件添加 **GitHub artifact attestations**：发布 workflow 在 Actions 中重新构建、测试，给同一份 `main.js`、`manifest.json`、`styles.css` 生成来源证明后再上传草稿。不能给一份文件生成证明，却上传另一次构建的文件。
 - 修复已发布版本的问题时递增版本，不覆盖已发布标签或附件。工具只允许刷新尚未发布的草稿。
 
-## 发布前状态
+## 发布状态
 
 - 发布材料、Apache-2.0 许可证、NOTICE、依赖许可证及版本元数据已准备。
-- 本仓库已公开，[1.0.0 已正式发布](https://github.com/JM-FRANK/obsidian-quick-ask/releases/tag/1.0.0)，安装附件来源证明已验证；尚未提交社区目录。
+- 本仓库已公开，[1.0.0](https://github.com/JM-FRANK/obsidian-quick-ask/releases/tag/1.0.0) 与 [1.0.1](https://github.com/JM-FRANK/obsidian-quick-ask/releases/tag/1.0.1) 已正式发布，安装附件来源证明已验证；Quick Ask 已上架社区插件目录。
 - 普通 GitHub 计划的私有仓库不支持 artifact attestations。本仓库公开后的 **Prepare Quick Ask release** 已成功生成来源证明；每次刷新安装附件都应通过该流程生成并验证对应证明。不要把早先私有阶段的跳过状态当作已生成证明。
 - 独立版原生设置、实际 API 请求、会话迁移和禁用／重载仍需维护者人工验证，见 [兼容性记录](compatibility.md)。主仓库 Citation 的 Windows 验收不能替代 Quick Ask 独立版验收。
 
