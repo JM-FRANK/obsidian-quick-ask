@@ -1,13 +1,12 @@
 # Changelog
 
-## Unreleased
-
-- Display readable Chat Completions reasoning and add five shared effort levels through the command palette and a plain Composer label.
-- Number outgoing file context and selection lines without changing source files or tracking baselines.
-- Commit search/effort state with valid sends instead of writing session logs for each toggle.
+## 1.0.2 — Chat Completions, reasoning controls and numbered context
 
 - Add explicit Chat Completions protocol selection with native streaming/tool history, local replay and structured-summary compaction. Existing sessions retain their protocol; no automatic protocol fallback.
 - Protect Chat Completions logs from older plugin writers with a separate format version, preserve refusal text and retain reported usage on interrupted streams.
+- Display readable Chat Completions reasoning and add five shared effort levels through the command palette and a plain Composer label.
+- Number outgoing file context and selection lines without changing source files or tracking baselines.
+- Commit search/effort state with valid sends instead of writing session logs for each toggle.
 
 ## 1.0.1 — Community review fixes
 

@@ -7,7 +7,7 @@ Quick Ask is maintained in Scholar Workbench. The standalone repository is a gen
 In the main Scholar Workbench checkout, update the feature and release notes. To update all version files together:
 
 ```sh
-npm run version:quick-ask -- 1.0.1
+npm run version:quick-ask -- 1.0.2
 ```
 
 This updates the independent manifest, package metadata, lockfile and version compatibility map, preserving older entries. Add that version's notes to `release/quick-ask/CHANGELOG.md`, test and commit upstream. Do not bump the downstream package directly or reuse a published version.

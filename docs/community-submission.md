@@ -11,7 +11,7 @@
 | ID | `quick-ask` |
 | Author | FRANK-SMITH |
 | Owner | 关联 `JM-FRANK` 的个人账户 |
-| Version | `1.0.1` |
+| Version | `1.0.2` |
 | Minimum app version | `1.13.7` |
 | Platforms | Desktop only |
 | License | Apache-2.0 |
@@ -44,7 +44,7 @@
 
 1. 完成人工验收；GitHub 仓库已经公开，检查公开范围只包含该独立发行版。
 2. 运行 **Prepare Quick Ask release**，确认构建、测试、版本检查及来源证明成功。草稿附件包含必需的 `main.js`、`manifest.json`、`styles.css`，另外提供许可证、NOTICE、第三方声明及 SHA256SUMS。
-3. 从草稿下载 `main.js`、`styles.css`，分别运行 `gh attestation verify 文件名 -R JM-FRANK/obsidian-quick-ask` 验证。发布标签必须是 `1.0.1`，不加 `v`，与默认分支根目录的 manifest 版本完全一致。
+3. 从草稿下载 `main.js`、`styles.css`，分别运行 `gh attestation verify 文件名 -R JM-FRANK/obsidian-quick-ask` 验证。发布标签必须是 `1.0.2`，不加 `v`，与默认分支根目录的 manifest 版本完全一致。
 4. 检查并发布 GitHub 草稿 Release。首次发行版本在此之前不增加历史发布日期。
 5. 登录 [Obsidian Community](https://community.obsidian.md)，关联维护者的 GitHub 账号 `JM-FRANK`。在 Plugins → New plugin 中填写仓库 URL、选择拥有者。
 6. 由维护者阅读并同意开发者政策与持续维护承诺后提交。检查自动审核结果；根据反馈修复并发布更高版本，最后按目录流程发布。

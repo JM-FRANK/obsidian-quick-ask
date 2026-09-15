@@ -1,6 +1,6 @@
 {
   "name": "obsidian-quick-ask",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "scripts": {
     "build": "node release/quick-ask/build.cjs --out .",
