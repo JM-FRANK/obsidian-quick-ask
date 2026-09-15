@@ -75,3 +75,11 @@ test('navigation actions execute serially and a failure releases the queue', asy
   assert.equal(queue.busy, false);
   assert.deepEqual(steps, ['first', 'second']);
 });
+
+
+test('a changed role permits a new session without rewriting an empty existing session', () => {
+  const state = { sessions: [{ id: 'empty' }], activeSessionId: 'empty' };
+  assert.equal(sessionNavigation(state).canCreate, false);
+  assert.equal(sessionNavigation({ ...state, roleChanged: true }).canCreate, true);
+  assert.equal(sessionNavigation({ ...state, roleChanged: true, busy: true }).canCreate, false);
+});

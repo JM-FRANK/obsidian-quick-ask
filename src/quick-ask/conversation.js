@@ -666,7 +666,7 @@ function createConversation(options) {
     }
     // An explicit retry carries the original submission's renderer. Unknown
     // versions remain readable in history but must never silently re-render.
-    if (![1, 2].includes(rendererVersion)) return { status: "failed", accepted: false,
+    if (![1, 2, 3].includes(rendererVersion)) return { status: "failed", accepted: false,
       error: { code: "RENDERER", message: `Unsupported Quick Ask renderer version: ${rendererVersion}. Update the plugin or submit a new question.` } };
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };

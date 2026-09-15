@@ -1,3 +1,4 @@
+const { createProfileManager, normalizeProfiles, activeProfile, profileName } = require("./profiles");
 const { REASONING_LEVELS } = require("./reasoning");
 const { createQuickAskEnvironment } = require("./environment");
 const { normalizeQuickAskSettings } = require("./settings");
@@ -44,6 +45,20 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     viewType,
     canNetwork: () => registered && shouldRegisterQuickAsk({ isDesktop: environment.workspace.isDesktop(), settings: settings() }),
   });
+  let displayedProfile = JSON.stringify(activeProfile(settings().quickAsk));
+  const profiles = createProfileManager({
+    getSettings: settings,
+    write: patch => plugin.settings.update({ quickAsk: patch }, { propagate: true }),
+    changed: () => {
+      const selected = JSON.stringify(activeProfile(settings().quickAsk));
+      if (selected === displayedProfile) return;
+      displayedProfile = selected;
+      const { openViews } = require('./view');
+      for (const view of openViews) if (view.getSettings === settings) view.renderHeader();
+    },
+    notice: key => environment.ui.notice(t(settings(), key)),
+  });
+  plugin.register(() => profiles.dispose());
   // The preserved copy mirrors affected files after each durable local commit;
   // a failure is reported in settings and never rolls back the live session.
   const preservedCopy = createPreservedCopy({
@@ -226,6 +241,26 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
         return true;
       },
     });
+    let profilePicker = null;
+    registrations.register(() => profilePicker?.close());
+    registrations.addCommand({
+      id: 'switch-system-profile', name: t(settings(), 'command.switchProfile'),
+      checkCallback: checking => {
+        if (!registered) return false;
+        if (!checking) {
+          class ProfilePicker extends SuggestModal {
+            getSuggestions(query) { return normalizeProfiles(settings().quickAsk).systemProfiles.filter(profile => profileName(profile, settings()).toLocaleLowerCase().includes(query.toLocaleLowerCase())); }
+            renderSuggestion(profile, element) { element.setText(`${profileName(profile, settings())}${activeProfile(settings().quickAsk).id === profile.id ? ' ✓' : ''}`); }
+            onChooseSuggestion(profile) { if (registered) void profiles.run({ type: 'select', id: profile.id }); }
+          }
+          profilePicker?.close();
+          profilePicker = new ProfilePicker(plugin.app);
+          profilePicker.setPlaceholder(t(settings(), 'profiles.newSessionsOnly'));
+          profilePicker.open();
+        }
+        return true;
+      },
+    });
     registered = true;
   }
 
@@ -254,6 +289,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
   }
 
   const integration = {
+    profiles,
     environment,
     sessionStore,
     conversation,

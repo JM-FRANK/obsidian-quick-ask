@@ -3,6 +3,22 @@ const DEFAULT_LANGUAGE = "en";
 const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
+  "command.switchProfile": "Switch system profile",
+  "profiles.default": "Default",
+  "profiles.current": "System profile",
+  "profiles.newSessionsOnly": "Applies to new sessions only. Existing conversations keep their saved role.",
+  "profiles.name": "Profile name",
+  "profiles.nameHelp": "Enter a unique name, then rename this profile or add a new one. The default profile can be renamed but cannot be deleted.",
+  "profiles.add": "Add",
+  "profiles.rename": "Rename",
+  "profiles.delete": "Delete profile",
+  "profiles.deleteConfirm": "Delete “{name}”? Existing conversations will keep their saved role.",
+  "profiles.restore": "Restore default role",
+  "profiles.invalidName": "Enter a nonempty, unique profile name.",
+  "profiles.missing": "This profile no longer exists. Select another profile.",
+  "profiles.keepDefault": "The default profile cannot be deleted.",
+  "profiles.saveFailed": "Could not save the profile. Please try again.",
+
   "command.reasoningEffort": "Quick Ask: Set reasoning effort",
   "reasoning.effort": "Reasoning effort",
   "reasoning.cycle": "Change reasoning effort for the next request",
@@ -25,7 +41,7 @@ const EN = {
   "settings.quickAsk.model.name": "Model ID",
   "settings.quickAsk.model.desc": "Model identifier sent as the request model.",
   "settings.quickAsk.systemPrompt.name": "Custom system prompt",
-  "settings.quickAsk.systemPrompt.desc": "Appended to Quick Ask's fixed instructions. Existing sessions keep the prompt they were created with.",
+  "settings.quickAsk.systemPrompt.desc": "Replaces Quick Ask's built-in literature-reading role; safety, tool, and read-only rules remain. Setting changes apply to new sessions only; existing sessions keep their saved custom prompt.",
   "settings.quickAsk.contextWindow.name": "Context window tokens",
   "settings.quickAsk.contextWindow.desc": "Clearing this disables proactive 90% compaction and leaves only provider-reported overflow recovery.",
   "settings.quickAsk.callLimit.name": "Local tool calls per question",
@@ -193,6 +209,22 @@ const EN = {
 };
 
 const ZH_CN = {
+  "command.switchProfile": "切换系统角色配置",
+  "profiles.default": "默认",
+  "profiles.current": "系统角色配置",
+  "profiles.newSessionsOnly": "仅对新会话生效。已有对话保留其保存的角色。",
+  "profiles.name": "角色配置名称",
+  "profiles.nameHelp": "输入不重复的名称，然后重命名当前配置或新增配置。默认配置可重命名，但不能删除。",
+  "profiles.add": "新增",
+  "profiles.rename": "重命名",
+  "profiles.delete": "删除角色配置",
+  "profiles.deleteConfirm": "删除“{name}”？已有对话仍保留其保存的角色。",
+  "profiles.restore": "恢复默认角色",
+  "profiles.invalidName": "请输入非空且不重复的角色配置名称。",
+  "profiles.missing": "此角色配置已不存在，请选择其他配置。",
+  "profiles.keepDefault": "默认角色配置不能删除。",
+  "profiles.saveFailed": "无法保存角色配置，请重试。",
+
   "command.reasoningEffort": "快速提问：切换思考程度",
   "reasoning.effort": "思考程度",
   "reasoning.cycle": "切换下一次请求的思考程度",
@@ -214,7 +246,7 @@ const ZH_CN = {
   "settings.quickAsk.model.name": "模型 ID",
   "settings.quickAsk.model.desc": "作为请求 model 发送的模型标识。",
   "settings.quickAsk.systemPrompt.name": "自定义系统提示词",
-  "settings.quickAsk.systemPrompt.desc": "追加到快速提问的固定指令之后。已创建的会话保留其创建时的提示词。",
+  "settings.quickAsk.systemPrompt.desc": "替换快速提问内置的学术阅读角色；安全、工具和只读约束仍会保留。设置变更仅影响新会话；已有会话保留其保存的自定义提示词。",
   "settings.quickAsk.contextWindow.name": "上下文窗口 token 数",
   "settings.quickAsk.contextWindow.desc": "清空后不再主动触发 90% 压缩，只保留提供方报告的溢出恢复。",
   "settings.quickAsk.callLimit.name": "每个问题的本地工具调用上限",

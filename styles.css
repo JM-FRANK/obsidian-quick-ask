@@ -757,3 +757,17 @@
 }
 .scholar-quick-ask-effort:hover { color: var(--text-normal); }
 .scholar-quick-ask-effort:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 3px; border-radius: 3px; }
+
+/* Selected role is for new sessions; reserve most header width for the title. */
+.scholar-quick-ask-profile {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 28%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.scholar-quick-ask-profile-prompt { width: 100%; min-width: 16em; }

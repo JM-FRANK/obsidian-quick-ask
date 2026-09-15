@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Preserve profile-control subscriptions during page construction and clean them up after an observed detach.
+
+- Prevent programmatic profile-control refresh from saving the displayed default as custom text; preserve exact default request bytes on settings open and Reset.
+- Keep profile actions and legacy prompt updates atomic, with explicit normalization for older settings writers.
+- Fix Scholar Workbench host packaging to discover new Quick Ask modules and reject missing local dependencies, preserving historical factory order and excluding already-inlined Composer state.
+
+- Show the editable default role on fresh installs and add Restore default without changing default request bytes or existing session roles.
+- Add named system profiles, settings management and a command-palette switcher. Show the selected profile in the sidebar header; switches apply to new sessions only.
+- Focus the Quick Ask input after an accepted editor-selection drop inside it; keep pending-area, rejected and file-explorer drop behavior unchanged.
+
+- Renderer 3 replaces the entire default literature-reading paragraph with a nonblank custom prompt after the fixed safety, format and tool rules. Empty prompts preserve renderer 2 bytes.
+- Fresh questions in existing sessions adopt renderer 3 using the saved custom prompt, which can break prompt-cache continuity. Historical retries retain renderer 1/2 instructions exactly; setting changes still affect new sessions only.
+
 ## 1.0.2 — Chat Completions, reasoning controls and numbered context
 
 - Add explicit Chat Completions protocol selection with native streaming/tool history, local replay and structured-summary compaction. Existing sessions retain their protocol; no automatic protocol fallback.

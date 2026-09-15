@@ -909,33 +909,38 @@ test('Stop during a CC search retains reasoning and paired tool history', async 
 });
 
 test('recovered retries preserve their renderer while genuinely new questions use the current version', async () => {
-  const { renderTurn, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
+  const { renderTurn, buildInstructions, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
   for (const protocol of ['responses', 'chat-completions']) {
-    const script = protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => ({
-      ok: true, status: 200, headers: { get: () => null },
-      body: (async function* () { yield new TextEncoder().encode('data: {"id":"cc","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'); })(),
-    });
-    const { conversation, sessionStore, network, settings } = makeConversation({ script });
-    const id = await newSession(sessionStore, conversation, { ...settings, protocol });
-    const additions = [{ kind: 'file', path: 'a.md', text: 'alpha\nbeta' }];
-    await sessionStore.append(id, 'turn/started', { turnId: 'old', question: 'retry me', additions, rendererVersion: 1 });
-    await conversation.recover(id);
-    const recovered = conversation.stateFor(id).turn;
-    assert.equal(recovered.rendererVersion, 1);
-    const result = await conversation.send(id, recovered.question, { additions: recovered.additions, rendererVersion: recovered.rendererVersion });
-    assert.equal(result.status, 'complete');
-    const started = sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1);
-    assert.notEqual(started.payload.turnId, 'old');
-    assert.equal(started.payload.rendererVersion, 1);
-    const native = require('../src/quick-ask/protocol').protocolFor({ protocol });
-    const expected = renderTurn({ mutations: additions, question: 'retry me', rendererVersion: 1, userMessage: native.userMessage });
-    const body = JSON.parse(network.requests.at(-1).options.body);
-    const input = protocol === 'responses' ? body.input : body.messages.slice(1);
-    assert.deepEqual(input, expected);
-    assert.deepEqual(conversation.snapshot(id).items.slice(0, 2), expected);
-    await conversation.send(id, 'new question', { additions });
-    assert.equal(sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1).payload.rendererVersion, RENDERER_VERSION);
-    assert.match(network.requests.at(-1).options.body, /1 \| alpha/);
+    for (const version of [1, 2, 3]) {
+      const script = protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => ({
+        ok: true, status: 200, headers: { get: () => null },
+        body: (async function* () { yield new TextEncoder().encode('data: {"id":"cc","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'); })(),
+      });
+      const { conversation, sessionStore, network, settings } = makeConversation({ script });
+      const id = await newSession(sessionStore, conversation, { ...settings, protocol, systemPrompt: 'Saved custom role.' });
+      const additions = [{ kind: 'file', path: 'a.md', text: 'alpha\nbeta' }];
+      await sessionStore.append(id, 'turn/started', { turnId: 'old', question: 'retry me', additions, rendererVersion: version });
+      await conversation.recover(id);
+      const recovered = conversation.stateFor(id).turn;
+      assert.equal(recovered.rendererVersion, version);
+      const result = await conversation.send(id, recovered.question, { additions: recovered.additions, rendererVersion: recovered.rendererVersion });
+      assert.equal(result.status, 'complete');
+      const started = sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1);
+      assert.notEqual(started.payload.turnId, 'old');
+      assert.equal(started.payload.rendererVersion, version);
+      const native = require('../src/quick-ask/protocol').protocolFor({ protocol });
+      const expected = renderTurn({ mutations: additions, question: 'retry me', rendererVersion: version, userMessage: native.userMessage });
+      const body = JSON.parse(network.requests.at(-1).options.body);
+      const input = protocol === 'responses' ? body.input : body.messages.slice(1);
+      assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content, buildInstructions({ rendererVersion: version, customSystemPrompt: 'Saved custom role.' }));
+      assert.deepEqual(input, expected);
+      assert.deepEqual(conversation.snapshot(id).items.slice(0, 2), expected);
+      await conversation.send(id, 'new question', { additions });
+      assert.equal(sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1).payload.rendererVersion, RENDERER_VERSION);
+      assert.match(network.requests.at(-1).options.body, /1 \| alpha/);
+      const fresh = JSON.parse(network.requests.at(-1).options.body);
+      assert.equal(protocol === 'responses' ? fresh.instructions : fresh.messages[0].content, buildInstructions({ rendererVersion: 3, customSystemPrompt: 'Saved custom role.' }));
+    }
   }
 });
 
@@ -989,4 +994,27 @@ test('CC Stop before the first frame leaves canonical history untouched', async 
   assert.equal(result.accepted, false);
   assert.deepEqual(conversation.snapshot(id).items, []);
   assert.equal(fixture.sessionStore.records.get(id).some(r => r.kind === 'item/output'), false);
+});
+
+test('profile switching changes new-session requests only in both protocols', async () => {
+  const { applyQuickAskPatch, sessionConfigSnapshot } = require('../src/quick-ask/settings');
+  const { buildInstructions } = require('../src/quick-ask/prompt-renderer');
+  for (const protocol of ['responses', 'chat-completions']) {
+    const f = makeConversation({ settings: { protocol, systemPrompt: 'Original role' },
+      script: protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => chatResponse(),
+    });
+    const oldId = await newSession(f.sessionStore, f.conversation, sessionConfigSnapshot(f.settings));
+    const originalHeader = JSON.stringify(f.sessionStore.logs.get(oldId)[0]);
+    applyQuickAskPatch(f.settings, { profileAction: { type: 'add', id: 'new-role', name: 'New role' } });
+    applyQuickAskPatch(f.settings, { profileAction: { type: 'prompt', id: 'new-role', prompt: 'Different role' } });
+    const newId = await newSession(f.sessionStore, f.conversation, sessionConfigSnapshot(f.settings));
+    for (const [id, prompt] of [[oldId, 'Original role'], [newId, 'Different role']]) {
+      const result = await f.conversation.send(id, 'Explain');
+      assert.equal(result.status, 'complete');
+      const body = JSON.parse(f.network.requests.at(-1).options.body);
+      assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content,
+        buildInstructions({ rendererVersion: 3, customSystemPrompt: prompt }));
+    }
+    assert.equal(JSON.stringify(f.sessionStore.logs.get(oldId)[0]), originalHeader);
+  }
 });

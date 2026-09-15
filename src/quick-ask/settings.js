@@ -1,3 +1,4 @@
+const { normalizeProfiles, applyProfileAction } = require("./profiles");
 const { normalizeSearchSettings } = require("./web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("./i18n");
 const DISPLAY_FIELDS = {
@@ -81,6 +82,7 @@ function defaultQuickAskSettings() {
     secretId: "",
     model: "",
     systemPrompt: "",
+    ...normalizeProfiles(),
     contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     callLimit: DEFAULT_CALL_LIMIT,
     preservedCopy: { enabled: false, directory: DEFAULT_PRESERVED_COPY_DIRECTORY },
@@ -117,6 +119,7 @@ function normalizeQuickAskSettings(saved) {
     secretId: typeof saved.secretId === "string" ? saved.secretId : defaults.secretId,
     model: typeof saved.model === "string" ? saved.model.trim() : defaults.model,
     systemPrompt: typeof saved.systemPrompt === "string" ? saved.systemPrompt : defaults.systemPrompt,
+    ...normalizeProfiles(saved),
     contextWindowTokens: Object.hasOwn(saved, "contextWindowTokens")
       ? normalizeContextWindowTokens(saved.contextWindowTokens)
       : defaults.contextWindowTokens,
@@ -194,6 +197,7 @@ function redactQuickAskSettings(settings) {
     baseUrl: values.baseUrl,
     model: values.model,
     systemPrompt: values.systemPrompt,
+    ...normalizeProfiles(values),
     contextWindowTokens: values.contextWindowTokens,
     callLimit: values.callLimit,
     preservedCopy: { ...values.preservedCopy },
@@ -234,7 +238,24 @@ function applyQuickAskPatch(target, patch) {
   if (Object.hasOwn(patch.webSearch ?? {}, "provider") && patch.webSearch.provider !== target.webSearch?.provider) search.secretId = search.secretIds[patch.webSearch.provider] ?? "";
   const normalized = normalizeQuickAskSettings({ ...target, ...patch, webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
   let applied = 0;
-  for (const field of ["enable", "protocol", "baseUrl", "secretId", "model", "systemPrompt", "contextWindowTokens", "callLimit"]) {
+  if (patch.profileAction) {
+    Object.assign(target, applyProfileAction(target, patch.profileAction, { language: patch.profileAction.language }));
+    applied++;
+  } else if (Object.hasOwn(patch, 'systemPrompt') || Object.hasOwn(patch, 'systemProfiles') || Object.hasOwn(patch, 'activeSystemProfileId')) {
+    const incoming = { ...target, ...patch };
+    // Catalog-only updates choose their own active prompt. Legacy-only edits
+    // remain authoritative; mixed action patches use the action exclusively.
+    if (!Object.hasOwn(patch, 'systemPrompt')) delete incoming.systemPrompt;
+    const catalog = normalizeProfiles(incoming);
+    const current = catalog.systemProfiles.find(profile => profile.id === catalog.activeSystemProfileId);
+    if (Object.hasOwn(patch, 'systemPrompt')) {
+      current.prompt = normalized.systemPrompt;
+      if (!Object.hasOwn(patch, 'systemProfiles')) current.showDefaultRole = false;
+    }
+    Object.assign(target, catalog, { systemPrompt: current.prompt });
+    applied++;
+  }
+  for (const field of ["enable", "protocol", "baseUrl", "secretId", "model", "contextWindowTokens", "callLimit"]) {
     if (Object.hasOwn(patch, field) && target[field] !== normalized[field]) {
       target[field] = normalized[field];
       applied += 1;

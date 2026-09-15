@@ -1,3 +1,4 @@
+const { profileSettings } = require("./profile-settings");
 const { normalizeSearchSettings } = require("./web-search");
 const { t } = require("./i18n");
 const { quickAskDisplayPage, baseUrlError, normalizeBaseUrl } = require("./settings");
@@ -151,11 +152,7 @@ function quickAskPage(host, SecretComponent) {
             desc: t(host.settings, "settings.quickAsk.model.desc"),
             control: { type: "text", key: "quickAsk.model", validate: value => String(value).trim() ? undefined : t(host.settings, "settings.quickAsk.validation.required") },
           },
-          {
-            name: t(host.settings, "settings.quickAsk.systemPrompt.name"),
-            desc: t(host.settings, "settings.quickAsk.systemPrompt.desc"),
-            control: { type: "textarea", key: "quickAsk.systemPrompt" },
-          },
+          ...profileSettings(host),
           {
             name: t(host.settings, "settings.quickAsk.contextWindow.name"),
             desc: t(host.settings, "settings.quickAsk.contextWindow.desc"),

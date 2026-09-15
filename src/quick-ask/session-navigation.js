@@ -1,13 +1,13 @@
 // A single policy for placeholder, existing-session and busy states. Titles
 // are labels only; an actionable session always has an ID in the real index.
-function sessionNavigation({ sessions = [], activeSessionId = null, busy = false, hasHistory = false, hasDraft = false, unavailable = false } = {}) {
+function sessionNavigation({ sessions = [], activeSessionId = null, busy = false, hasHistory = false, hasDraft = false, unavailable = false, roleChanged = false } = {}) {
   const active = sessions.find(session => session.id === activeSessionId) ?? null;
   return {
     kind: busy ? "busy" : active ? "session" : "none",
     active,
     canSelect: !busy && sessions.length > 0,
     canManage: !busy && active !== null,
-    canCreate: !busy && (!active || unavailable || hasHistory || hasDraft),
+    canCreate: !busy && (!active || unavailable || hasHistory || hasDraft || roleChanged),
   };
 }
 

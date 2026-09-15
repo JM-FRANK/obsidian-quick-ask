@@ -166,7 +166,7 @@ test('settings that leave the machine carry the secret reference only, never a v
   }
   assert.equal(JSON.stringify(redacted).includes('sk-live-secret-value'), false);
   assert.deepEqual(Object.keys(redacted).sort(), [
-    'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'model', 'preservedCopy', 'protocol', 'secretId', 'systemPrompt', 'webSearch',
+    'activeSystemProfileId', 'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'model', 'preservedCopy', 'protocol', 'secretId', 'systemProfiles', 'systemPrompt', 'webSearch',
   ]);
 });
 

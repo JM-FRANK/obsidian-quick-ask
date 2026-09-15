@@ -1,3 +1,4 @@
+const { activeProfile, profileName } = require("./profiles");
 const { RENDERER_VERSION } = require("./prompt-renderer");
 const { REASONING_LEVELS, nextReasoningEffort } = require("./reasoning");
 const { safeSourceUrl } = require("./web-search");
@@ -173,6 +174,11 @@ class QuickAskView {
         remove: id => this.deleteSession(id),
       });
     });
+    const profile = ui.createEl(header, 'span', {
+      cls: 'scholar-quick-ask-profile',
+      text: profileName(activeProfile(this.getSettings()?.quickAsk), this.getSettings()),
+    });
+    ui.setTooltip(profile, `${profile.textContent} — ${this.t(this.getSettings(), 'profiles.newSessionsOnly')}`);
     const create = ui.createEl(header, "button", {
       cls: "scholar-quick-ask-new-session",
       attributes: { "aria-label": this.t(this.getSettings(), "sidebar.newSession"), type: "button" },
@@ -1113,6 +1119,7 @@ class QuickAskView {
     region.classList?.remove("is-drag-over");
     // Only the issuing host editor can authorize the origin. A MIME payload
     // alone never grants access to a file.
+    const focusComposer = this.roots.input.contains(region);
     const sessionId = this.activeSessionId;
     const result = await validateDrop({
       capture,
@@ -1130,6 +1137,7 @@ class QuickAskView {
     this.pending = addFile(this.pending, result.selection.path);
     this.saveDraft();
     this.renderPending();
+    if (focusComposer) this.composer.focus();
   }
 
   async reloadSessions() {
@@ -1226,10 +1234,12 @@ class QuickAskView {
   }
 
   navigation() {
+    const savedRole = this.activeSessionId ? this.runtime?.stateFor?.(this.activeSessionId)?.config?.systemPrompt : undefined;
     return sessionNavigation({
       sessions: this.sessions, activeSessionId: this.activeSessionId,
       busy: this.loadingSessions || this.sessionActions.busy,
       unavailable: this.sessionUnavailable,
+      roleChanged: savedRole !== undefined && savedRole !== (this.getSettings()?.quickAsk?.systemPrompt ?? ""),
       hasHistory: Boolean(this.hasSessionHistory || this.messages.length || this.streaming || this.sending),
       hasDraft: Boolean((this.composer?.getDraft?.() ?? this.composer?.text ?? "").trim() || this.pending.files.length || this.pending.selections.length),
     });
