@@ -21,6 +21,16 @@ function textTurn({ text = 'ok', responseId = 'resp_1', usage = { input_tokens: 
   ];
 }
 
+function chatTurn({ text = 'ok', input = 10 } = {}) {
+  const frames = [
+    { choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: input, completion_tokens: 2, total_tokens: input + 2 } },
+  ].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
+  return { ok: true, status: 200, headers: { get: () => null },
+    body: (async function* () { yield new TextEncoder().encode(frames); })() };
+}
+
 function makeStore() {
   const records = new Map();
   let counter = 0;
@@ -43,7 +53,7 @@ function jsonTurn({ id = 'resp_1', text = 'ok' } = {}) {
   };
 }
 
-function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official = null } = {}) {
+function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official = null, tracker = null, vault = null } = {}) {
   const sessionStore = makeStore();
   const requests = [];
   const compactRequests = [];
@@ -52,6 +62,7 @@ function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official
       requests.push({ url, options: options ? { ...options, body: options.body } : options });
       // A summarization request disables tools; an ordinary turn does not.
       const parsed = options?.body ? JSON.parse(options.body) : {};
+      if (settings.protocol === 'chat-completions') return chatTurn({ text: parsed.tool_choice === 'none' ? summaryText : 'ok' });
       if (parsed.tool_choice === 'none') return sseResponse(textTurn({ text: summaryText }));
       return sseResponse(textTurn());
     },
@@ -73,12 +84,12 @@ function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official
   };
   const conversation = createConversation({
     sessionStore,
-    tracker: { acceptTurn() {}, rejectTurn() {}, allowlist: () => [], trackedFiles: () => [], mutationsForSend: async () => [] },
+    tracker: tracker ?? { acceptTurn() {}, rejectTurn() {}, allowlist: () => [], trackedFiles: () => [], mutationsForSend: async () => [] },
     environment: {
       network,
       scheduler: { now: () => 0, delay: (ms, cb) => setTimeout(cb, ms), cancelDelay: clearTimeout, frame: (cb) => setTimeout(cb, 0), cancelFrame: clearTimeout },
       secrets: { resolve: () => 'sk-test' },
-      vault: { normalizePath: (p) => p, readText: async () => null },
+      vault: vault ?? { normalizePath: (p) => p, readText: async () => null },
     },
     getSettings: () => ({ quickAsk: merged }),
   });
@@ -89,7 +100,7 @@ async function start(fixture, config = {}) {
   const { id } = await fixture.sessionStore.createSession();
   fixture.sessionStore.records.get(id).push({ seq: 0, kind: 'header', payload: { config: { ...fixture.settings, ...config } } });
   const original = fixture.sessionStore.readLog.bind(fixture.sessionStore);
-  fixture.sessionStore.readLog = async (sessionId) => ({ ...(await original(sessionId)), header: { config: { ...fixture.settings, ...config } } });
+  fixture.sessionStore.readLog = async (sessionId) => ({ ...(await original(sessionId)), version: fixture.settings.protocol === 'chat-completions' ? 2 : 1, header: { config: { ...fixture.settings, ...config } } });
   await fixture.conversation.load(id);
   return id;
 }
@@ -271,8 +282,8 @@ test('the occupancy anchor comes from provider usage and stays exact afterwards'
   assert.equal(snapshot.occupancy.tokens > 0, true);
 });
 
-test('local replay sends the compacted surface and reintroduces still-tracked files', async () => {
-  // A tracked file the compaction must reintroduce verbatim.
+test('local replay sends the compacted surface with file references instead of repeated bodies', async () => {
+  // The fresh compacted generation reintroduces only this tracked path.
   const tracked = [{ path: 'notes/a.md', observedRawText: '# Alpha\nfull text\n', status: 'tracked' }];
   const fixture = makeFixture({ official: 'supported', settings: { contextWindowTokens: 1000000, secretId: 'k', model: 'gpt-5' } });
   const tracker = {
@@ -314,10 +325,9 @@ test('local replay sends the compacted surface and reintroduces still-tracked fi
   // parsed copy of them.
   assert.equal(body.input.some((item) => item.type === 'compaction' && item.encrypted_content === 'blob'), true,
     'the opaque Compaction Item is preserved exactly');
-  // Every still-tracked Context File is reintroduced from its latest complete
-  // original text, not from the diff history.
-  assert.equal(texts.some((text) => text.includes('1 | # Alpha\n2 | full text\n3 | ')), true,
-    'the complete tracked file is reintroduced with physical line numbers');
+  assert.ok(texts.some(text => text.includes('<context_file_reference path="notes/a.md" />')));
+  assert.equal(texts.some(text => text.includes('<context_file path=')), false);
+  assert.equal(texts.some(text => text.includes('# Alpha')), false);
 });
 
 test('replay closes an unmatched compaction bracket with an interrupted marker', async () => {
@@ -382,11 +392,9 @@ test('a checkpoint the shrink gate rejects never activates a replacement', async
   assert.equal(state.items.length, before, 'no canonical item is discarded');
 });
 
-test('a composed context still over the threshold shrinks its tail and retries once', async () => {
-  // The checkpoint itself shrinks, but the reintroduced tracked file pushes the
-  // composed context back over the threshold, so the tail must shrink and the
-  // compaction must run once more before it is accepted.
-  const tracked = [{ path: 'papers/huge.md', observedRawText: 'y'.repeat(260000), status: 'tracked' }];
+test('large tracked bodies no longer set a floor on compacted occupancy', async () => {
+  // These raw bodies would exceed capacity if they were injected again.
+  const tracked = [{ path: 'papers/huge.md', observedRawText: '文'.repeat(780000), status: 'tracked' }];
   const checkpoint = { type: 'compaction', id: 'cmp_mid', encrypted_content: 'c'.repeat(2000) };
   const fixture = makeFixture({ official: 'supported', settings: { contextWindowTokens: 200000 } });
   const { createConversation } = require('../src/quick-ask/conversation');
@@ -418,11 +426,19 @@ test('a composed context still over the threshold shrinks its tail and retries o
   }
   const state = conversation.stateFor(id);
   const result = await conversation.compactSession(state, { reason: 'pressure' });
-  // The reintroduced tracked file keeps the composition over the threshold, so
-  // the tail shrinks and one more compaction runs.
-  assert.equal(fixture.compactRequests.length >= 1, true, 'compaction ran');
-  assert.equal(['committed', 'no-viable-space'].includes(result.status), true, `terminal status, got ${result.status}`);
-  assert.equal(tracked[0].observedRawText.length, 260000, 'the tracked file text is never truncated');
+  assert.equal(fixture.compactRequests.length, 1, 'one checkpoint request only');
+  assert.equal(result.status, 'committed');
+  assert.equal(tracked[0].observedRawText.length, 780000, 'the tracked file text is never truncated');
+  // Reload remains offline and prices references instead of these raw bodies.
+  fixture.network.request = fixture.network.fetch = async () => { throw new Error('replay contacted provider'); };
+  await conversation.load(id);
+  const restored = conversation.snapshot(id);
+  assert.ok(restored.price.components.history < 10000, 'restored price does not include the tracked raw body');
+  assert.equal(restored.occupancy.estimated, true);
+  conversation.forget(id);
+  await conversation.load(id);
+  assert.deepEqual(conversation.snapshot(id).price, restored.price);
+  assert.deepEqual(conversation.snapshot(id).occupancy, restored.occupancy);
 });
 
 test('a checkpoint larger than its prefix is rejected and leaves every item in place', async () => {
@@ -490,7 +506,7 @@ test('the compacted surface carries each part once, files before the checkpoint'
   const compactionItems = body.input.filter((item) => item.type === 'compaction' && item.id === 'cmp_1');
   assert.equal(compactionItems.length, 1, 'the opaque checkpoint item appears exactly once');
   const texts = body.input.map((item) => String(item.content?.[0]?.text ?? ''));
-  const fileIndex = texts.findIndex((text) => text.includes('kept text'));
+  const fileIndex = texts.findIndex((text) => text.includes('<context_file_reference path="papers/kept.md" />'));
   const checkpointIndex = body.input.findIndex((item) => item.type === 'compaction');
   assert.equal(fileIndex >= 0, true, 'the tracked file is reintroduced');
   assert.equal(checkpointIndex > fileIndex, true, 'tracked files come before the checkpoint output');
@@ -652,11 +668,158 @@ test('pending files are still checked after compaction and are never truncated',
   const state = fixture.conversation.stateFor(id);
   state.items.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old'.repeat(60000) }] },
     { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'recent' }] });
-  const file = { kind: 'file', path: 'huge.md', text: 'f'.repeat(200000) };
+  const file = { kind: 'file', path: 'huge.md', text: '文'.repeat(200000) };
   const result = await fixture.conversation.send(id, 'read', { additions: [file] });
   assert.equal(result.status, 'failed');
   assert.equal(result.error.code, 'CAPACITY');
   assert.equal(result.accepted, false);
   assert.equal(state.turn.additions[0].text, file.text);
   assert.equal(fixture.requests.filter(r => !r.url.endsWith('/responses/input_tokens')).length, 0);
+});
+
+for (const official of ['supported', 'unsupported', 'chat-completions']) {
+  for (const reload of ['switch', 'restart']) {
+    test(`compacted occupancy survives ${reload} without another ${official} compaction`, async () => {
+      const fixture = makeFixture({ official, settings: official === 'chat-completions' ? { protocol: official } : {} });
+      const id = await start(fixture);
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await fixture.conversation.send(id, `history ${i} ${'material '.repeat(2000)}`)).status, 'complete');
+      }
+      const fetch = fixture.network.fetch;
+      fixture.network.fetch = async () => official === 'chat-completions' ? chatTurn({ input: 244000 }) : sseResponse(textTurn({ usage: {
+        input_tokens: 244000, output_tokens: 2, total_tokens: 244002,
+      } }));
+      assert.equal((await fixture.conversation.send(id, 'last question')).status, 'complete');
+      fixture.network.fetch = fetch;
+      const before = fixture.conversation.snapshot(id);
+      assert.equal(before.occupancy.tokens, 244000);
+      assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+      const live = fixture.conversation.snapshot(id);
+      assert.ok(live.occupancy.tokens < before.occupancy.tokens);
+      const calls = fixture.requests.length + fixture.compactRequests.length;
+      const checkpoints = fixture.sessionStore.records.get(id).filter(r => r.kind === 'compaction/checkpoint').length;
+      if (reload === 'restart') fixture.conversation.forget(id);
+      await fixture.conversation.load(id);
+      const restored = fixture.conversation.snapshot(id);
+      assert.deepEqual(restored.occupancy, live.occupancy);
+      assert.deepEqual(restored.price, live.price);
+      assert.equal(restored.compaction.active, true);
+      assert.equal(fixture.requests.length + fixture.compactRequests.length, calls, 'replay has no network calls');
+      assert.equal((await fixture.conversation.send(id, 'follow up')).status, 'complete');
+      assert.equal(fixture.sessionStore.records.get(id).filter(r => r.kind === 'compaction/checkpoint').length,
+        checkpoints, 'no new divider or checkpoint');
+      assert.equal(fixture.requests.length + fixture.compactRequests.length, calls + 1, 'only the requested answer');
+      const body = JSON.parse(fixture.requests.at(-1).options.body);
+      const input = body.input ?? body.messages;
+      assert.ok(input.some(item => item.type === 'compaction' || JSON.stringify(item.content).includes('<compacted-summary>')));
+      assert.equal(JSON.stringify(input).includes('history 0'), false, 'shadowed history stays outside the API request');
+    });
+  }
+}
+
+test('usage after a checkpoint remains authoritative on replay; failed compactions do not clear it', async () => {
+  const fixture = makeFixture();
+  const id = await start(fixture);
+  for (let i = 0; i < 3; i++) await fixture.conversation.send(id, `history ${i} ${'material '.repeat(2000)}`);
+  assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+  fixture.network.fetch = async () => sseResponse(textTurn({ usage: {
+    input_tokens: 12000, output_tokens: 2, total_tokens: 12002,
+  } }));
+  assert.equal((await fixture.conversation.send(id, 'after checkpoint')).status, 'complete');
+  const usage = fixture.conversation.snapshot(id).sessionUsage;
+  fixture.network.request = async () => ({ status: 500, text: 'failed' });
+  assert.equal((await fixture.conversation.compactNow(id)).status, 'failed');
+  fixture.conversation.forget(id);
+  await fixture.conversation.load(id);
+  assert.deepEqual(fixture.conversation.snapshot(id).occupancy, { tokens: 12000, exact: true, estimated: false });
+  assert.equal(fixture.conversation.snapshot(id).sessionUsage, usage);
+});
+
+for (const mode of ['official', 'fallback', 'chat-completions']) {
+  test(`${mode} compacts original files, preserves ordered references and allows full-file retrieval`, async () => {
+    const { createContextTracker } = require('../src/quick-ask/tracking');
+    const { createToolExecutor } = require('../src/quick-ask/tool');
+    const { createToolLoop } = require('../src/quick-ask/tool-loop');
+    const { RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
+    const files = new Map([
+      ['z.md', 'ORIGINAL_Z\n' + '原文'.repeat(4000)],
+      ['a&".md', 'ORIGINAL_A\n' + '材料'.repeat(4000)],
+      ['removed.md', 'REMOVED_BODY\n' + '内容'.repeat(4000)],
+      ['deleted.md', 'DELETED_BODY'],
+      ['staged.md', 'UNSENT_BODY'],
+    ]);
+    const vault = { readText: async path => files.get(path) ?? null,
+      normalizePath: path => path, resolveRole: () => 'markdown' };
+    let fixture, id;
+    const tracker = createContextTracker({ vault, onEvent: event => {
+      if (id) void fixture.sessionStore.append(id, event.kind, event);
+    } });
+    fixture = makeFixture({ tracker, vault, official: mode === 'fallback' ? 'unsupported' : 'supported',
+      settings: mode === 'chat-completions' ? { protocol: mode } : {} });
+    id = await start(fixture);
+    for (const path of ['z.md', 'a&".md', 'removed.md', 'deleted.md']) tracker.stageFile(path);
+    assert.equal((await fixture.conversation.send(id, 'read these files')).status, 'complete');
+    assert.equal((await fixture.conversation.send(id, 'latest question')).status, 'complete');
+    tracker.removedFile('removed.md');
+    tracker.deletedFile('deleted.md');
+    files.delete('deleted.md');
+    tracker.stageFile('staged.md');
+    tracker.modifiedFile('z.md');
+    const before = await fixture.conversation.pricePendingRequest(fixture.conversation.stateFor(id), { question: '', additions: [] });
+    assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+    const source = mode === 'official' ? JSON.parse(fixture.compactRequests.at(-1).body)
+      : fixture.requests.map(r => JSON.parse(r.options.body)).find(body => body.tool_choice === 'none');
+    for (const marker of ['ORIGINAL_Z', 'ORIGINAL_A', 'REMOVED_BODY', 'DELETED_BODY']) {
+      assert.ok(JSON.stringify(source.input ?? source.messages).includes(marker), `${marker} reaches compaction`);
+    }
+    const live = fixture.conversation.snapshot(id);
+    assert.ok(live.price.components.history < before.price.components.history / 10);
+    assert.equal((await fixture.conversation.send(id, 'after', { additions: [] })).status, 'complete');
+    const body = JSON.parse(fixture.requests.at(-1).options.body);
+    const input = body.input ?? body.messages.filter(item => item.role !== 'system');
+    const textOf = item => typeof item.content === 'string' ? item.content : item.content?.[0]?.text ?? '';
+    assert.ok(textOf(input[0]).includes('<context_file_reference path="z.md" />'));
+    assert.ok(textOf(input[1]).includes('<context_file_reference path="a&amp;&quot;.md" />'));
+    const text = input.map(textOf).join('\n');
+    assert.equal(text.includes('<context_file path='), false);
+    for (const marker of ['ORIGINAL_Z', 'ORIGINAL_A', 'REMOVED_BODY', 'DELETED_BODY', 'UNSENT_BODY']) assert.equal(text.includes(marker), false);
+    for (const path of ['removed.md', 'deleted.md', 'staged.md']) assert.equal(text.includes(`<context_file_reference path="${path}"`), false);
+    const price = (await fixture.conversation.pricePendingRequest(fixture.conversation.stateFor(id), { question: '', additions: [] })).price;
+    fixture.conversation.forget(id);
+    await fixture.conversation.load(id);
+    assert.deepEqual(fixture.conversation.snapshot(id).price, price, 'replay restores the same references');
+    assert.ok(tracker.allowlist().includes('removed.md'), 'removing a row preserves read permission');
+    assert.ok(JSON.stringify(fixture.conversation.snapshot(id).items).includes('ORIGINAL_Z'), 'local history stays complete');
+
+    files.set('z.md', '# Current full text\nnew uncropped content\n');
+    const loop = createToolLoop({ executor: createToolExecutor({ vault }), tracker,
+      config: { protocol: mode === 'chat-completions' ? mode : 'responses', rendererVersion: RENDERER_VERSION } });
+    const question = loop.beginQuestion({ allowlist: tracker.allowlist() });
+    const read = await loop.runBatch([{ id: 'f1', callId: 'f1', name: 'get-full-file', arguments: { path: 'z.md' } }], question);
+    assert.equal(read.results[0].output, files.get('z.md'));
+    assert.equal(read.results[0].ok, true);
+    assert.equal(loop.remaining(question), 2, 'the default three-call limit is unchanged');
+  });
+}
+
+test('compaction keeps file bodies already in the retained recent tail verbatim', async () => {
+  const fixture = makeFixture({ settings: { contextWindowTokens: 70000 } });
+  const id = await start(fixture);
+  assert.equal((await fixture.conversation.send(id, 'old history ' + 'material '.repeat(20000))).status, 'complete');
+  assert.equal((await fixture.conversation.send(id, 'recent file', { additions: [
+    { kind: 'file', path: 'recent.md', text: '# Recent body\nPreserve me exactly.' },
+  ] })).status, 'complete');
+  assert.equal((await fixture.conversation.send(id, 'latest question')).status, 'complete');
+  const recent = fixture.conversation.snapshot(id).items.find(item => item.content?.some(block => block.text?.includes('<context_file path="recent.md"')));
+  assert.ok(recent);
+  assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+  assert.equal((await fixture.conversation.send(id, 'after')).status, 'complete');
+  const input = JSON.parse(fixture.requests.at(-1).options.body).input;
+  assert.deepEqual(input.find(item => item.content?.some(block => block.text?.includes('<context_file path="recent.md"'))), recent);
+  assert.equal(JSON.stringify(input).includes('old history'), false);
+  fixture.conversation.forget(id);
+  await fixture.conversation.load(id);
+  assert.equal((await fixture.conversation.send(id, 'after reload')).status, 'complete');
+  const replay = JSON.parse(fixture.requests.at(-1).options.body).input;
+  assert.deepEqual(replay.find(item => item.content?.some(block => block.text?.includes('<context_file path="recent.md"'))), recent);
 });

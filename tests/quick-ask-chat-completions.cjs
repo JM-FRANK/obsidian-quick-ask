@@ -44,7 +44,7 @@ const { estimateItem, createTurnUsage } = require('../src/quick-ask/tokens');
 const { isStructurallyBalanced, selectCompactionRange } = require('../src/quick-ask/compaction');
 test('native nested tools count toward context and compaction never separates a call batch', () => {
   const call = { role: 'assistant', content: null, tool_calls: [
-    { id: 'a', type: 'function', function: { name: 'get-full-file', arguments: 'x'.repeat(4000) } },
+    { id: 'a', type: 'function', function: { name: 'get-full-file', arguments: '文'.repeat(4000) } },
     { id: 'b', type: 'function', function: { name: 'get-full-file', arguments: '{}' } },
   ] };
   const a = { role: 'tool', tool_call_id: 'a', content: 'file one' };

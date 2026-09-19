@@ -909,7 +909,6 @@ class QuickAskView {
       if (!this.mounted || this.activeSessionId !== sessionId) return result;
       if (result.status === "invalid") this.showValidationError(result.errors);
       else if (result.status === "skipped" || result.status === "rejected") this.ui.notice(this.t(this.getSettings(), "compaction.nothing"));
-      else if (result.status === "no-viable-space") this.ui.notice(this.t(this.getSettings(), "composer.capacityFailed"));
       else if (result.status === "busy") this.ui.notice(this.t(this.getSettings(), "composer.busy"));
       return result;
     } catch { this.ui.notice(this.t(this.getSettings(), "compaction.failed")); }

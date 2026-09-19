@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- After compaction, reintroduce tracked files as path references instead of repeating their full bodies. Preserve the recent tail, local history and existing full-file retrieval limits.
+
+- Restore post-compaction occupancy and its composition after session switching or reload, entirely offline, without reusing pre-compaction usage or triggering redundant compaction on the next send.
+- Use tokenx for all local token estimates, retaining the approximate marker and exact provider usage.
+- Remove the inner compaction retry; retain the final send-time capacity check and existing historical dividers.
+
 - Preserve profile-control subscriptions during page construction and clean them up after an observed detach.
 
 - Prevent programmatic profile-control refresh from saving the displayed default as custom text; preserve exact default request bytes on settings open and Reset.

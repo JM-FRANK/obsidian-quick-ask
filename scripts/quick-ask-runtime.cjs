@@ -16,7 +16,7 @@ function bundle(options) {
 }
 // Quick Ask's pinned third-party packages are bundled into the artifact, so the
 // installable plugin stays self-contained with no runtime npm resolution.
-const quickAskDependencies = ["eventsource-parser", "diff", "zustand/vanilla"].map((name) => {
+const quickAskDependencies = ["eventsource-parser", "diff", "zustand/vanilla", "tokenx"].map((name) => {
   const source = bundle({
     entryPoints: [require.resolve(name, { paths: [root] })],
     bundle: true,

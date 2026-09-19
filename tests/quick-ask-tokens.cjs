@@ -3,14 +3,16 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   formatTokens, formatPercent,
-  CHARACTERS_PER_TOKEN, estimateText, estimateItem, estimateItems, priceProspectiveRequest,
+  estimateText, estimateItem, estimateItems, priceProspectiveRequest,
   capacityBudget, contextOccupancy, occupancyColor, shouldCompact,
   createTurnUsage, createSessionUsage, OCCUPANCY_COMPACTION_RATIO,
 } = require('../src/quick-ask/tokens');
 
-test('the local estimator uses four characters per token plus structural overhead', () => {
-  assert.equal(CHARACTERS_PER_TOKEN, 4);
-  assert.equal(estimateText('x'.repeat(400)), 100);
+test('CommonJS token estimates handle English and Chinese through tokenx', () => {
+  assert.equal(estimateText('Hello, world!'), 4);
+  assert.equal(estimateText('你好世界'), 4);
+  assert.equal(estimateText('知识来自观察，理解来自思考。'), 13);
+  assert.equal(estimateText('x'.repeat(400)), 58);
   assert.equal(estimateText(''), 0);
   assert.equal(estimateText(undefined), 0);
 });
@@ -19,7 +21,7 @@ test('an item estimate adds a role and block overhead on top of its text', () =>
   const bare = estimateItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text: '' }] });
   assert.equal(bare > 0, true, 'structural overhead is counted even with no text');
   const longer = estimateItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x'.repeat(400) }] });
-  assert.equal(longer - bare, 100);
+  assert.equal(longer - bare, 58);
   assert.equal(estimateItems([{ type: 'message', content: [{ text: 'x'.repeat(40) }] }]) > 0, true);
   assert.equal(estimateItems([]), 0);
 });
@@ -41,7 +43,7 @@ test('the whole prospective request is priced with the answer reserve included',
   });
   assert.equal(price.estimated, true);
   assert.equal(price.components.reserve, 16384);
-  assert.equal(price.components.instructions >= 100, true);
+  assert.equal(price.components.instructions >= 58, true);
   assert.equal(price.total, Object.values(price.components).reduce((sum, value) => sum + value, 0));
 });
 
@@ -155,4 +157,21 @@ test('token text is compact and marked as approximate by the caller', () => {
   assert.equal(formatTokens(undefined), '0 tok');
   assert.equal(formatPercent(0.8), '80%');
   assert.equal(formatPercent(null), null);
+});
+
+test('Chinese estimates improve over the old ratio against fixed cl100k_base samples', () => {
+  // Reference counts measured independently with gpt-tokenizer 4.0.0's
+  // cl100k_base encoder. It is not a shipped or test-runtime dependency.
+  // These samples measure observed error, not a guarantee for other models.
+  const samples = [
+    ['知识来自观察，理解来自思考。', 17],
+    ['研究人员比较了两组实验结果，并分析了可能影响结论的因素。', 30],
+    ['人工智能正在改变我们的生活。', 13],
+    ['这是一段用于验证中文上下文占用估算的材料。我们保留原始文件内容，同时压缩较早的对话历史。', 48],
+  ];
+  for (const [text, reference] of samples) {
+    const error = Math.abs(estimateText(text) - reference);
+    assert.ok(error < Math.abs(Math.ceil(text.length / 4) - reference), text);
+    assert.ok(error / reference < 0.25, 'observed sample error stays below 25%, not a universal 10% bound');
+  }
 });

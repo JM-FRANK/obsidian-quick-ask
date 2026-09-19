@@ -56,7 +56,7 @@ function frameSummary(summaryText, { allowlist = [] } = {}) {
 }
 
 // A serialized get-full-file result is capped for the summarization request
-// only; still-tracked files are reintroduced afterwards from their full text.
+// only; it does not alter the local log or later full-file retrievals.
 function truncateToolResult(text) {
   const own = String(text ?? "");
   if (own.length <= TOOL_RESULT_CHARACTER_LIMIT) return own;
@@ -65,11 +65,11 @@ function truncateToolResult(text) {
 }
 
 // The retained recent tail targets 16 percent of the configured capacity and
-// excludes stable instructions, the tool schema, the summary, and the complete
-// contents of still-tracked files.
+// excludes stable instructions, the tool schema, the summary and separately
+// reintroduced file references. File bodies already in the tail count normally.
 function chooseRetainedTail({ items = [], capacityTokens = 0 } = {}) {
   // The budget excludes stable instructions, the tool schema, the compaction
-  // summary, and the complete contents of still-tracked files, so none of
+  // summary, and the reintroduced file references, so none of
   // those is subtracted here.
   const budget = Math.max(0, Math.floor(capacityTokens * RETAIN_RATIO));
   const tail = [];

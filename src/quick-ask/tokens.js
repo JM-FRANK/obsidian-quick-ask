@@ -2,23 +2,23 @@
 // derived locally is an estimate and is always marked as one. Reasoning tokens
 // are an output subset and are never added to output twice.
 //
-// The estimator uses the dsh-web rule of four characters per token plus a fixed
-// structural overhead per role and content block.
+// All local budgets share tokenx, with fixed role/content structural overhead.
+// This remains a model-independent estimate, never provider-reported usage.
+
+const { estimateTokenCount } = require("tokenx");
 
 const {
   responsesUsageInputTokens, responsesUsageOutputTokens, responsesUsageTotalTokens,
   responsesUsageCachedInputTokens, responsesUsageReasoningTokens,
 } = require("./transport");
 
-const CHARACTERS_PER_TOKEN = 4;
 const STRUCTURAL_OVERHEAD_TOKENS = 4;
 const ROLE_OVERHEAD_TOKENS = 4;
 const OCCUPANCY_WARNING_RATIO = 0.8;
 const OCCUPANCY_COMPACTION_RATIO = 0.9;
 
 function estimateText(text) {
-  const length = typeof text === "string" ? text.length : 0;
-  return Math.ceil(length / CHARACTERS_PER_TOKEN);
+  return estimateTokenCount(typeof text === "string" ? text : "");
 }
 
 // Estimate one canonical Responses item, or one Context mutation, which carries
@@ -41,9 +41,8 @@ function estimateItem(item) {
   if (typeof item.output === "string") tokens += estimateText(item.output);
   // Opaque transport payloads (encrypted reasoning, a Compaction Item's
   // encrypted_content) are not readable text, but they still occupy the
-  // request, so the serialized size is counted as a conservative upper bound.
-  // Missing this would let the shrink gate and the remeasure loop treat a huge
-  // checkpoint as nearly free.
+  // request, so their text is estimated too (not a guaranteed upper bound).
+  // Missing this would let the shrink gate treat a huge checkpoint as free.
   for (const [key, value] of Object.entries(item)) {
     if (typeof value !== "string" || value.length < 64) continue;
     if (["text", "diff", "arguments", "output"].includes(key)) continue;
@@ -187,7 +186,6 @@ function formatPercent(value) {
 }
 
 module.exports = {
-  CHARACTERS_PER_TOKEN,
   STRUCTURAL_OVERHEAD_TOKENS,
   ROLE_OVERHEAD_TOKENS,
   OCCUPANCY_WARNING_RATIO,

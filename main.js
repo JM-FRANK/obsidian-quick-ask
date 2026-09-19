@@ -479,6 +479,30 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 //
+// ## tokenx 2.1.0 (MIT)
+//
+// MIT License
+//
+// Copyright (c) 2023-PRESENT Johann Schopplich
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
 // ## w3c-keyname 2.2.8 (MIT)
 //
 // Copyright (C) 2016 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -739,7 +763,7 @@ function frameSummary(summaryText, { allowlist = [] } = {}) {
 }
 
 // A serialized get-full-file result is capped for the summarization request
-// only; still-tracked files are reintroduced afterwards from their full text.
+// only; it does not alter the local log or later full-file retrievals.
 function truncateToolResult(text) {
   const own = String(text ?? "");
   if (own.length <= TOOL_RESULT_CHARACTER_LIMIT) return own;
@@ -748,11 +772,11 @@ function truncateToolResult(text) {
 }
 
 // The retained recent tail targets 16 percent of the configured capacity and
-// excludes stable instructions, the tool schema, the summary, and the complete
-// contents of still-tracked files.
+// excludes stable instructions, the tool schema, the summary and separately
+// reintroduced file references. File bodies already in the tail count normally.
 function chooseRetainedTail({ items = [], capacityTokens = 0 } = {}) {
   // The budget excludes stable instructions, the tool schema, the compaction
-  // summary, and the complete contents of still-tracked files, so none of
+  // summary, and the reintroduced file references, so none of
   // those is subtracted here.
   const budget = Math.max(0, Math.floor(capacityTokens * RETAIN_RATIO));
   const tail = [];
@@ -1415,7 +1439,7 @@ module.exports = { conversationFromRecords, questionFromInput };
 },
 "src/quick-ask/conversation": function(module, exports, require) {
 const { normalizeReasoningEffort } = require("src/quick-ask/reasoning");
-const { protocolFor, isUserMessage, messageText, isToolOutput, truncateOutput, callsFromItem } = require("src/quick-ask/protocol");
+const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("src/quick-ask/protocol");
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("src/quick-ask/web-search");
 const { createSearchClient } = require("src/quick-ask/search-client");
 const { createStore } = require("zustand/vanilla");
@@ -1567,6 +1591,10 @@ function createConversation(options) {
     state.items = [];
     state.compactedSurface = null;
     state.compactedItems = [];
+    state.pendingCheckpoint = null;
+    state.occupancyAnchor = null;
+    state.lastPrice = null;
+    state.lastOccupancy = null;
     state.lastResponseId = null;
     state.turn = null;
     for (const record of parsed.records ?? []) {
@@ -1575,6 +1603,9 @@ function createConversation(options) {
     if (draftSearch !== undefined) state.searchEnabled = draftSearch;
     if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
+    // Replay must never contact a provider, even near capacity. Price only the
+    // restored active generation after the tracked files have been restored.
+    priceLocalRequest(state, { question: "", additions: [] });
     return { state, parsed };
   }
 
@@ -1596,8 +1627,9 @@ function createConversation(options) {
         break;
       case "compaction/end":
         if (payload?.ok === true && state.pendingCheckpoint) {
-          state.compactedSurface = state.pendingCheckpoint;
-          state.compactedItems = state.items.slice((state.pendingCheckpoint.range?.to ?? -1) + 1);
+          applyCompactedSurface(state, state.pendingCheckpoint, {
+            items: state.items.slice((state.pendingCheckpoint.range?.to ?? -1) + 1),
+          });
         }
         state.pendingCheckpoint = null;
         break;
@@ -1650,22 +1682,22 @@ function createConversation(options) {
     // Local replay rebuilds the whole request from canonical items. A
     // compaction is an explicit prefix discontinuity: the compacted surface
     // replaces the shadowed items, and every still-tracked Context File is
-    // reintroduced from its latest complete original text.
+    // reintroduced as a path reference.
     const surface = state.compactedSurface ? activeSurface(state) : state.items;
     // Tool continuation items have already been appended to the canonical
     // surface by runToolContinuation. Replaying them again duplicates calls.
     return { input: staged.continuation ? [...surface] : [...surface, ...turn], previousResponseId: null };
   }
 
-  // The compacted surface, in the confirmed order: the latest raw complete
-  // contents of still-tracked Context Files in first-added order, then the
+  // The compacted surface, in the confirmed order: references to still-tracked
+  // Context Files in first-added order, then the
   // compacted checkpoint output, then the retained recent tail. Each part
   // appears exactly once.
   function activeSurface(state) {
-    return [...reintroducedFiles(state), ...compactionHistory(state)];
+    return [...trackedFileReferences(state), ...compactionHistory(state)];
   }
 
-  // Active checkpoint and recent items only. Tracked full files are inserted
+  // Active checkpoint and recent items only. Tracked file references are inserted
   // separately and shadowed raw history must not return on a second compaction.
   function compactionHistory(state) {
     if (!state.compactedSurface) return state.items;
@@ -1683,14 +1715,14 @@ function createConversation(options) {
     if (state.compactedSurface) state.compactedItems.push(item);
   }
 
-  // The exact-content guarantee across compaction: every Context File that is
-  // still internally tracked is reintroduced from its latest original text.
-  function reintroducedFiles(state) {
+  // Compaction preserves tracked paths without injecting their bodies again.
+  // The retained tail stays verbatim; get-full-file can retrieve current text.
+  function trackedFileReferences(state) {
     const tracked = typeof trackerFor(state.sessionId).trackedFiles === "function" ? trackerFor(state.sessionId).trackedFiles() : [];
     return tracked
       .filter((file) => typeof file.observedRawText === "string" && file.status !== "staged")
       .map(file => protocolFor(state.config).userMessage(renderContextEnvelope([
-        { kind: "file", path: file.path, text: file.observedRawText },
+        { kind: "reference", path: file.path },
       ], { rendererVersion: RENDERER_VERSION })));
 
   }
@@ -1739,7 +1771,7 @@ function createConversation(options) {
 
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
-  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
+  function priceLocalRequest(state, { question, additions, rendererVersion = RENDERER_VERSION }) {
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
     const items = state.compactedSurface ? activeSurface(state) : state.items;
@@ -1761,6 +1793,13 @@ function createConversation(options) {
     if (estimatedInput > occupancy.tokens) occupancy = { tokens: estimatedInput, exact: false, estimated: true };
     state.lastPrice = price;
     state.lastOccupancy = occupancy;
+    return { settings, budget, price, occupancy, estimatedInput };
+  }
+
+  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
+    const local = priceLocalRequest(state, { question, additions, rendererVersion });
+    const { settings, budget, price, estimatedInput } = local;
+    let { occupancy } = local;
     if (!budget.configured) return { blocked: false, needsCompaction: false, price, occupancy };
 
     const nearLimit = Math.max(price.total, occupancy.tokens) > budget.inputBudget * 0.8;
@@ -1830,7 +1869,7 @@ function createConversation(options) {
     state.activeController = controller;
     state.task = (async () => {
       const result = await compactSession(state, { reason: "manual" });
-      if (result.status === "committed" || result.status === "no-viable-space") {
+      if (result.status === "committed") {
         await pricePendingRequest(state, { question: "", additions: [], allowCompaction: false });
       }
       return result;
@@ -1844,17 +1883,14 @@ function createConversation(options) {
     }
   }
 
-  async function compactSession(state, { reason = "pressure", attempt = 0 } = {}) {
+  async function compactSession(state, { reason = "pressure" } = {}) {
     if (!isEnabled() || state.activeController?.signal.aborted) return { status: "aborted" };
     const budget = capacityBudget(state.config?.contextWindowTokens, { reserveTokens: RESERVE });
     const capacity = budget.configured ? budget.capacity : 0;
-    // Tracked complete files are reintroduced from their latest original text
-    // and are deliberately outside the retained-tail budget. A later attempt
-    // shrinks the tail to the smallest structurally safe recent suffix.
+    // Tracked file references are reintroduced in stable first-added order
+    // and are deliberately outside the retained-tail budget.
     const history = compactionHistory(state);
-    const retained = attempt === 0
-      ? chooseRetainedTail({ items: history, capacityTokens: capacity })
-      : smallestSafeTail(history);
+    const retained = chooseRetainedTail({ items: history, capacityTokens: capacity });
     const range = selectCompactionRange({ items: history, retained: retained.items });
     // Selection can move the split to preserve the newest turn. Retain exactly
     // its resulting suffix; the initial budget candidate may include the prefix.
@@ -1892,7 +1928,7 @@ function createConversation(options) {
       if (result.supported === false) {
         state.officialUnsupported = true;
         await transaction.fail({ code: "UNSUPPORTED", message: "the endpoint does not support /responses/compact" });
-        return await compactSession(state, { reason, attempt });
+        return await compactSession(state, { reason });
       }
       if (result.supported !== true) {
         await transaction.fail(result.error ?? { code: "SERVER", message: "compaction request failed" });
@@ -1908,16 +1944,6 @@ function createConversation(options) {
         return committed;
       }
       applyCompactedSurface(state, committed.checkpoint, retained);
-      const remeasured = remeasureAfterCompaction(state, budget);
-      if (remeasured.overThreshold && attempt === 0) {
-        return await compactSession(state, { reason, attempt: 1 });
-      }
-      if (remeasured.overThreshold) {
-        // Stable instructions, tools, the summary, and still-tracked complete
-        // files leave no viable space: say so instead of truncating a file.
-        pushProjection(state, { kind: "compaction", status: "no-viable-space", reason });
-        return { status: "no-viable-space", reason };
-      }
       pushProjection(state, {
         kind: "compaction", status: "committed", reason, usage: result.usage,
         items: range.items.length, before: committed.checkpoint.estimatedBefore, after: committed.checkpoint.estimatedAfter,
@@ -1943,46 +1969,11 @@ function createConversation(options) {
       return committed;
     }
     applyCompactedSurface(state, committed.checkpoint, retained);
-    const remeasured = remeasureAfterCompaction(state, budget);
-    if (remeasured.overThreshold && attempt === 0) {
-      return await compactSession(state, { reason, attempt: 1 });
-    }
-    if (remeasured.overThreshold) {
-      pushProjection(state, { kind: "compaction", status: "no-viable-space", reason });
-      return { status: "no-viable-space", reason };
-    }
     pushProjection(state, {
       kind: "compaction", status: "committed", reason,
       items: range.items.length, before: committed.checkpoint.estimatedBefore, after: committed.checkpoint.estimatedAfter,
     });
     return committed;
-  }
-
-  // Remeasure the composed compacted context against the 90 percent threshold.
-  // The composition is everything the next request actually carries: the
-  // checkpoint and its tail, the stable instructions and tool schema, and the
-  // complete contents of every still-tracked file. Those extras can push the
-  // composition back over the threshold even when the checkpoint shrank, which
-  // is exactly when the tail has to shrink.
-  function remeasureAfterCompaction(state, budget) {
-    if (!budget.configured) return { overThreshold: false, tokens: 0 };
-    const surface = measureItems(activeSurface(state));
-    const instructions = measureText(buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: state.config?.systemPrompt ?? "" })) + measureItems([GET_FULL_FILE_TOOL]);
-    const tokens = surface + instructions;
-    return { overThreshold: tokens >= budget.compactionThreshold, tokens, surface, instructions };
-  }
-
-  // The smallest structurally safe recent suffix: the newest complete user turn
-  // with its function-call pairs intact.
-  function smallestSafeTail(items) {
-    const start = (() => {
-      for (let index = items.length - 1; index >= 0; index -= 1) {
-        const item = items[index];
-        if (isUserMessage(item)) return index;
-      }
-      return Math.max(0, items.length - 1);
-    })();
-    return { items: items.slice(start), tokens: measureItems(items.slice(start)) };
   }
 
   function officialSupported(state) {
@@ -2041,7 +2032,7 @@ function createConversation(options) {
   }
 
   // The compacted surface starts from the checkpoint output plus the retained
-  // recent tail; still-tracked complete files are reintroduced by the renderer.
+  // recent tail; still-tracked paths are reintroduced by the renderer.
   function applyCompactedSurface(state, checkpoint, retained) {
     state.compactedSurface = checkpoint;
     // Only the retained tail lives here: the checkpoint output is already
@@ -2137,13 +2128,12 @@ function createConversation(options) {
       if (preflight.needsCompaction) {
         const compaction = await compactSession(state, { reason: "pressure" });
         if (compaction.status !== "committed") {
-          const capacity = compaction.status === "no-viable-space";
           return await finishTurn(state, turn, "failed", { error: compaction.error ?? {
-            code: capacity ? "CAPACITY" : "COMPACTION",
-            message: capacity ? "Tracked files and recent context leave no space after compaction. Remove context files or use a new session with a larger context window." : "Context compaction did not complete. Retry this question.",
+            code: "COMPACTION",
+            message: "Context compaction did not complete. Retry this question.",
           } });
         }
-        // Include the checkpoint, reintroduced files AND the pending question
+        // Include the checkpoint, file references AND the pending question
         // and additions. Never send an oversized request after shrinking history.
         const after = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, allowCompaction: false });
         if (controller.signal.aborted || !isEnabled()) return await finishTurn(state, turn, "stopped");
@@ -3858,6 +3848,7 @@ module.exports = { DEFAULT_LANGUAGE, LANGUAGES, t, resolveLanguage };
 
 },
 "src/quick-ask/index": function(module, exports, require) {
+const { estimateText } = require("src/quick-ask/tokens");
 const { createProfileManager, normalizeProfiles, activeProfile, profileName } = require("src/quick-ask/profiles");
 const { REASONING_LEVELS } = require("src/quick-ask/reasoning");
 const { createQuickAskEnvironment } = require("src/quick-ask/environment");
@@ -4002,7 +3993,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
         ?? normalizeQuickAskSettings(settings().quickAsk).contextWindowTokens;
       if (!Number.isInteger(capacity) || capacity <= 0) return true;
       const tracked = trackerFor(sessionId).trackedFiles().find((file) => file.path === path);
-      const estimate = tracked?.observedRawText ? Math.ceil(tracked.observedRawText.length / 4) : 0;
+      const estimate = tracked?.observedRawText ? estimateText(tracked.observedRawText) : 0;
       const used = snapshot?.occupancy?.tokens ?? 0;
       return used + estimate + 16384 <= capacity;
     },
@@ -6520,23 +6511,23 @@ module.exports = { clearSubmittedDraft, recoverSubmittedDraft, prepareSubmission
 // derived locally is an estimate and is always marked as one. Reasoning tokens
 // are an output subset and are never added to output twice.
 //
-// The estimator uses the dsh-web rule of four characters per token plus a fixed
-// structural overhead per role and content block.
+// All local budgets share tokenx, with fixed role/content structural overhead.
+// This remains a model-independent estimate, never provider-reported usage.
+
+const { estimateTokenCount } = require("tokenx");
 
 const {
   responsesUsageInputTokens, responsesUsageOutputTokens, responsesUsageTotalTokens,
   responsesUsageCachedInputTokens, responsesUsageReasoningTokens,
 } = require("src/quick-ask/transport");
 
-const CHARACTERS_PER_TOKEN = 4;
 const STRUCTURAL_OVERHEAD_TOKENS = 4;
 const ROLE_OVERHEAD_TOKENS = 4;
 const OCCUPANCY_WARNING_RATIO = 0.8;
 const OCCUPANCY_COMPACTION_RATIO = 0.9;
 
 function estimateText(text) {
-  const length = typeof text === "string" ? text.length : 0;
-  return Math.ceil(length / CHARACTERS_PER_TOKEN);
+  return estimateTokenCount(typeof text === "string" ? text : "");
 }
 
 // Estimate one canonical Responses item, or one Context mutation, which carries
@@ -6559,9 +6550,8 @@ function estimateItem(item) {
   if (typeof item.output === "string") tokens += estimateText(item.output);
   // Opaque transport payloads (encrypted reasoning, a Compaction Item's
   // encrypted_content) are not readable text, but they still occupy the
-  // request, so the serialized size is counted as a conservative upper bound.
-  // Missing this would let the shrink gate and the remeasure loop treat a huge
-  // checkpoint as nearly free.
+  // request, so their text is estimated too (not a guaranteed upper bound).
+  // Missing this would let the shrink gate treat a huge checkpoint as free.
   for (const [key, value] of Object.entries(item)) {
     if (typeof value !== "string" || value.length < 64) continue;
     if (["text", "diff", "arguments", "output"].includes(key)) continue;
@@ -6705,7 +6695,6 @@ function formatPercent(value) {
 }
 
 module.exports = {
-  CHARACTERS_PER_TOKEN,
   STRUCTURAL_OVERHEAD_TOKENS,
   ROLE_OVERHEAD_TOKENS,
   OCCUPANCY_WARNING_RATIO,
@@ -10542,7 +10531,6 @@ class QuickAskView {
       if (!this.mounted || this.activeSessionId !== sessionId) return result;
       if (result.status === "invalid") this.showValidationError(result.errors);
       else if (result.status === "skipped" || result.status === "rejected") this.ui.notice(this.t(this.getSettings(), "compaction.nothing"));
-      else if (result.status === "no-viable-space") this.ui.notice(this.t(this.getSettings(), "composer.capacityFailed"));
       else if (result.status === "busy") this.ui.notice(this.t(this.getSettings(), "composer.busy"));
       return result;
     } catch { this.ui.notice(this.t(this.getSettings(), "compaction.failed")); }
@@ -34514,6 +34502,213 @@ var createStoreImpl = (createState) => {
 };
 var createStore = ((createState) => createState ? createStoreImpl(createState) : createStoreImpl);
 exports.createStore = createStore;
+
+},
+"tokenx": function(module, exports, require) {
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// node_modules/tokenx/dist/index.mjs
+var index_exports = {};
+__export(index_exports, {
+  estimateTokenCount: () => estimateTokenCount,
+  isWithinTokenLimit: () => isWithinTokenLimit,
+  sliceByTokens: () => sliceByTokens,
+  splitByTokens: () => splitByTokens
+});
+module.exports = __toCommonJS(index_exports);
+var PATTERNS = {
+  whitespace: /^\s+$/,
+  structuredWhitespace: /\n\s/,
+  nonAscii: /[\u0080-\uFFFF]/,
+  cjk: /[\u4E00-\u9FFF\u3400-\u4DBF\u3000-\u30FF\uFF00-\uFFEF\u2E80-\u2EFF\u31C0-\u31EF\u3200-\u32FF\u3300-\u33FF\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uD7B0-\uD7FF]/,
+  numeric: /^\d+$/,
+  punctuation: /[.,!?;(){}[\]<>:/\\|@#$%^&*+=`~_"-]/,
+  lowercaseWord: /^[a-z]+$/
+};
+var TOKEN_SPLIT_PATTERN = new RegExp(`(\\s+|${PATTERNS.punctuation.source}+)`);
+var DEFAULT_CHARS_PER_TOKEN = 7;
+var SHORT_TOKEN_THRESHOLD = 3;
+var LOWERCASE_WORD_SINGLE_TOKEN_LENGTH = 8;
+var PUNCTUATION_CHARS_PER_TOKEN = 6;
+var KANA_CHARS_PER_TOKEN = 1.4;
+var HANGUL_CHARS_PER_TOKEN = 1.65;
+var HANZI_CHARS_PER_TOKEN = 1.15;
+var DEFAULT_LANGUAGE_CONFIGS = [
+  {
+    pattern: /[äöüßẞ]/i,
+    averageCharsPerToken: 3
+  },
+  {
+    pattern: /[éèêëàâîïôûùüÿçœæáíóúñ]/i,
+    averageCharsPerToken: 4.5
+  },
+  {
+    pattern: /[ąćęłńóśźżěščřžýůúďťň]/i,
+    averageCharsPerToken: 2.5
+  },
+  {
+    pattern: /[\u0430-\u044F\u0451]/i,
+    averageCharsPerToken: 6
+  },
+  {
+    pattern: /[\u03AC-\u03CE]/i,
+    averageCharsPerToken: 3
+  },
+  {
+    pattern: /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\p{Emoji_Component}]*$/u,
+    averageCharsPerToken: 0.9
+  }
+];
+function* walkSegments(text, options = {}) {
+  if (!text) return;
+  const resolvedOptions = resolveOptions(options);
+  let previousSegment = "";
+  for (const segment of text.split(TOKEN_SPLIT_PATTERN)) if (segment) {
+    yield {
+      segment,
+      tokenCount: estimateSegmentTokens(segment, resolvedOptions, previousSegment)
+    };
+    previousSegment = segment;
+  }
+}
+function resolveOptions(options) {
+  return {
+    defaultCharsPerToken: options.defaultCharsPerToken ?? DEFAULT_CHARS_PER_TOKEN,
+    languageConfigs: options.languageConfigs ?? DEFAULT_LANGUAGE_CONFIGS
+  };
+}
+function estimateSegmentTokens(segment, { languageConfigs, defaultCharsPerToken }, previousSegment) {
+  if (PATTERNS.whitespace.test(segment)) {
+    if (PATTERNS.structuredWhitespace.test(segment)) return 1;
+    return segment.includes("\n") && !PATTERNS.punctuation.test(previousSegment.slice(-1)) ? 1 : 0;
+  }
+  const languageCharsPerToken = getLanguageSpecificCharsPerToken(segment, languageConfigs);
+  if (languageCharsPerToken !== void 0) return Math.ceil(getCharacterCount(segment) / languageCharsPerToken);
+  if (PATTERNS.cjk.test(segment)) return estimateCjkTokens(segment);
+  if (PATTERNS.numeric.test(segment)) return Math.ceil(segment.length / 3);
+  if (segment.length <= SHORT_TOKEN_THRESHOLD) return 1;
+  if (segment.length <= LOWERCASE_WORD_SINGLE_TOKEN_LENGTH && PATTERNS.lowercaseWord.test(segment)) return 1;
+  if (PATTERNS.punctuation.test(segment)) return Math.ceil(segment.length / PUNCTUATION_CHARS_PER_TOKEN);
+  return Math.ceil(segment.length / defaultCharsPerToken);
+}
+function getLanguageSpecificCharsPerToken(segment, languageConfigs) {
+  if (languageConfigs === DEFAULT_LANGUAGE_CONFIGS && !PATTERNS.nonAscii.test(segment)) return;
+  for (const config of languageConfigs) if (segment.search(config.pattern) !== -1) return config.averageCharsPerToken;
+}
+function getCharacterCount(text) {
+  return Array.from(text).length;
+}
+function estimateCjkTokens(segment) {
+  let kanaCount = 0;
+  let hangulCount = 0;
+  let hanziCount = 0;
+  for (const character of segment) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint >= 12352 && codePoint <= 12543) kanaCount++;
+    else if (isHangulCodePoint(codePoint)) hangulCount++;
+    else hanziCount++;
+  }
+  return Math.ceil(hanziCount / HANZI_CHARS_PER_TOKEN + kanaCount / KANA_CHARS_PER_TOKEN + hangulCount / HANGUL_CHARS_PER_TOKEN);
+}
+function isHangulCodePoint(codePoint) {
+  return codePoint >= 44032 && codePoint <= 55215 || codePoint >= 4352 && codePoint <= 4607 || codePoint >= 12592 && codePoint <= 12687 || codePoint >= 43360 && codePoint <= 43391 || codePoint >= 55216 && codePoint <= 55295;
+}
+function isWithinTokenLimit(text, tokenLimit, options) {
+  return estimateTokenCount(text, options) <= tokenLimit;
+}
+function estimateTokenCount(text, options = {}) {
+  if (!text) return 0;
+  let tokenCount = 0;
+  for (const segmentEstimate of walkSegments(text, options)) tokenCount += segmentEstimate.tokenCount;
+  return tokenCount;
+}
+function sliceByTokens(text, start = 0, end, options = {}) {
+  if (!text) return "";
+  let segmentEstimates = walkSegments(text, options);
+  let totalTokens = 0;
+  if (start < 0 || end !== void 0 && end < 0) {
+    const bufferedEstimates = Array.from(segmentEstimates);
+    for (const { tokenCount } of bufferedEstimates) totalTokens += tokenCount;
+    segmentEstimates = bufferedEstimates;
+  }
+  const normalizedStart = start < 0 ? Math.max(0, totalTokens + start) : Math.max(0, start);
+  const normalizedEnd = end === void 0 ? Infinity : end < 0 ? Math.max(0, totalTokens + end) : end;
+  if (normalizedStart >= normalizedEnd) return "";
+  const parts = [];
+  let currentTokenPos = 0;
+  for (const { segment, tokenCount } of segmentEstimates) {
+    if (currentTokenPos >= normalizedEnd) break;
+    const extracted = extractSegmentPart(segment, currentTokenPos, tokenCount, normalizedStart, normalizedEnd);
+    if (extracted) parts.push(extracted);
+    currentTokenPos += tokenCount;
+  }
+  return parts.join("");
+}
+function splitByTokens(text, tokensPerChunk, options = {}) {
+  if (!text || tokensPerChunk <= 0) return [];
+  const overlap = Math.max(0, Math.min(options.overlap ?? 0, tokensPerChunk - 1));
+  const chunks = [];
+  let currentChunk = [];
+  let currentTokenCount = 0;
+  let hasUnchunkedSegments = false;
+  for (const segmentEstimate of walkSegments(text, options)) {
+    currentChunk.push(segmentEstimate);
+    currentTokenCount += segmentEstimate.tokenCount;
+    hasUnchunkedSegments = true;
+    if (currentTokenCount >= tokensPerChunk) {
+      chunks.push(joinSegments(currentChunk));
+      hasUnchunkedSegments = false;
+      if (overlap > 0) {
+        const overlapSegments = [];
+        let overlapTokenCount = 0;
+        for (let i = currentChunk.length - 1; i >= 0 && overlapTokenCount < overlap; i--) {
+          const overlapCandidate = currentChunk[i];
+          overlapSegments.unshift(overlapCandidate);
+          overlapTokenCount += overlapCandidate.tokenCount;
+        }
+        currentChunk = overlapSegments;
+        currentTokenCount = overlapTokenCount;
+      } else {
+        currentChunk = [];
+        currentTokenCount = 0;
+      }
+    }
+  }
+  if (currentChunk.length > 0 && hasUnchunkedSegments) chunks.push(joinSegments(currentChunk));
+  return chunks;
+}
+function joinSegments(segmentEstimates) {
+  let joined = "";
+  for (const { segment } of segmentEstimates) joined += segment;
+  return joined;
+}
+function extractSegmentPart(segment, segmentTokenStart, segmentTokenCount, targetStart, targetEnd) {
+  if (segmentTokenCount === 0) return segmentTokenStart >= targetStart && segmentTokenStart < targetEnd ? segment : "";
+  const segmentTokenEnd = segmentTokenStart + segmentTokenCount;
+  if (segmentTokenStart >= targetEnd || segmentTokenEnd <= targetStart) return "";
+  const overlapStart = Math.max(0, targetStart - segmentTokenStart);
+  const overlapEnd = Math.min(segmentTokenCount, targetEnd - segmentTokenStart);
+  if (overlapStart === 0 && overlapEnd === segmentTokenCount) return segment;
+  const charStart = Math.floor(overlapStart / segmentTokenCount * segment.length);
+  const charEnd = Math.ceil(overlapEnd / segmentTokenCount * segment.length);
+  return segment.slice(charStart, charEnd);
+}
 
 }};
 const cache = Object.create(null);

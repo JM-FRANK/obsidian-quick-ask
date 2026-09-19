@@ -12,7 +12,7 @@ Network access is limited to the configured API endpoint and enabled feature. St
 
 ## Automated evidence
 
-The framework baseline passed 192 upstream pure tests and 191 exported pure tests, plus distribution tests for module isolation, settings persistence, identities and source export. Release preparation adds version/manifest/lock/provenance and packaging checks. Builds use pinned dependencies and committed lockfiles. CI runs on Ubuntu with Node.js 22.
+The framework baseline passed 192 upstream pure tests and 191 exported pure tests, plus distribution tests for module isolation, settings persistence, identities and source export. Release preparation adds version/manifest/lock/provenance and packaging checks. Builds use pinned dependencies and committed lockfiles. CI runs on Ubuntu with Node.js 22. Local builds and source tests require Node.js 22.12+ for synchronous loading of tokenx ESM; installed plugins use its bundled CommonJS factory.
 
 These checks do not open Obsidian, simulate DOM/editor interactions, or send a request to an actual AI provider. They do not establish a Windows/macOS/Linux UI acceptance matrix. The earlier user-reported Windows success concerned the Scholar Citation toggle fix, not this independent Quick Ask package.
 

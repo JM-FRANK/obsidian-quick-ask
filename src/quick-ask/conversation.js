@@ -1,5 +1,5 @@
 const { normalizeReasoningEffort } = require("./reasoning");
-const { protocolFor, isUserMessage, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
+const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("./web-search");
 const { createSearchClient } = require("./search-client");
 const { createStore } = require("zustand/vanilla");
@@ -151,6 +151,10 @@ function createConversation(options) {
     state.items = [];
     state.compactedSurface = null;
     state.compactedItems = [];
+    state.pendingCheckpoint = null;
+    state.occupancyAnchor = null;
+    state.lastPrice = null;
+    state.lastOccupancy = null;
     state.lastResponseId = null;
     state.turn = null;
     for (const record of parsed.records ?? []) {
@@ -159,6 +163,9 @@ function createConversation(options) {
     if (draftSearch !== undefined) state.searchEnabled = draftSearch;
     if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
+    // Replay must never contact a provider, even near capacity. Price only the
+    // restored active generation after the tracked files have been restored.
+    priceLocalRequest(state, { question: "", additions: [] });
     return { state, parsed };
   }
 
@@ -180,8 +187,9 @@ function createConversation(options) {
         break;
       case "compaction/end":
         if (payload?.ok === true && state.pendingCheckpoint) {
-          state.compactedSurface = state.pendingCheckpoint;
-          state.compactedItems = state.items.slice((state.pendingCheckpoint.range?.to ?? -1) + 1);
+          applyCompactedSurface(state, state.pendingCheckpoint, {
+            items: state.items.slice((state.pendingCheckpoint.range?.to ?? -1) + 1),
+          });
         }
         state.pendingCheckpoint = null;
         break;
@@ -234,22 +242,22 @@ function createConversation(options) {
     // Local replay rebuilds the whole request from canonical items. A
     // compaction is an explicit prefix discontinuity: the compacted surface
     // replaces the shadowed items, and every still-tracked Context File is
-    // reintroduced from its latest complete original text.
+    // reintroduced as a path reference.
     const surface = state.compactedSurface ? activeSurface(state) : state.items;
     // Tool continuation items have already been appended to the canonical
     // surface by runToolContinuation. Replaying them again duplicates calls.
     return { input: staged.continuation ? [...surface] : [...surface, ...turn], previousResponseId: null };
   }
 
-  // The compacted surface, in the confirmed order: the latest raw complete
-  // contents of still-tracked Context Files in first-added order, then the
+  // The compacted surface, in the confirmed order: references to still-tracked
+  // Context Files in first-added order, then the
   // compacted checkpoint output, then the retained recent tail. Each part
   // appears exactly once.
   function activeSurface(state) {
-    return [...reintroducedFiles(state), ...compactionHistory(state)];
+    return [...trackedFileReferences(state), ...compactionHistory(state)];
   }
 
-  // Active checkpoint and recent items only. Tracked full files are inserted
+  // Active checkpoint and recent items only. Tracked file references are inserted
   // separately and shadowed raw history must not return on a second compaction.
   function compactionHistory(state) {
     if (!state.compactedSurface) return state.items;
@@ -267,14 +275,14 @@ function createConversation(options) {
     if (state.compactedSurface) state.compactedItems.push(item);
   }
 
-  // The exact-content guarantee across compaction: every Context File that is
-  // still internally tracked is reintroduced from its latest original text.
-  function reintroducedFiles(state) {
+  // Compaction preserves tracked paths without injecting their bodies again.
+  // The retained tail stays verbatim; get-full-file can retrieve current text.
+  function trackedFileReferences(state) {
     const tracked = typeof trackerFor(state.sessionId).trackedFiles === "function" ? trackerFor(state.sessionId).trackedFiles() : [];
     return tracked
       .filter((file) => typeof file.observedRawText === "string" && file.status !== "staged")
       .map(file => protocolFor(state.config).userMessage(renderContextEnvelope([
-        { kind: "file", path: file.path, text: file.observedRawText },
+        { kind: "reference", path: file.path },
       ], { rendererVersion: RENDERER_VERSION })));
 
   }
@@ -323,7 +331,7 @@ function createConversation(options) {
 
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
-  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
+  function priceLocalRequest(state, { question, additions, rendererVersion = RENDERER_VERSION }) {
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
     const items = state.compactedSurface ? activeSurface(state) : state.items;
@@ -345,6 +353,13 @@ function createConversation(options) {
     if (estimatedInput > occupancy.tokens) occupancy = { tokens: estimatedInput, exact: false, estimated: true };
     state.lastPrice = price;
     state.lastOccupancy = occupancy;
+    return { settings, budget, price, occupancy, estimatedInput };
+  }
+
+  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
+    const local = priceLocalRequest(state, { question, additions, rendererVersion });
+    const { settings, budget, price, estimatedInput } = local;
+    let { occupancy } = local;
     if (!budget.configured) return { blocked: false, needsCompaction: false, price, occupancy };
 
     const nearLimit = Math.max(price.total, occupancy.tokens) > budget.inputBudget * 0.8;
@@ -414,7 +429,7 @@ function createConversation(options) {
     state.activeController = controller;
     state.task = (async () => {
       const result = await compactSession(state, { reason: "manual" });
-      if (result.status === "committed" || result.status === "no-viable-space") {
+      if (result.status === "committed") {
         await pricePendingRequest(state, { question: "", additions: [], allowCompaction: false });
       }
       return result;
@@ -428,17 +443,14 @@ function createConversation(options) {
     }
   }
 
-  async function compactSession(state, { reason = "pressure", attempt = 0 } = {}) {
+  async function compactSession(state, { reason = "pressure" } = {}) {
     if (!isEnabled() || state.activeController?.signal.aborted) return { status: "aborted" };
     const budget = capacityBudget(state.config?.contextWindowTokens, { reserveTokens: RESERVE });
     const capacity = budget.configured ? budget.capacity : 0;
-    // Tracked complete files are reintroduced from their latest original text
-    // and are deliberately outside the retained-tail budget. A later attempt
-    // shrinks the tail to the smallest structurally safe recent suffix.
+    // Tracked file references are reintroduced in stable first-added order
+    // and are deliberately outside the retained-tail budget.
     const history = compactionHistory(state);
-    const retained = attempt === 0
-      ? chooseRetainedTail({ items: history, capacityTokens: capacity })
-      : smallestSafeTail(history);
+    const retained = chooseRetainedTail({ items: history, capacityTokens: capacity });
     const range = selectCompactionRange({ items: history, retained: retained.items });
     // Selection can move the split to preserve the newest turn. Retain exactly
     // its resulting suffix; the initial budget candidate may include the prefix.
@@ -476,7 +488,7 @@ function createConversation(options) {
       if (result.supported === false) {
         state.officialUnsupported = true;
         await transaction.fail({ code: "UNSUPPORTED", message: "the endpoint does not support /responses/compact" });
-        return await compactSession(state, { reason, attempt });
+        return await compactSession(state, { reason });
       }
       if (result.supported !== true) {
         await transaction.fail(result.error ?? { code: "SERVER", message: "compaction request failed" });
@@ -492,16 +504,6 @@ function createConversation(options) {
         return committed;
       }
       applyCompactedSurface(state, committed.checkpoint, retained);
-      const remeasured = remeasureAfterCompaction(state, budget);
-      if (remeasured.overThreshold && attempt === 0) {
-        return await compactSession(state, { reason, attempt: 1 });
-      }
-      if (remeasured.overThreshold) {
-        // Stable instructions, tools, the summary, and still-tracked complete
-        // files leave no viable space: say so instead of truncating a file.
-        pushProjection(state, { kind: "compaction", status: "no-viable-space", reason });
-        return { status: "no-viable-space", reason };
-      }
       pushProjection(state, {
         kind: "compaction", status: "committed", reason, usage: result.usage,
         items: range.items.length, before: committed.checkpoint.estimatedBefore, after: committed.checkpoint.estimatedAfter,
@@ -527,46 +529,11 @@ function createConversation(options) {
       return committed;
     }
     applyCompactedSurface(state, committed.checkpoint, retained);
-    const remeasured = remeasureAfterCompaction(state, budget);
-    if (remeasured.overThreshold && attempt === 0) {
-      return await compactSession(state, { reason, attempt: 1 });
-    }
-    if (remeasured.overThreshold) {
-      pushProjection(state, { kind: "compaction", status: "no-viable-space", reason });
-      return { status: "no-viable-space", reason };
-    }
     pushProjection(state, {
       kind: "compaction", status: "committed", reason,
       items: range.items.length, before: committed.checkpoint.estimatedBefore, after: committed.checkpoint.estimatedAfter,
     });
     return committed;
-  }
-
-  // Remeasure the composed compacted context against the 90 percent threshold.
-  // The composition is everything the next request actually carries: the
-  // checkpoint and its tail, the stable instructions and tool schema, and the
-  // complete contents of every still-tracked file. Those extras can push the
-  // composition back over the threshold even when the checkpoint shrank, which
-  // is exactly when the tail has to shrink.
-  function remeasureAfterCompaction(state, budget) {
-    if (!budget.configured) return { overThreshold: false, tokens: 0 };
-    const surface = measureItems(activeSurface(state));
-    const instructions = measureText(buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: state.config?.systemPrompt ?? "" })) + measureItems([GET_FULL_FILE_TOOL]);
-    const tokens = surface + instructions;
-    return { overThreshold: tokens >= budget.compactionThreshold, tokens, surface, instructions };
-  }
-
-  // The smallest structurally safe recent suffix: the newest complete user turn
-  // with its function-call pairs intact.
-  function smallestSafeTail(items) {
-    const start = (() => {
-      for (let index = items.length - 1; index >= 0; index -= 1) {
-        const item = items[index];
-        if (isUserMessage(item)) return index;
-      }
-      return Math.max(0, items.length - 1);
-    })();
-    return { items: items.slice(start), tokens: measureItems(items.slice(start)) };
   }
 
   function officialSupported(state) {
@@ -625,7 +592,7 @@ function createConversation(options) {
   }
 
   // The compacted surface starts from the checkpoint output plus the retained
-  // recent tail; still-tracked complete files are reintroduced by the renderer.
+  // recent tail; still-tracked paths are reintroduced by the renderer.
   function applyCompactedSurface(state, checkpoint, retained) {
     state.compactedSurface = checkpoint;
     // Only the retained tail lives here: the checkpoint output is already
@@ -721,13 +688,12 @@ function createConversation(options) {
       if (preflight.needsCompaction) {
         const compaction = await compactSession(state, { reason: "pressure" });
         if (compaction.status !== "committed") {
-          const capacity = compaction.status === "no-viable-space";
           return await finishTurn(state, turn, "failed", { error: compaction.error ?? {
-            code: capacity ? "CAPACITY" : "COMPACTION",
-            message: capacity ? "Tracked files and recent context leave no space after compaction. Remove context files or use a new session with a larger context window." : "Context compaction did not complete. Retry this question.",
+            code: "COMPACTION",
+            message: "Context compaction did not complete. Retry this question.",
           } });
         }
-        // Include the checkpoint, reintroduced files AND the pending question
+        // Include the checkpoint, file references AND the pending question
         // and additions. Never send an oversized request after shrinking history.
         const after = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, allowCompaction: false });
         if (controller.signal.aborted || !isEnabled()) return await finishTurn(state, turn, "stopped");

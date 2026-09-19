@@ -1,3 +1,4 @@
+const { estimateText } = require("./tokens");
 const { createProfileManager, normalizeProfiles, activeProfile, profileName } = require("./profiles");
 const { REASONING_LEVELS } = require("./reasoning");
 const { createQuickAskEnvironment } = require("./environment");
@@ -142,7 +143,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
         ?? normalizeQuickAskSettings(settings().quickAsk).contextWindowTokens;
       if (!Number.isInteger(capacity) || capacity <= 0) return true;
       const tracked = trackerFor(sessionId).trackedFiles().find((file) => file.path === path);
-      const estimate = tracked?.observedRawText ? Math.ceil(tracked.observedRawText.length / 4) : 0;
+      const estimate = tracked?.observedRawText ? estimateText(tracked.observedRawText) : 0;
       const used = snapshot?.occupancy?.tokens ?? 0;
       return used + estimate + 16384 <= capacity;
     },
