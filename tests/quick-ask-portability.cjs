@@ -176,3 +176,20 @@ test('serializeLog keeps every record byte-identical', () => {
   const lines = text.trim().split('\n').map((line) => JSON.parse(line));
   assert.deepEqual(lines.slice(1), records);
 });
+
+
+test('image history export and preserved copies retain paths without bundling images', () => {
+  const records = [{ seq: 0, kind: 'item/input', payload: {
+    item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '' }] },
+    images: ['papers/figure.png', '.obsidian/plugins/quick-ask/quick-ask/image-cache/cached.png'],
+  } }];
+  const header = { sessionId: 'images', schemaVersion: 1, config: {} };
+  const preserved = serializeLog(header, records);
+  assert.equal(preserved.includes('base64'), false);
+  assert.equal(preserved.includes('data:image'), false);
+  const exported = buildExport({ sessions: [{ id: 'images', header, records }] });
+  const parsed = parseExport(JSON.stringify(exported));
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.export.sessions[0].records[0].payload.images, records[0].payload.images);
+  assert.equal(Object.hasOwn(exported, 'attachments'), false);
+});

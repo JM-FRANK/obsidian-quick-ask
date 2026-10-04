@@ -1,15 +1,16 @@
 // The submitted draft and the next editable draft have different lifetimes.
 function clearSubmittedDraft(draft) {
-  return { ...draft, composer: "", pending: { ...draft.pending, selections: [] } };
+  return { ...draft, ...(draft.images ? { images: [] } : {}), composer: "", pending: { ...draft.pending, selections: [], ...(draft.pending.images ? { images: [] } : {}) } };
 }
 
 function recoverSubmittedDraft(current, submission, { restoreDraft = true } = {}) {
-  const untouched = restoreDraft && !current.composer && current.pending.selections.length === 0;
+  const untouched = restoreDraft && !current.composer && current.pending.selections.length === 0 && !(current.pending.images?.length);
   return {
     ...current,
-    ...(untouched ? { composer: submission.draft, pending: {
+    ...(untouched ? { composer: submission.draft, ...(current.images ? { images: [...(submission.images ?? [])] } : {}), pending: {
       files: current.pending.files,
       selections: [...submission.pending.selections],
+      ...(submission.images?.length ? { images: [...submission.images] } : {}),
     } } : {}),
     failedSubmission: { submission, restored: untouched },
   };
@@ -19,14 +20,16 @@ function recoverSubmittedDraft(current, submission, { restoreDraft = true } = {}
 // submitting the same wording anew must still create a separate turn.
 function prepareSubmission(messages, current, submission, retry = false) {
   const index = retry ? messages.findIndex(entry => entry.submission === submission || entry.retry === submission) : -1;
-  const entry = { role: "user", text: submission.question, submission };
+  const entry = { role: "user", text: submission.question, ...(submission.images?.length ? { images: submission.images } : {}), submission };
   const next = [...messages];
   if (index < 0) next.push(entry);
   else next[index] = entry;
   const failed = current.failedSubmission;
   const selections = submission.pending.selections;
   const restored = failed?.restored && failed.submission === submission && current.composer === submission.draft &&
-    selections.length === current.pending.selections.length && selections.every((item, at) => item === current.pending.selections[at]);
+    selections.length === current.pending.selections.length && selections.every((item, at) => item === current.pending.selections[at]) &&
+    (submission.images ?? []).length === (current.pending.images ?? []).length &&
+    (submission.images ?? []).every((path, at) => path === current.pending.images[at]);
   const draft = !retry || restored ? clearSubmittedDraft(current) : current;
   return { messages: next, entry, draft: { ...draft, failedSubmission: null } };
 }

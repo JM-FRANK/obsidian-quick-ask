@@ -19,7 +19,7 @@ function conversationFromRecords(records) {
     if (record.kind === "item/input" && isMessage(payload.item)) {
       const text = messageText(payload.item);
       const question = questionFromInput(text);
-      if (question !== null) messages.push({ role: "user", text: question });
+      if (question !== null || payload.images?.length) messages.push({ role: "user", text: question ?? "", ...(payload.images?.length ? { images: payload.images } : {}) });
     }
     if (record.kind === "item/output" && payload.tool !== true && isMessage(payload.item)) {
       const text = messageText(payload.item);

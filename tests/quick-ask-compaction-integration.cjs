@@ -53,7 +53,7 @@ function jsonTurn({ id = 'resp_1', text = 'ok' } = {}) {
   };
 }
 
-function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official = null, tracker = null, vault = null } = {}) {
+function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official = null, tracker = null, vault = null, imageSource = null } = {}) {
   const sessionStore = makeStore();
   const requests = [];
   const compactRequests = [];
@@ -86,6 +86,7 @@ function makeFixture({ settings = {}, summaryText = '## Goal\nAnswer.', official
     sessionStore,
     tracker: tracker ?? { acceptTurn() {}, rejectTurn() {}, allowlist: () => [], trackedFiles: () => [], mutationsForSend: async () => [] },
     environment: {
+      images: { readForSend: paths => require('../src/quick-ask/images').prepareImages(paths, imageSource) },
       network,
       scheduler: { now: () => 0, delay: (ms, cb) => setTimeout(cb, ms), cancelDelay: clearTimeout, frame: (cb) => setTimeout(cb, 0), cancelFrame: clearTimeout },
       secrets: { resolve: () => 'sk-test' },
@@ -823,3 +824,28 @@ test('compaction keeps file bodies already in the retained recent tail verbatim'
   const replay = JSON.parse(fixture.requests.at(-1).options.body).input;
   assert.deepEqual(replay.find(item => item.content?.some(block => block.text?.includes('<context_file path="recent.md"'))), recent);
 });
+
+
+for (const mode of ['official', 'fallback', 'chat-completions']) {
+  test(`${mode}: image inputs never reach compaction or post-checkpoint replay`, async () => {
+    const bytes = Uint8Array.from([137,80,78,71,13,10,26,10,1]);
+    const f = makeFixture({ settings: { protocol: mode === 'chat-completions' ? mode : 'responses' },
+      official: mode === 'official' ? { output: [{ type: 'compaction', encrypted_content: 'encrypted-checkpoint' }] } : 'unsupported',
+      imageSource: { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes } });
+    const id = await start(f);
+    assert.equal((await f.conversation.send(id, 'Inspect figure', { images: ['figure.png'] })).status, 'complete');
+    assert.match(f.requests[0].options.body, /data:image/);
+    for (let at = 0; at < 8; at++) {
+      await f.conversation.send(id, `Long follow-up ${at} ${'past material '.repeat(800)}`);
+    }
+    const compact = await f.conversation.compactNow(id);
+    assert.equal(compact.status, 'committed');
+    for (const request of [...f.requests.slice(1), ...f.compactRequests])
+      assert.equal(String(request.options?.body ?? request.body).includes('data:image'), false);
+    await f.conversation.load(id);
+    await f.conversation.send(id, 'After compaction and reload');
+    assert.equal(f.requests.at(-1).options.body.includes('data:image'), false);
+    const { conversationFromRecords } = require('../src/quick-ask/conversation-messages');
+    assert.deepEqual(conversationFromRecords(f.sessionStore.records.get(id))[0].images, ['figure.png']);
+  });
+}

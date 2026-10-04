@@ -1,3 +1,4 @@
+const { imagePaths: normalizeImagePaths } = require("./images");
 const { normalizeReasoningEffort } = require("./reasoning");
 const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("./web-search");
@@ -178,7 +179,8 @@ function createConversation(options) {
       case "item/input":
       case "item/output":
         if (payload.item) {
-          appendCanonicalItem(state, payload.item);
+          // Image-only records remain visible history but have no replay input.
+          if (!(payload.images?.length && !messageText(payload.item))) appendCanonicalItem(state, payload.item);
         }
         break;
       case "compaction/checkpoint":
@@ -207,6 +209,7 @@ function createConversation(options) {
           turnId: payload.turnId,
           question: payload.question ?? "",
           additions: payload.additions ?? [],
+          imagePaths: payload.images ?? [],
           rendererVersion: payload.rendererVersion ?? 1,
           status: "running",
           text: "",
@@ -232,9 +235,12 @@ function createConversation(options) {
   }
 
   function requestInput(state, staged) {
-    const turn = staged.continuation
+    let turn = staged.continuation
       ? staged.continuation
-      : (staged.question ? renderTurn({ mutations: staged.additions, question: staged.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: staged.rendererVersion ?? RENDERER_VERSION }) : []);
+      : (staged.question || staged.imagePaths?.length || staged.images?.length ? renderTurn({ mutations: staged.additions, question: staged.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: staged.rendererVersion ?? RENDERER_VERSION }) : []);
+    if (!staged.continuation && !staged.accepted && staged.images?.length) {
+      turn[turn.length - 1] = protocolFor(state.config).imageMessage(staged.question, staged.images);
+    }
     if (state.storedState && state.lastResponseId) {
       // Server state is preferred: send only the new input.
       return { input: turn, previousResponseId: state.lastResponseId };
@@ -356,7 +362,7 @@ function createConversation(options) {
     return { settings, budget, price, occupancy, estimatedInput };
   }
 
-  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true }) {
+  async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true, images = [] }) {
     const local = priceLocalRequest(state, { question, additions, rendererVersion });
     const { settings, budget, price, estimatedInput } = local;
     let { occupancy } = local;
@@ -369,7 +375,7 @@ function createConversation(options) {
         network: environment.network,
         baseUrl: state.config?.baseUrl ?? settings.baseUrl,
         apiKey: resolveApiKey(state),
-        body: buildBody(state, { question, additions, rendererVersion }),
+        body: buildBody(state, { question, additions, rendererVersion, images }),
         signal: state.activeController?.signal,
       });
       if (exact.supported === true) {
@@ -610,10 +616,11 @@ function createConversation(options) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
       const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
-      if (sample.usage && Number.isFinite(inputTokens)) {
+      if (sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length) {
         state.occupancyAnchor = { inputTokens };
       }
     }
+    if (state.turn?.imagePaths?.length) state.occupancyAnchor = null;
   }
 
   function pushProjection(state, projection) {
@@ -621,7 +628,7 @@ function createConversation(options) {
   }
 
   // One user turn: durable pending state, then the streamed attempt.
-  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION } = {}) {
+  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION, images = [] } = {}) {
     const state = stateFor(sessionId);
     // All asynchronous phases resolve only their owning session's tracker.
     if (!isEnabled()) return { status: "disabled" };
@@ -633,7 +640,7 @@ function createConversation(options) {
     }
     // An explicit retry carries the original submission's renderer. Unknown
     // versions remain readable in history but must never silently re-render.
-    if (![1, 2, 3].includes(rendererVersion)) return { status: "failed", accepted: false,
+    if (![1, 2, 3, 4].includes(rendererVersion)) return { status: "failed", accepted: false,
       error: { code: "RENDERER", message: `Unsupported Quick Ask renderer version: ${rendererVersion}. Update the plugin or submit a new question.` } };
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };
@@ -659,18 +666,25 @@ function createConversation(options) {
     state.preparing = true;
     state.activeController = controller;
     const prepareAndRun = async () => {
+      let paths, preparedImages;
+      try {
+        paths = normalizeImagePaths(images);
+        preparedImages = paths.length ? await environment.images.readForSend(paths) : [];
+      } catch (error) {
+        return { status: "failed", accepted: false, error: { code: error.code ?? "IMAGE_MISSING", path: error.path, message: error.message } };
+      }
       const stagedAdditions = additions ?? (typeof trackerFor(sessionId).mutationsForSend === "function"
         ? await trackerFor(sessionId).mutationsForSend() : []);
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
-      const preflight = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion });
+      const preflight = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, images: preparedImages });
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
       if (preflight.blocked) return preflight;
       const turnId = `turn-${environment.scheduler.now?.() ?? Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       state.usage = createTurnUsage();
       state.pendingMutations = stagedAdditions;
-      const turn = { turnId, question, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
+      const turn = { turnId, question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
-      await sessionStore.append(sessionId, "turn/started", { turnId, question, additions: stagedAdditions, webSearch: enabled, nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
+      await sessionStore.append(sessionId, "turn/started", { turnId, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
       // Read the current toggle here so a manual change made during preflight
       // cannot be overwritten by consuming this question's one-shot permission.
       if ((state.searchRevision ?? 0) === searchRevision) {
@@ -695,7 +709,7 @@ function createConversation(options) {
         }
         // Include the checkpoint, file references AND the pending question
         // and additions. Never send an oversized request after shrinking history.
-        const after = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, allowCompaction: false });
+        const after = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, allowCompaction: false, images: preparedImages });
         if (controller.signal.aborted || !isEnabled()) return await finishTurn(state, turn, "stopped");
         if (after.blocked) return await finishTurn(state, turn, "failed", { error: after.error });
       }
@@ -816,7 +830,7 @@ function createConversation(options) {
   // continue the same turn. Tool calls, outputs, and the refreshed baselines
   // are append-only additions; nothing earlier is rewritten.
   async function runToolContinuation(state, turn, result, signal, nonStreaming) {
-    if (!turn.question || !isEnabled()) return null;
+    if ((!turn.question && !turn.imagePaths?.length) || !isEnabled()) return null;
     await acceptQueue;
     const ownToolLoop = createToolLoop({ executor: toolExecutor, tracker: trackerFor(state.sessionId), config: { ...state.config, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION } });
     const question = turn.toolQuestion ?? (turn.toolQuestion = ownToolLoop.beginQuestion({
@@ -922,9 +936,12 @@ function createConversation(options) {
       await sessionStore.append(state.sessionId, "turn/accepted", { turnId: turn.turnId });
       // Accepted input precedes every assistant output, including after a
       // restart. Persist the original request exactly once at its checkpoint.
-      for (const item of renderTurn({ mutations: turn.additions, question: turn.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION })) {
-        appendCanonicalItem(state, item);
-        await sessionStore.append(state.sessionId, "item/input", { item });
+      const rendered = renderTurn({ mutations: turn.additions, question: turn.question, userMessage: protocolFor(state.config).userMessage, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION });
+      for (const item of rendered) {
+        const isQuestion = item === rendered[rendered.length - 1];
+        if (!isQuestion || turn.question || !turn.imagePaths?.length) appendCanonicalItem(state, item);
+        await sessionStore.append(state.sessionId, "item/input", { item,
+          ...(isQuestion && turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
       }
       pushProjection(state, { kind: "accepted", turnId: turn.turnId });
     }).catch(() => {});
@@ -981,6 +998,7 @@ function createConversation(options) {
     turn.reasoning = reasoning;
     turn.error = error;
     turn.controller = null;
+    turn.images = [];
     pushProjection(state, { kind: "turn", status, turnId: turn.turnId });
     return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
   }

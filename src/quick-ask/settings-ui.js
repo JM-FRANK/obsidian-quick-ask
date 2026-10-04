@@ -1,3 +1,4 @@
+const { validContextWindowControl } = require("./settings-controls");
 const { profileSettings } = require("./profile-settings");
 const { normalizeSearchSettings } = require("./web-search");
 const { t } = require("./i18n");
@@ -156,15 +157,25 @@ function quickAskPage(host, SecretComponent) {
           {
             name: t(host.settings, "settings.quickAsk.contextWindow.name"),
             desc: t(host.settings, "settings.quickAsk.contextWindow.desc"),
-            control: {
-              type: "text", key: "quickAsk.contextWindowTokens",
-              validate: (value) => {
-                if (value === "") return undefined;
-                const tokens = Number(value);
-                if (!Number.isInteger(tokens) || tokens <= 0) return t(host.settings, "settings.quickAsk.validation.contextWindow");
-                return tokens > 16384 ? undefined : t(host.settings, "settings.quickAsk.validation.contextWindow");
-              },
+            // SettingTextControl has no suffix API. Use the public Setting
+            // primitives to keep the unit outside the editable value.
+            render: setting => {
+              setting.addText(input => {
+                input.setValue(host.getControlValue("quickAsk.contextWindowTokens"));
+                input.inputEl.setAttribute("aria-label", `${t(host.settings, "settings.quickAsk.contextWindow.name")} (K)`);
+                input.onChange(async value => {
+                  const valid = validContextWindowControl(value);
+                  setting.setErrorMessage(valid ? "" : t(host.settings, "settings.quickAsk.validation.contextWindow"));
+                  if (valid) await host.setControlValue("quickAsk.contextWindowTokens", value);
+                });
+              });
+              setting.controlEl.createSpan({ text: "K" });
             },
+          },
+          {
+            name: t(host.settings, "images.keepCache"),
+            desc: t(host.settings, "images.keepCacheHelp"),
+            control: { type: "toggle", key: "quickAsk.keepCachedImages" },
           },
           {
             name: t(host.settings, "settings.quickAsk.callLimit.name"),

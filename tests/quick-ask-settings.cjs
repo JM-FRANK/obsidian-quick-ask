@@ -166,7 +166,7 @@ test('settings that leave the machine carry the secret reference only, never a v
   }
   assert.equal(JSON.stringify(redacted).includes('sk-live-secret-value'), false);
   assert.deepEqual(Object.keys(redacted).sort(), [
-    'activeSystemProfileId', 'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'model', 'preservedCopy', 'protocol', 'secretId', 'systemProfiles', 'systemPrompt', 'webSearch',
+    'activeSystemProfileId', 'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'keepCachedImages', 'model', 'preservedCopy', 'protocol', 'secretId', 'systemProfiles', 'systemPrompt', 'webSearch',
   ]);
 });
 
@@ -201,4 +201,57 @@ test('search settings expose only the selected method configuration',()=>{
  const exa=make('exa');assert.equal(exa.items.filter(i=>i.render).length,2);
  assert.ok(exa.items.some(i=>i.name==='Exa API Key'));
  assert.equal(exa.items.some(i=>i.name==='Parallel API Key'),false);
+});
+
+
+test('context capacity uses decimal K controls without migrating session snapshots', () => {
+  const { quickAskControlPatch, quickAskControlValue, validContextWindowControl } = require('../src/quick-ask/settings-controls');
+  assert.equal(defaultQuickAskSettings().contextWindowTokens, 200000);
+  const old = sessionConfigSnapshot({ contextWindowTokens: 262144 });
+  const settings = normalizeQuickAskSettings({ contextWindowTokens: 262144 });
+  assert.equal(quickAskControlValue({ quickAsk: settings }, 'quickAsk.contextWindowTokens'), '262.144');
+  const { applyQuickAskPatch } = require('../src/quick-ask/settings');
+  applyQuickAskPatch(settings, quickAskControlPatch('quickAsk.contextWindowTokens', '200'));
+  assert.equal(settings.contextWindowTokens, 200000);
+  assert.equal(quickAskControlValue({ quickAsk: settings }, 'quickAsk.contextWindowTokens'), '200');
+  assert.equal(old.contextWindowTokens, 262144);
+  assert.equal(sessionConfigSnapshot(settings).contextWindowTokens, 200000);
+  for (const value of ['', ' ', '17', '200', '17.1', '262.144']) assert.equal(validContextWindowControl(value), true, value);
+  for (const value of ['16', '16.384', '16.3841', 'abc', '-1', 'Infinity', '9007199254740991']) assert.equal(validContextWindowControl(value), false, value);
+  applyQuickAskPatch(settings, quickAskControlPatch('quickAsk.contextWindowTokens', ''));
+  assert.equal(settings.contextWindowTokens, null);
+});
+
+
+test('image cache retention is global, defaults on, and accepts a false patch', () => {
+  const { applyQuickAskPatch } = require('../src/quick-ask/settings');
+  const values = normalizeQuickAskSettings({});
+  assert.equal(values.keepCachedImages, true);
+  applyQuickAskPatch(values, { keepCachedImages: false });
+  assert.equal(values.keepCachedImages, false);
+  assert.equal(normalizeQuickAskSettings(values).keepCachedImages, false);
+  assert.equal(sessionConfigSnapshot(values).keepCachedImages, undefined);
+});
+
+
+test('decimal K capacities validate, save exact whole tokens and round-trip without floating-point loss', () => {
+  const { quickAskControlPatch, quickAskControlValue, validContextWindowControl } = require('../src/quick-ask/settings-controls');
+  const { applyQuickAskPatch } = require('../src/quick-ask/settings');
+  for (const [input, tokens, display] of [
+    ['200.5', 200500, '200.5'], ['262.144', 262144, '262.144'],
+    ['131.072', 131072, '131.072'], ['16.385', 16385, '16.385'], ['32.001', 32001, '32.001'],
+    ['1047.576', 1047576, '1047.576'], ['200.5000', 200500, '200.5'],
+    ['9007199254740.991', Number.MAX_SAFE_INTEGER, '9007199254740.991'],
+  ]) {
+    assert.equal(validContextWindowControl(input), true, input);
+    const settings = normalizeQuickAskSettings({});
+    const patch = quickAskControlPatch('quickAsk.contextWindowTokens', input);
+    assert.equal(patch.contextWindowTokens, tokens, input);
+    applyQuickAskPatch(settings, patch);
+    assert.equal(settings.contextWindowTokens, tokens, input);
+    assert.equal(validateQuickAskSettings({ ...settings, baseUrl: 'https://example.test/v1', secretId: 'key', model: 'model' }).valid, true);
+    assert.equal(quickAskControlValue({ quickAsk: settings }, 'quickAsk.contextWindowTokens'), display);
+  }
+  for (const input of ['16.384', '16.38', '0.5', '200.0001', '16.384999', '9007199254740.992', 'abc', 'Infinity'])
+    assert.equal(validContextWindowControl(input), false, input);
 });

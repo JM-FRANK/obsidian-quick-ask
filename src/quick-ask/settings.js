@@ -60,7 +60,7 @@ function quickAskDisplayPage(settings) {
 // The fixed answer reserve, in tokens. It follows pi-agent's reserveTokens
 // default and is deliberately not a setting.
 const ANSWER_RESERVE_TOKENS = 16384;
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 262144;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
 const DEFAULT_CALL_LIMIT = 3;
 const MIN_CALL_LIMIT = 1;
 const MAX_CALL_LIMIT = 10;
@@ -75,6 +75,7 @@ function stripTrailingSlashes(value) {
 function defaultQuickAskSettings() {
   return {
     enable: true,
+    keepCachedImages: true,
     display: normalizeDisplaySettings(),
     webSearch: normalizeSearchSettings(),
     protocol: "responses",
@@ -111,6 +112,7 @@ function normalizeQuickAskSettings(saved) {
   const defaults = defaultQuickAskSettings();
   if (saved == null || typeof saved !== "object") return defaults;
   const values = {
+    keepCachedImages: typeof saved.keepCachedImages === "boolean" ? saved.keepCachedImages : true,
     enable: typeof saved.enable === "boolean" ? saved.enable : defaults.enable,
     display: normalizeDisplaySettings(saved.display),
     webSearch: normalizeSearchSettings(saved.webSearch),
@@ -191,6 +193,7 @@ function redactQuickAskSettings(settings) {
   const values = normalizeQuickAskSettings(settings);
   return {
     enable: values.enable,
+    keepCachedImages: values.keepCachedImages,
     display: { ...values.display },
     webSearch: { ...values.webSearch },
     protocol: values.protocol,
@@ -255,7 +258,7 @@ function applyQuickAskPatch(target, patch) {
     Object.assign(target, catalog, { systemPrompt: current.prompt });
     applied++;
   }
-  for (const field of ["enable", "protocol", "baseUrl", "secretId", "model", "contextWindowTokens", "callLimit"]) {
+  for (const field of ["enable", "keepCachedImages", "protocol", "baseUrl", "secretId", "model", "contextWindowTokens", "callLimit"]) {
     if (Object.hasOwn(patch, field) && target[field] !== normalized[field]) {
       target[field] = normalized[field];
       applied += 1;

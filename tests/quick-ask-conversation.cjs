@@ -99,11 +99,12 @@ function conversationEnvironment(script = () => sseResponse(streamedTurn())) {
   };
 }
 
-function makeConversation({ config = {}, script = () => sseResponse(streamedTurn()), settings = {} } = {}) {
+function makeConversation({ config = {}, script = () => sseResponse(streamedTurn()), settings = {}, imageSource = null } = {}) {
   const sessionStore = makeStore();
   const tracker = makeTracker();
   const network = makeNetwork(script);
   const environment = {
+    images: { readForSend: paths => require('../src/quick-ask/images').prepareImages(paths, imageSource) },
     vault: { normalizePath: path => path, readText: async () => null },
     network,
     scheduler: {
@@ -939,7 +940,7 @@ test('recovered retries preserve their renderer while genuinely new questions us
       assert.equal(sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1).payload.rendererVersion, RENDERER_VERSION);
       assert.match(network.requests.at(-1).options.body, /1 \| alpha/);
       const fresh = JSON.parse(network.requests.at(-1).options.body);
-      assert.equal(protocol === 'responses' ? fresh.instructions : fresh.messages[0].content, buildInstructions({ rendererVersion: 3, customSystemPrompt: 'Saved custom role.' }));
+      assert.equal(protocol === 'responses' ? fresh.instructions : fresh.messages[0].content, buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: 'Saved custom role.' }));
     }
   }
 });
@@ -998,7 +999,7 @@ test('CC Stop before the first frame leaves canonical history untouched', async 
 
 test('profile switching changes new-session requests only in both protocols', async () => {
   const { applyQuickAskPatch, sessionConfigSnapshot } = require('../src/quick-ask/settings');
-  const { buildInstructions } = require('../src/quick-ask/prompt-renderer');
+  const { buildInstructions, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
   for (const protocol of ['responses', 'chat-completions']) {
     const f = makeConversation({ settings: { protocol, systemPrompt: 'Original role' },
       script: protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => chatResponse(),
@@ -1013,8 +1014,66 @@ test('profile switching changes new-session requests only in both protocols', as
       assert.equal(result.status, 'complete');
       const body = JSON.parse(f.network.requests.at(-1).options.body);
       assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content,
-        buildInstructions({ rendererVersion: 3, customSystemPrompt: prompt }));
+        buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: prompt }));
     }
     assert.equal(JSON.stringify(f.sessionStore.logs.get(oldId)[0]), originalHeader);
   }
 });
+
+
+for (const protocol of ['responses', 'chat-completions']) {
+  test(`${protocol}: images are transient first-request inputs; logs/replay/compaction only retain paths`, async () => {
+    let bytes = Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3]);
+    const imageSource = { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes };
+    const script = protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => chatResponse();
+    const f = makeConversation({ settings: { protocol }, imageSource, script });
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    assert.equal((await f.conversation.send(id, '', { images: ['papers/figure.png'] })).status, 'complete');
+    const first = f.network.requests[0].options.body;
+    assert.match(first, /data:image\/png;base64/);
+    const wire = JSON.parse(first);
+    const input = protocol === 'responses' ? wire.input : wire.messages;
+    const user = input.find(item => item.role === 'user');
+    assert.equal(user.content.length, 1);
+    assert.equal(user.content[0].type, protocol === 'responses' ? 'input_image' : 'image_url');
+    const records = f.sessionStore.records.get(id);
+    assert.deepEqual(f.conversation.stateFor(id).turn.images, [], 'settled turns release transient image bytes');
+    assert.equal(f.conversation.stateFor(id).occupancyAnchor, null, 'image-inclusive usage cannot anchor image-free next requests');
+    assert.equal(JSON.stringify(records).includes('data:image'), false);
+    assert.equal(JSON.stringify(records).includes('base64'), false);
+    const { conversationFromRecords } = require('../src/quick-ask/conversation-messages');
+    assert.deepEqual(conversationFromRecords(records)[0], { role: 'user', text: '', images: ['papers/figure.png'] });
+    await f.conversation.send(id, 'Follow up');
+    assert.equal(f.network.requests.at(-1).options.body.includes('data:image'), false);
+    await f.conversation.load(id);
+    await f.conversation.send(id, 'After reload');
+    assert.equal(f.network.requests.at(-1).options.body.includes('data:image'), false);
+    bytes = Uint8Array.from([...bytes, 4]);
+    await f.conversation.send(id, '', { images: ['papers/figure.png'] });
+    assert.notEqual(f.network.requests.at(-1).options.body, first);
+    assert.match(f.network.requests.at(-1).options.body, new RegExp(Buffer.from(bytes).toString('base64')));
+    imageSource.stat = async () => null;
+    const before = JSON.stringify(records), requests = f.network.requests.length;
+    const missing = await f.conversation.send(id, '', { images: ['papers/figure.png'] });
+    assert.equal(missing.error.code, 'IMAGE_MISSING');
+    assert.equal(missing.accepted, false);
+    assert.equal(f.network.requests.length, requests);
+    assert.equal(JSON.stringify(records), before);
+  });
+
+  test(`${protocol}: tool continuation cannot resend the image`, async () => {
+    const call = { type: 'function_call', id: 'fc', call_id: 'read', name: 'get-full-file', arguments: '{"path":"missing.md"}' };
+    const toolResponse = protocol === 'responses' ? () => sseResponse([
+      { type: 'response.created', data: { response: { id: 'with-tool' } } },
+      { type: 'response.completed', data: { response: { id: 'with-tool', output: [call] } } },
+    ]) : () => chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: call.name, arguments: call.arguments } }] });
+    const bytes = Uint8Array.from([137,80,78,71,13,10,26,10,1]);
+    const f = makeConversation({ settings: { protocol }, imageSource: { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes },
+      script: [toolResponse, protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => chatResponse()] });
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    assert.equal((await f.conversation.send(id, '', { images: ['figure.png'] })).status, 'complete');
+    assert.match(f.network.requests[0].options.body, /data:image/);
+    assert.equal(f.network.requests[1].options.body.includes('data:image'), false);
+    assert.equal(JSON.stringify(f.sessionStore.records.get(id)).includes('data:image'), false);
+  });
+}

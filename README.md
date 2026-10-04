@@ -43,7 +43,10 @@ Use the plain effort label inside the Composer to cycle Off / Low / High / XHigh
 
 New file context and full-file tool results include physical line numbers for citations. Source notes remain unchanged. Search/effort clicks stay in memory until a question starts, so unsent choices are not retained across plugin restart.
 
-Select Markdown text or add a Markdown file as context, type a question and submit it. The model may request the complete contents of files already included in that conversation. It cannot search arbitrary files or edit your notes. PDF/image input is not supported in this release. Interface language supports English and Simplified Chinese, with some remaining English interface text.
+Select Markdown text or add a Markdown file as context, type a question and submit it. The model may request the complete contents of files already included in that conversation. It cannot search arbitrary files or edit your notes. PDF input is not supported. Interface language supports English and Simplified Chinese, with some remaining English interface text.
+
+
+Add PNG/JPEG/WebP images using `[[`, Vault/external drag and drop, or clipboard paste. Images can be sent without text; limits are 20 MiB each, 20 images and 200 MiB per question. Original bytes go only to the first model request; later questions and compaction do not resend them. History stores paths only and previews the current files. Imported/pasted images stay in plugin cache; turn off **Keep cached images** to clear that cache on the next Obsidian reopen. Plugin reload keeps it. Missing files display a full-size placeholder. Exports include paths, not image files. Images are excluded from the local token estimate; provider usage includes actual image cost.
 
 ## Accounts, costs and network use
 

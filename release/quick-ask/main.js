@@ -19,7 +19,8 @@ class QuickAskSettingsTab extends PluginSettingTab {
     await this.settings.update(patch);
     if (key === 'quickAsk.enable') this.quickAskIntegration.syncEnabled();
     if (key.startsWith('quickAsk.display.') || key.startsWith('quickAsk.webSearch.') || key === 'language') this.quickAskIntegration.refreshAppearance();
-    this.update();
+    // Keep the custom capacity input mounted while the user types.
+    if (key !== 'quickAsk.contextWindowTokens') this.update();
   }
   getSettingDefinitions() {
     const chinese = this.current().language === 'zh-CN';

@@ -48,11 +48,11 @@ test('the whole prospective request is priced with the answer reserve included',
 });
 
 test('the effective input budget subtracts the fixed reserve and the 90 percent threshold uses capacity', () => {
-  const budget = capacityBudget(262144, { reserveTokens: 16384 });
+  const budget = capacityBudget(200000, { reserveTokens: 16384 });
   assert.equal(budget.configured, true);
-  assert.equal(budget.inputBudget, 245760);
-  assert.equal(budget.compactionThreshold, Math.floor(262144 * OCCUPANCY_COMPACTION_RATIO));
-  assert.equal(budget.compactionThreshold, 235929);
+  assert.equal(budget.inputBudget, 183616);
+  assert.equal(budget.compactionThreshold, Math.floor(200000 * OCCUPANCY_COMPACTION_RATIO));
+  assert.equal(budget.compactionThreshold, 180000);
 });
 
 test('a cleared capacity has no budget, no threshold, and no percentage', () => {

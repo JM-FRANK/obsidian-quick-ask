@@ -771,3 +771,43 @@
 }
 
 .scholar-quick-ask-profile-prompt { width: 100%; min-width: 16em; }
+
+
+.scholar-quick-ask-images { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 6px 0; }
+.scholar-quick-ask-image-card { position: relative; width: 120px; aspect-ratio: 4 / 3; flex: 0 0 120px; }
+.scholar-quick-ask-message .scholar-quick-ask-image-card { width: 160px; flex-basis: 160px; }
+.scholar-quick-ask-image-preview { display: block; position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0;
+  padding: 0; overflow: hidden; border: 0; border-radius: var(--radius-m); background: transparent; box-shadow: none; }
+.scholar-quick-ask-image-preview:hover { background: transparent; box-shadow: none; }
+.scholar-quick-ask-image-preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.scholar-quick-ask-image-preview:disabled { opacity: 1; }
+.scholar-quick-ask-image-preview.is-missing { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.scholar-quick-ask-image-placeholder { display: block; width: 100%; height: calc(100% - 24px); min-height: 0; flex: 1 1 auto; }
+.scholar-quick-ask-image-placeholder .image-placeholder-landscape { fill: none; stroke: var(--text-faint); stroke-width: 2; opacity: .5; }
+.scholar-quick-ask-image-placeholder .image-placeholder-cross { stroke: var(--text-muted); stroke-width: 3; stroke-linecap: round; }
+.scholar-quick-ask-image-missing-label { display: block; flex: 0 0 auto; padding: 0 4px 6px;
+  color: var(--text-muted); font-size: var(--font-smallest); line-height: 1.3; text-align: center; }
+.scholar-quick-ask-image-remove { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; padding: 3px; }
+.scholar-quick-ask-image-budget { display: block; color: var(--text-muted); font-size: var(--font-smallest); padding-bottom: 5px; }
+/* Fill the originating Obsidian window; the image alone receives contain
+   sizing, so the surrounding region stays the requested dark overlay. */
+.scholar-quick-ask-image-viewer {
+  position: fixed; inset: 0; z-index: 10000; background: rgba(20, 22, 24, .85);
+  isolation: isolate; color: #f2f2f2;
+}
+.scholar-quick-ask-image-viewer-content {
+  position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none;
+  object-fit: contain; display: block; pointer-events: none; user-select: none;
+}
+.scholar-quick-ask-image-viewer-title {
+  position: absolute; top: 0; left: 0; right: 0; padding: 12px 48px;
+  font-family: var(--font-text); font-size: var(--font-text-size); line-height: var(--line-height-normal);
+  text-align: center; overflow-wrap: anywhere; pointer-events: none;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .9);
+}
+.scholar-quick-ask-image-viewer-close {
+  position: absolute; top: 8px; right: 8px; width: 32px; height: 32px;
+  padding: 0; border: 0; box-shadow: none; background: transparent; color: inherit;
+  font-size: 24px; line-height: 1; cursor: pointer;
+}
+.scholar-quick-ask-image-viewer-close:hover { background: rgba(255, 255, 255, .12); }

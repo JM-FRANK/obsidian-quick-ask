@@ -5,7 +5,7 @@ const { EditorView, ViewPlugin, WidgetType, Decoration, keymap, placeholder } = 
 // makes a decorated range behave as one unit for the caret and for deletion.
 const atomicRanges = EditorView.atomicRanges;
 const {
-  fileReferenceField, referencesOf, choosePath, stageReferences, questionText, referencedPaths, referenceDeletion, labelFor,
+  fileReferenceField, referencesOf, choosePath, stageReferences, questionText, referencedPaths, removeReferences, referenceDeletion, labelFor,
   editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery,
 } = require("./composer-state");
 const { activePickerQuery } = require("./file-picker");
@@ -239,6 +239,7 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
       suggest?.close();
       view.setState(emptyState.update({ changes: { from: 0, insert: text }, selection: { anchor: text.length }, annotations: Transaction.addToHistory.of(false) }).state);
     },
+    removeFile(path) { suggest?.close(); view.dispatch(removeReferences(view.state, path)); },
     insertFiles(paths, coordinates = null) {
       const at = coordinates ? view.posAtCoords(coordinates) : null;
       const transaction = stageReferences(view.state, paths, at ?? view.state.selection.main.head);

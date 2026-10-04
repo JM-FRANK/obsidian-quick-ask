@@ -18,6 +18,10 @@ const RESPONSE_PROTOCOL = Object.freeze({
   // An empty tools array is a valid request here.
   emptyToolsAreInvalid: false,
   userMessage: responses.responsesUserMessage,
+  imageMessage: (text, images) => ({ type: "message", role: "user", content: [
+    ...(text ? [{ type: "input_text", text }] : []),
+    ...images.map(image => ({ type: "input_image", image_url: image.url })),
+  ] }),
   assistantMessage: responses.responsesAssistantMessage,
   buildRequestBody: responses.buildRequestBody,
   functionTool: tool => tool,
@@ -33,6 +37,10 @@ const CHAT_PROTOCOL = Object.freeze({
   // Sending `tools: []` is rejected, so the fields are dropped instead.
   emptyToolsAreInvalid: true,
   userMessage: chat.userMessage, assistantMessage: chat.assistantMessage,
+  imageMessage: (text, images) => chat.userMessage([
+    ...(text ? [{ type: "text", text }] : []),
+    ...images.map(image => ({ type: "image_url", image_url: { url: image.url } })),
+  ]),
   buildRequestBody: chat.buildRequestBody, functionTool: chat.functionTool,
   toolContinuationItems: chat.toolContinuationItems,
 });

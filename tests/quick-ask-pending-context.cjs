@@ -153,3 +153,22 @@ test('navigation validates the exact range, relocates only a unique quote, and r
   assert.equal(selectionRange('changed', { text: 'quote', from: 0, to: 5 }), null);
   assert.equal(selectionRange('changed', { text: '' }), null);
 });
+
+
+test('image-only submission clears its attachments and failure restores them without replacing a newer draft', () => {
+  const { prepareSubmission, recoverSubmittedDraft } = require('../src/quick-ask/submission-state');
+  const paths = ['papers/a.png'];
+  const submission = { question: '', draft: '', pending: { files: [], selections: [], images: paths }, images: paths };
+  const initial = { composer: '', pending: submission.pending };
+  const prepared = prepareSubmission([], initial, submission);
+  assert.deepEqual(prepared.entry.images, paths);
+  assert.deepEqual(prepared.draft.pending.images, []);
+  const recovered = recoverSubmittedDraft(prepared.draft, submission);
+  assert.deepEqual(recovered.pending.images, paths);
+  const retry = prepareSubmission(prepared.messages, recovered, submission, true);
+  assert.deepEqual(retry.draft.pending.images, []);
+  const newer = { composer: 'next', pending: { files: [], selections: [], images: ['b.png'] } };
+  const preserve = recoverSubmittedDraft(newer, submission);
+  assert.equal(preserve.composer, 'next');
+  assert.deepEqual(preserve.pending.images, ['b.png']);
+});

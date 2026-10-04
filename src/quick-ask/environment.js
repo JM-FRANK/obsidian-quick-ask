@@ -1,5 +1,7 @@
 const { AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
 const { t } = require("./i18n");
+const { createImageViewer } = require("./image-viewer");
+const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("./images");
 const { droppedFilePaths } = require("./file-input");
 const { pickerOptions, isCompositionEvent } = require("./file-picker");
 const { selectionRange } = require("./pending-context");
@@ -26,7 +28,7 @@ function isInsideConfigDirectory(path, configDirectory) {
 
 // One environment function resolves a Context File's role, so extension
 // classification, case rules, and plugin-directory exclusions live in a single
-// place. Version 0.1 accepts Markdown only.
+// place. Image Attachments are distinct from tracked Markdown Context Files.
 function createRoleResolver(configDirectory) {
   return (path) => {
     if (typeof path !== "string" || path.length === 0) return null;
@@ -37,20 +39,39 @@ function createRoleResolver(configDirectory) {
     const dot = name.lastIndexOf(".");
     if (dot <= 0) return null;
     const extension = name.slice(dot + 1).toLowerCase();
-    return MARKDOWN_EXTENSIONS.has(extension) ? "markdown" : null;
+    return MARKDOWN_EXTENSIONS.has(extension) ? "markdown" : imageMime(path) ? "image" : null;
   };
 }
 
-function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwork = () => true, viewType = QUICK_ASK_VIEW_TYPE } = {}) {
+function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwork = () => true, getKeepCachedImages = () => true, viewType = QUICK_ASK_VIEW_TYPE } = {}) {
   const { vault, workspace } = plugin.app;
   const configDirectory = vault.configDir ?? ".obsidian";
   const pluginDirectory = plugin.manifest?.dir ?? `${configDirectory}/plugins/${plugin.manifest?.id ?? "scholar-workbench"}`;
   const resolveRole = createRoleResolver(configDirectory);
   const language = { language: getLanguage };
+  const imageViewer = createImageViewer({ labelForClose: () => t(language, "images.close") });
+  plugin.register(() => imageViewer.dispose());
   let fuzzyQuery = null;
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
   const markdownComponents = new WeakMap();
+  const imageDirectory = `${pluginDirectory}/quick-ask/image-cache`;
+  const imageCache = createImageCache({ adapter: vault.adapter, directory: imageDirectory });
+  // The renderer/application realm outlives a plugin reload; it disappears on
+  // reopening Obsidian. Weak application keys avoid retaining closed Vaults.
+  const startupKey = Symbol.for("scholar-workbench.quick-ask.image-startups");
+  const startups = globalThis[startupKey] ??= new WeakMap();
+  const keepImagesAtStartup = getKeepCachedImages();
+  const imagesReady = initializeImageCache(startups, plugin.app, pluginDirectory, async () => {
+    if (!keepImagesAtStartup) await imageCache.clear();
+  }).catch(error => { console.error("Quick Ask image cache cleanup failed", error); });
+  function readableImagePath(path) {
+    imagePaths([path]);
+    // Cached images from an imported sibling host remain readable in this Vault.
+    const caches = [imageDirectory, ...["scholar-workbench", "quick-ask"].map(id => `${configDirectory}/plugins/${id}/quick-ask/image-cache`)];
+    return resolveRole(path) === "image" || caches.some(directory => path.startsWith(`${directory}/`) && !path.slice(directory.length + 1).includes("/"));
+  }
+
 
   function fileOf(path) {
     const file = vault.getAbstractFileByPath(path);
@@ -122,6 +143,40 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         }
       },
       resolveRole,
+    },
+
+    images: {
+      async readForSend(paths) {
+        await imagesReady;
+        for (const path of paths) if (!readableImagePath(path)) throw imageError("IMAGE_PATH", path);
+        const hostRequire = require.desktop ?? require;
+        const { Buffer } = hostRequire("node:buffer");
+        return prepareImages(paths, {
+          stat: path => vault.adapter.stat(path), readBinary: path => vault.adapter.readBinary(path),
+          encodeBase64: bytes => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64"),
+        });
+      },
+      async resourcePath(path) {
+        await imagesReady;
+        if (!readableImagePath(path) || !await vault.adapter.exists(path)) return null;
+        return vault.adapter.getResourcePath(normalizePath(path));
+      },
+      async importFiles(files) {
+        await imagesReady;
+        const inputs = Array.from(files ?? []);
+        validateImageBatch(inputs);
+        const names = inputs.map(file => {
+          if (imageMime(file.name)) return file.name;
+          const extension = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" }[file.type];
+          if (!extension) throw imageError("IMAGE_FORMAT", file.name);
+          return `pasted-image.${extension}`;
+        });
+        const paths = [];
+        for (let index = 0; index < inputs.length; index++) {
+          paths.push(await imageCache.add({ name: names[index], bytes: await inputs[index].arrayBuffer() }));
+        }
+        return paths;
+      },
     },
 
     pluginData: {
@@ -198,6 +253,34 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
     },
 
     ui: {
+      clipboardImages(event) {
+        return Array.from(event.clipboardData?.items ?? []).filter(item => item.kind === "file")
+          .map(item => item.getAsFile()).filter(Boolean);
+      },
+      droppedImages(event) { return Array.from(event.dataTransfer?.files ?? []); },
+      missingImage(parent, label) {
+        const doc = parent.ownerDocument;
+        const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 160 100");
+        svg.setAttribute("role", "img"); svg.setAttribute("aria-label", label);
+        svg.classList.add("scholar-quick-ask-image-placeholder");
+        for (const [tag, attributes] of [
+          ["path", { d: "M14 75 L46 43 L75 68 L103 36 L146 78", class: "image-placeholder-landscape" }],
+          ["circle", { cx: 45, cy: 25, r: 8, class: "image-placeholder-landscape" }],
+          ["path", { d: "M68 32 L94 58 M94 32 L68 58", class: "image-placeholder-cross" }],
+        ]) {
+          const element = doc.createElementNS(svg.namespaceURI, tag);
+          for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+          svg.appendChild(element);
+        }
+        parent.appendChild(svg);
+        parent.createSpan({ cls: "scholar-quick-ask-image-missing-label", text: label });
+      },
+      previewImage(path, resource, origin, alias) {
+        const doc = origin?.ownerDocument;
+        if (!doc) return;
+        imageViewer.open({ document: doc, resource, label: alias || path.split("/").at(-1) });
+      },
       createEl(parent, tag, options = {}) {
         const element = parent.createEl(tag, { cls: options.cls, text: options.text });
         for (const [name, value] of Object.entries(options.attributes ?? {})) {

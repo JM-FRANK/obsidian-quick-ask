@@ -283,3 +283,13 @@ test('slash commands are confined to line starts and preserve other text', () =>
   assert.equal(slashQuery('https://x/web', 13), null);
   assert.equal(slashQuery('words /web', 10), null);
 });
+
+
+test('removing an image preview removes its chips without deleting prose or other references', () => {
+  const { removeReferences } = require('../src/quick-ask/composer-state');
+  const initial = composerState('Compare [[a.png]] and [[b.md]] with [[a.png]]');
+  const next = initial.update(removeReferences(initial, 'a.png')).state;
+  assert.deepEqual(referencedPaths(next), ['b.md']);
+  assert.equal(questionText(next), 'Compare and with');
+  assert.equal(next.doc.toString().includes('[[b.md]]'), true);
+});

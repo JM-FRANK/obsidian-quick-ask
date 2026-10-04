@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit PNG/JPEG/WebP image attachments for both protocols, including image-only questions, paste and external file input.
+- Send original image bytes once; retain only Vault paths in history, with shared previews and missing-image placeholders.
+- Add image-cache retention and clear-on-application-reopen behavior; plugin reload leaves the cache intact.
+
+
 ## 1.0.3 — Compaction replay, file references and system profiles
 
 - After compaction, reintroduce tracked files as path references instead of repeating their full bodies. Preserve the recent tail, local history and existing full-file retrieval limits.

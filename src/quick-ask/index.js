@@ -44,6 +44,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
   const environment = createQuickAskEnvironment(plugin, {
     getLanguage: () => settings().language ?? "en",
     viewType,
+    getKeepCachedImages: () => normalizeQuickAskSettings(settings().quickAsk).keepCachedImages,
     canNetwork: () => registered && shouldRegisterQuickAsk({ isDesktop: environment.workspace.isDesktop(), settings: settings() }),
   });
   let displayedProfile = JSON.stringify(activeProfile(settings().quickAsk));

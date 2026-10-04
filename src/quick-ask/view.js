@@ -1,3 +1,6 @@
+const { imageMime, imagePaths, imageError, IMAGE_MAX_COUNT } = require("./images");
+const { appendImageDraft, imageDraftPaths } = require("./image-drafts");
+const { renderImages } = require("./image-ui");
 const { activeProfile, profileName } = require("./profiles");
 const { RENDERER_VERSION } = require("./prompt-renderer");
 const { REASONING_LEVELS, nextReasoningEffort } = require("./reasoning");
@@ -216,6 +219,8 @@ class QuickAskView {
         });
         if (entry.text) this.renderCopyButton(bubble, entry.text);
       } else ui.setText(body, entry.text);
+      if (entry.images?.length) renderImages({ parent: body, paths: entry.images, environment: this.environment,
+        translate: key => this.t(this.getSettings(), key) });
       if (entry.retry) {
         const retry = ui.createEl(bubble, "button", { text: this.t(this.getSettings(), "submission.retry"), attributes: { type: "button" } });
         retry.addEventListener("click", () => { void this.send(entry.retry); });
@@ -568,6 +573,30 @@ class QuickAskView {
     }
   }
 
+  pendingImagePaths() {
+    return [...new Set([...(this.pending.images ?? []), ...(this.composer?.paths ?? []).filter(imageMime)])];
+  }
+
+  imageError(error) {
+    this.ui.notice(this.t(this.getSettings(), `images.${error.code ?? "IMAGE_MISSING"}`, { path: error.path ?? "" }));
+  }
+
+  async importImages(files, id = this.activeSessionId) {
+    if (!files.length) return;
+    if (this.activeSessionId === id) this.saveDraft();
+    const owner = this.drafts.get(id);
+    if (!owner) return;
+    try {
+      if (imageDraftPaths(owner).length + files.length > IMAGE_MAX_COUNT) throw imageError("IMAGE_COUNT");
+      const paths = imagePaths(await this.environment.images.importFiles(files));
+      if (!this.mounted) return;
+      const updated = appendImageDraft(this.drafts, id, paths);
+      if (!updated || this.activeSessionId !== id) return;
+      this.pending = updated.pending;
+      this.saveDraft(); this.renderPending();
+    } catch (error) { this.imageError(error); }
+  }
+
   // Two full-width stacks: every File Row, then every Selection Preview Row.
   renderPending() {
     const ui = this.ui;
@@ -576,9 +605,17 @@ class QuickAskView {
     const view = derivePendingView(this.pending, { expanded: this.expanded });
     this.expanded = view.expanded;
     area.classList.toggle("is-collapsed", !view.expanded);
-    area.hidden = view.fileCount + view.selectionCount === 0;
+    const images = this.pendingImagePaths();
+    area.hidden = view.fileCount + view.selectionCount + images.length === 0;
     if (area.hidden) { this.refreshNewSessionButton(); return; }
     const panel = ui.createEl(area, "div", { cls: "scholar-quick-ask-context-panel" });
+    renderImages({ parent: panel, paths: images, environment: this.environment, translate: key => this.t(this.getSettings(), key),
+      onRemove: path => {
+        this.pending = { ...this.pending, images: (this.pending.images ?? []).filter(entry => entry !== path) };
+        this.composer?.removeFile?.(path);
+        this.saveDraft(); this.renderPending();
+      } });
+    if (images.length) ui.createEl(panel, "small", { cls: "scholar-quick-ask-image-budget", text: this.t(this.getSettings(), "images.budget") });
     if (view.showBar) {
       const action = this.t(this.getSettings(), view.expanded ? "context.collapse" : "context.expand");
       const button = ui.createEl(panel, "button", {
@@ -668,7 +705,7 @@ class QuickAskView {
       parent: this.roots.input,
       sidebar: this.roots.container,
       paths: () => this.environment.vault.listFiles().map(file => file.path).filter(canReferencePath),
-      isSupported: path => this.environment.vault.resolveRole?.(path) === "markdown",
+      isSupported: path => ["markdown", "image"].includes(this.environment.vault.resolveRole?.(path)),
       unsupportedLabel: this.t(settings, "composer.unsupportedFile"),
       createFileSuggester: this.environment.ui.createFileSuggester,
       onSubmit: () => { void this.send(); },
@@ -678,6 +715,7 @@ class QuickAskView {
         const draft = this.drafts.get(this.activeSessionId);
         if (draft?.failedSubmission) draft.failedSubmission.restored = false;
         this.saveDraft();
+        this.renderPending();
         this.refreshNewSessionButton();
       },
       t: this.t,
@@ -692,7 +730,7 @@ class QuickAskView {
     const dropRegion = this.roots.container;
     dropRegion.addEventListener("dragover", event => {
       const types = Array.from(event.dataTransfer?.types ?? []);
-      if (!this.captureHolder?.get?.() && !types.includes("text/uri-list")) return;
+      if (!this.captureHolder?.get?.() && !types.includes("text/uri-list") && !types.includes("Files")) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       this.roots.composer.classList.add("is-drag-over");
@@ -703,6 +741,12 @@ class QuickAskView {
     // Capture before CodeMirror handles a URI as plain text. Files may land
     // anywhere in this Quick Ask pane; selected prose keeps its narrower target.
     dropRegion.addEventListener("drop", event => { void this.handleDrop(event, event.target); }, true);
+    dropRegion.addEventListener("paste", event => {
+      const files = this.ui.clipboardImages(event);
+      if (!files.length) return;
+      event.preventDefault(); event.stopPropagation();
+      void this.importImages(files);
+    }, true);
     const footer = this.ui.createEl(this.roots.shell, "div", { cls: "scholar-quick-ask-composer-footer" });
     const effort = this.ui.createEl(footer, "span", {
       cls: "scholar-quick-ask-effort", attributes: { role: "button", tabindex: "0" },
@@ -935,8 +979,9 @@ class QuickAskView {
     const submission = retrySubmission ?? {
       draft: captured.composer, pending: captured.pending,
       question: (this.composer?.text ?? "").trim(), references: [...(this.composer?.paths ?? [])],
+      images: this.pendingImagePaths(),
     };
-    if (!submission.question) return null;
+    if (!submission.question && !submission.images?.length) return null;
     submission.rendererVersion ??= RENDERER_VERSION;
     const validation = this.runtime.validateForSend?.(this.runtime.stateFor(sessionId));
     if (validation && !validation.valid) { this.showValidationError(validation.errors); return { status: "invalid" }; }
@@ -964,11 +1009,12 @@ class QuickAskView {
     try {
       const additions = submission.additions ?? await this.stagedMutations(submission.references, submission.pending.selections, sessionId);
       submission.additions = additions;
-      result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion });
+      result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion, images: submission.images ?? [] });
     } catch {
       result = { status: "failed", accepted: false };
       this.environment.ui.notice(this.t(this.getSettings(), "composer.failed"));
     }
+    if (result?.error?.code?.startsWith("IMAGE_")) this.imageError(result.error);
     const accepted = result?.accepted || ["complete", "incomplete"].includes(result?.status);
     const visible = this.activeSessionId === sessionId && this.mounted;
     if (!accepted && (visible || this.drafts.has(sessionId))) {
@@ -1017,8 +1063,8 @@ class QuickAskView {
     const failed = this.drafts.get(this.activeSessionId)?.failedSubmission;
     if (failed?.submission || this.lastSubmission) return this.send(failed?.submission ?? this.lastSubmission);
     const turn = this.runtime.stateFor(this.activeSessionId)?.turn;
-    if (turn?.question) return this.send({ question: turn.question, draft: turn.question, references: [],
-      pending: { files: [], selections: [] }, additions: turn.additions ?? [], rendererVersion: turn.rendererVersion });
+    if (turn?.question || turn?.imagePaths?.length) return this.send({ question: turn.question, draft: turn.question, references: [],
+      images: turn.imagePaths ?? [], pending: { files: [], selections: [], images: turn.imagePaths ?? [] }, additions: turn.additions ?? [], rendererVersion: turn.rendererVersion });
     return null;
   }
 
@@ -1096,6 +1142,12 @@ class QuickAskView {
   // their existing exact-text validation and restricted pending/composer targets.
   async handleDrop(event, region) {
     this.roots.composer.classList.remove("is-drag-over");
+    const files = this.ui.droppedImages(event);
+    if (files.length) {
+      event.preventDefault(); event.stopPropagation();
+      await this.importImages(files);
+      return;
+    }
     const capture = this.captureHolder?.get?.();
     if (!capture) {
       const paths = this.environment.vault.droppedFilePaths?.(event.dataTransfer) ?? [];
@@ -1240,7 +1292,7 @@ class QuickAskView {
       unavailable: this.sessionUnavailable,
       roleChanged: savedRole !== undefined && savedRole !== (this.getSettings()?.quickAsk?.systemPrompt ?? ""),
       hasHistory: Boolean(this.hasSessionHistory || this.messages.length || this.streaming || this.sending),
-      hasDraft: Boolean((this.composer?.getDraft?.() ?? this.composer?.text ?? "").trim() || this.pending.files.length || this.pending.selections.length),
+      hasDraft: Boolean((this.composer?.getDraft?.() ?? this.composer?.text ?? "").trim() || this.pending.files.length || this.pending.selections.length || this.pending.images?.length),
     });
   }
 
@@ -1381,7 +1433,7 @@ class QuickAskView {
   }
 
   captureDraft() {
-    return { composer: this.composer?.getDraft?.() ?? this.composer?.text ?? "", pending: this.pending };
+    return { composer: this.composer?.getDraft?.() ?? this.composer?.text ?? "", pending: this.pending, images: this.pendingImagePaths() };
   }
 
   restoreDraft() {

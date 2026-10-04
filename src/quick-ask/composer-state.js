@@ -168,6 +168,11 @@ function referencedPaths(state, isSupported = () => true) {
   return supportedReferences(paths, isSupported);
 }
 
+function removeReferences(state, path) {
+  return { changes: referencesOf(state).filter(reference => reference.path === path)
+    .map(reference => ({ from: reference.from, to: reference.to, insert: "" })) };
+}
+
 // The chip whose range starts or ends exactly at the caret. A caret anywhere
 // else returns null.
 function referenceAt(state, position, side) {
@@ -213,6 +218,7 @@ module.exports = {
   choosePath,
   questionText,
   referencedPaths,
+  removeReferences,
   referenceAt,
   slashQuery,
   referenceDeletion,
