@@ -1,11 +1,35 @@
 # Changelog
 
-## Unreleased
+## Unreleased — Image attachments and context-window improvements
 
-- Add explicit PNG/JPEG/WebP image attachments for both protocols, including image-only questions, paste and external file input.
-- Send original image bytes once; retain only Vault paths in history, with shared previews and missing-image placeholders.
-- Add image-cache retention and clear-on-application-reopen behavior; plugin reload leaves the cache intact.
+### Added
 
+- Send explicitly added PNG/JPEG/WebP images through Responses or Chat Completions, including image-only questions. Add them with the Vault picker, Vault/external drag and drop, or clipboard paste; Markdown embeds are not attached automatically.
+- Send original bytes without resizing or compression. Limits are 20 MiB per image, 20 images and 200 MiB combined per question; oversized or unsupported input receives a clear error.
+- Show removable previews above the context-file collapse bar and image previews in user-message history. Missing sources display a theme-aware, borderless placeholder.
+- Open previews in a window-sized viewer that keeps the image's aspect ratio, with an 85%-opacity dark mask and a body-sized title at the window top. Escape, the backdrop or the close button dismisses it; pop-out windows use their own viewer.
+- Add **Keep cached images**, enabled by default. External and pasted images stay in the plugin cache. Turning it off clears those images on the next Obsidian reopen; disabling/re-enabling or reloading the plugin does not clear them. Original Vault images are unaffected.
+
+### Changed
+
+- Image bytes appear only in the first model request of a submitted question. Tool continuations, later questions and compaction do not resend them. Session logs, exports and preserved copies retain image paths only, not image files; moving/deleting a source can make its history preview unavailable.
+- Explicit image retries reread the current source and refuse missing or unreadable images. Local token estimates exclude image cost and say so; provider usage remains the billing authority.
+- Default the context window to **200,000 tokens (200K)** and display/edit it in decimal K with a fixed suffix. Decimal values such as `262.144K` save exact whole tokens; the capacity must exceed 16.384K. Clearing the field retains its previous behavior. Existing settings and session capacity snapshots are not migrated.
+- Append to the built-in role: “Unless explicitly requested by the user, you must not include any line-number-related information in your responses.” Renderer 4 uses the new rule; custom roles and historical renderer 1–3 retries retain their existing behavior. Source line metadata remains available.
+
+### Fixed
+
+- Preserve original image proportions in thumbnails and remove the fixed-height dark letterboxing, borders and button shadows. Align missing-image placeholders with the same borderless presentation.
+- Allow image-only questions to complete read-only tool calls without resending images.
+- Keep asynchronous image acquisition in its owning session, prevent deleted-draft recreation and check concurrent attachment limits at commit time.
+- Share pending startup cleanup across plugin reloads and check actual cumulative bytes before encoding changed source files.
+- Avoid floating-point loss when parsing and displaying decimal K capacities, and preserve the mounted capacity input while typing.
+- Remove the dedicated footer image button; existing picker, drag-and-drop and paste inputs remain available.
+
+### Validation and upgrade notes
+
+- Verified 32 upstream core test files and 27 standalone test files, plus source provenance and matching build outputs. The user accepted the recent Quick Ask additions and fixes; remaining backlog items are tracked separately.
+- This entry is not a published release. The standalone version remains 1.0.3 until a separate version/release step.
 
 ## 1.0.3 — Compaction replay, file references and system profiles
 

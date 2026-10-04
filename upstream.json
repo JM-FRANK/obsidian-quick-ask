@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "upstreamCommit": "690c03a46a0386b5f498fbdf4229938628183b8b",
+  "upstreamCommit": "ff45278763f2b286c61284faa5e0f8ada2e1f7c4",
   "preview": false,
-  "sourceTreeSha256": "4ddd70862cfd001da23e14658a8d94c2fcb9c7370d463db76e9a7ef63c87036c",
+  "sourceTreeSha256": "15ba19d5735aa2470b443bd8891afd9f4bcf37538861d841866bc7e1bbddd829",
   "files": {
-    "release/quick-ask/CHANGELOG.md": "0dbca9447d96b82d19bab27d1adeecd214025f13b05839437e788db84f4a7552",
+    "release/quick-ask/CHANGELOG.md": "70cf9212467e82804a3d65f3809d88080c1086addec5fbd7425da1c9a77ae8a6",
     "release/quick-ask/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "release/quick-ask/NOTICE": "c1d03dc9788c2a4ea2520864df10b8a858bcd799a71a28f4113e6b4459ceedb3",
     "release/quick-ask/README.md": "dd3bafcf78e2963d5e3cd9bc80be6b5310f449b8c5b37e35f48a79a021f1e0fa",
@@ -102,7 +102,7 @@
     "README.md": "dd3bafcf78e2963d5e3cd9bc80be6b5310f449b8c5b37e35f48a79a021f1e0fa",
     "README_zh.md": "19db76861e210e7f04b55dfbd116823334b28c250963d8f9e9720c6666e8bef6",
     "ui-showcase.png": "f263749447496d25fda8a2e451556d490d7b29bb91f24e6ae53257d91e8633ee",
-    "CHANGELOG.md": "0dbca9447d96b82d19bab27d1adeecd214025f13b05839437e788db84f4a7552",
+    "CHANGELOG.md": "70cf9212467e82804a3d65f3809d88080c1086addec5fbd7425da1c9a77ae8a6",
     "package.json": "b811b96c5f62835559e2929ac48f097eb4bb97d940595e434b5261b0690a3c38",
     "docs/community-submission.md": "4b26cde7219972b16add9aba8d3447890f2f68c46db3c3cf17dc2fbe69c9f9de",
     "docs/compatibility.md": "ff151da5001064815379ac5d0b9034907ad1289aeccc4caef6b97bb126705067",
