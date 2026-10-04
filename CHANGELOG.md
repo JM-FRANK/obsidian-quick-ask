@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Image attachments and context-window improvements
+## 1.0.4 — Image attachments and context-window improvements
 
 ### Added
 
@@ -29,7 +29,7 @@
 ### Validation and upgrade notes
 
 - Verified 32 upstream core test files and 27 standalone test files, plus source provenance and matching build outputs. The user accepted the recent Quick Ask additions and fixes; remaining backlog items are tracked separately.
-- This entry is not a published release. The standalone version remains 1.0.3 until a separate version/release step.
+- Version 1.0.4 requires Obsidian 1.13.7 or later on desktop. Source synchronization does not publish a GitHub Release; installation assets must be released separately.
 
 ## 1.0.3 — Compaction replay, file references and system profiles
 
