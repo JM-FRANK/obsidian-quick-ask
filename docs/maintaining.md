@@ -30,6 +30,21 @@ For GitHub-based synchronization, configure `UPSTREAM_REPOSITORY` and read crede
 
 Commit the synchronized outputs, then run `npm run release:check`. Use the **Prepare Quick Ask release** workflow to rebuild, test and attest the exact installation files before uploading them to a draft Release. A local `npm run release:draft` is useful for preparation, but it does not generate a GitHub attestation and its draft is explicitly marked accordingly.
 
-Private repository runs also create preparation drafts without attestations on ordinary GitHub plans. After making the repository public, rerun the workflow to generate attestations and refresh the same unpublished draft. Published releases are never overwritten by this tool. `upstream.json` and SHA256SUMS support traceability, but do not replace GitHub's signed artifact attestation.
+Private repository runs also create preparation drafts without attestations on ordinary GitHub plans. After making the repository public, rerun the workflow to generate attestations and refresh the same unpublished draft. Published releases are never overwritten by this tool. `upstream.json` and the SHA-256 values embedded in release notes support traceability, but do not replace GitHub's signed artifact attestation.
 
 See [Community submission](community-submission.md) for the final manual acceptance, public release and directory registration steps.
+
+
+## Obsidian review recommendations
+
+Release uploads contain only `main.js`, `manifest.json` and `styles.css`. Keep
+`LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` in the repository/build outputs;
+the builder includes their text in `main.js`. Checksums are included in release
+notes instead of a separate `SHA256SUMS` attachment. This preserves notices for
+Obsidian installations while avoiding unsupported download files.
+
+For an already published release, do not run the draft-creation workflow to fix
+an attachment recommendation. After review, remove only its extra attachments;
+keep the existing tag, supported installation files and their attestations.
+Vault enumeration and clipboard access are disclosed, user-driven capabilities,
+not removed or concealed to bypass behavior detection.

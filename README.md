@@ -10,7 +10,7 @@ Ask AI about Markdown text and files you explicitly choose, directly in an Obsid
 
 ## Why Quick Ask
 
-- **Lightweight.** One focused sidebar plugin: about 1.3 MiB installed (≈306 KiB gzipped), no plugin telemetry and no developer-operated backend. It runs no background timers or polling, downloads nothing at runtime, and contacts your provider only when you submit. Conversations are plain append-only JSONL files under the plugin folder — a new session starts under 1 KB and grows with the full text you track — and never leave your Vault.
+- **Lightweight.** One focused sidebar plugin: about 1.3 MiB installed (≈306 KiB gzipped), no plugin telemetry and no developer-operated backend. It runs no background timers or polling, downloads nothing at runtime, and contacts your provider only when you submit. Conversations are plain append-only JSONL files under the plugin folder — a new session starts under 1 KB and grows with the full text you track — and is stored locally. Selected conversation context is sent to your configured provider when you submit.
 - **Ask and answer immediately.** Open the sidebar, type a question and submit it; selected text and referenced files are staged and sent in a single step.
 - **Comfortable drag and drop.** Drag a text selection or a file from the file explorer straight into the composer, and remove any staged reference before sending.
 - **Refined interface.** Native Obsidian controls with theme-aware bubbles, readable reasoning, and a configurable display style (assistant tint, font size and paragraph spacing).
@@ -61,7 +61,10 @@ No plugin telemetry, analytics, ads or separate developer-operated backend is in
 - Preferences and a **secret reference**, not the API key value, are saved in the plugin's `data.json`. Key values are resolved from Obsidian's secret storage.
 - Conversations and included context are stored as readable files under the plugin directory's `quick-ask/` subdirectory. Local history is not encrypted by this plugin.
 - Optional preserved copies write plaintext backups to a Vault folder you choose. Clipboard export/import contains conversation content; secret values are excluded.
-- The plugin accesses files in the current Vault and its own plugin-data directory; it does not read files outside the Vault. Vault sync/backup tools may copy these files according to their own configuration.
+- The `[[` file picker enumerates file paths in the current Vault, excluding its configuration directory, to offer local suggestions. Enumerating paths does not read or send every file's contents. File contents are read only for context you explicitly add and files already tracked by that conversation.
+- Clipboard access is user-initiated: pasting images reads the paste event, importing a conversation reads clipboard text, and copy/export actions write their selected output. The plugin does not poll or monitor the clipboard in the background. Clipboard data can originate outside Obsidian; imported conversation data is not submitted to a provider until you send a question.
+- External image drag-and-drop reads only the image files you explicitly provide and copies them into the plugin cache; it does not scan folders outside the Vault. This is the user-initiated exception to normal Vault/plugin-directory file access. Images are sent only when you submit their question.
+- Vault sync/backup tools may copy plugin data according to their own configuration.
 
 ## Development
 

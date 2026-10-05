@@ -6,7 +6,9 @@ const os = require('node:os');
 const { createHash } = require('node:crypto');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const assets = ['main.js', 'manifest.json', 'styles.css', 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md'];
+// Obsidian installs these three files. License notices remain in the source
+// repository and are embedded in main.js; checksums belong in release notes.
+const assets = ['main.js', 'manifest.json', 'styles.css'];
 function validateRelease(root) {
   const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
   const manifest = read('manifest.json'), pkg = read('package.json'), lock = read('package-lock.json');
@@ -23,7 +25,7 @@ function validateRelease(root) {
   if (manifest.id !== 'quick-ask' || manifest.name !== 'Quick Ask' || manifest.author !== 'FRANK-SMITH' || manifest.isDesktopOnly !== true) throw new Error('Unexpected plugin identity or platform metadata');
   if (typeof manifest.description !== 'string' || manifest.description.length > 250 || !manifest.description.endsWith('.')) throw new Error('Description must end with a period and contain at most 250 characters');
   if (pkg.license !== 'Apache-2.0' || !fs.readFileSync(path.join(root, 'LICENSE'), 'utf8').includes('Apache License')) throw new Error('Quick Ask must include its Apache-2.0 license');
-  for (const name of [...assets, 'README.md', 'CHANGELOG.md', 'docs/community-submission.md', 'docs/compatibility.md']) {
+  for (const name of [...assets, 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'CHANGELOG.md', 'docs/community-submission.md', 'docs/compatibility.md']) {
     if (!fs.statSync(path.join(root, name)).isFile()) throw new Error(`Missing release file ${name}`);
   }
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
@@ -49,15 +51,14 @@ if (require.main === module) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'quick-ask-release-'));
   try {
     const notesPath = path.join(temp, 'release-notes.md');
-    const sumsPath = path.join(temp, 'SHA256SUMS');
     const attested = process.env.QUICK_ASK_ATTESTED === 'true';
-    fs.writeFileSync(notesPath, `${notes}\n\nGenerated from Scholar Workbench commit ${provenance.upstreamCommit}.\nSource tree SHA-256: ${provenance.sourceTreeSha256}.\n\n${attested ? 'Installation assets have GitHub build provenance attestations.' : 'Preparation draft: build provenance attestations have not been generated. Run the public-repository release workflow before community submission.'}\n`);
-    fs.writeFileSync(sumsPath, assets.map(name => `${digest(fs.readFileSync(path.join(root, name)))}  ${name}`).join('\n') + '\n');
+    const sums = assets.map(name => `${digest(fs.readFileSync(path.join(root, name)))}  ${name}`).join('\n');
+    fs.writeFileSync(notesPath, `${notes}\n\nGenerated from Scholar Workbench commit ${provenance.upstreamCommit}.\nSource tree SHA-256: ${provenance.sourceTreeSha256}.\n\nInstallation file SHA-256:\n\n\`\`\`text\n${sums}\n\`\`\`\n\n${attested ? 'Installation assets have GitHub build provenance attestations.' : 'Preparation draft: build provenance attestations have not been generated. Run the public-repository release workflow before community submission.'}\n`);
     if (existing) {
       gh(['release', 'edit', manifest.version, '--draft', '--target', revision, '--title', `Quick Ask ${manifest.version}`, '--notes-file', notesPath]);
-      gh(['release', 'upload', manifest.version, '--clobber', ...assets, sumsPath]);
+      gh(['release', 'upload', manifest.version, '--clobber', ...assets]);
     } else {
-      gh(['release', 'create', manifest.version, '--draft', '--target', revision, '--title', `Quick Ask ${manifest.version}`, '--notes-file', notesPath, ...assets, sumsPath]);
+      gh(['release', 'create', manifest.version, '--draft', '--target', revision, '--title', `Quick Ask ${manifest.version}`, '--notes-file', notesPath, ...assets]);
     }
     console.log(gh(['release', 'view', manifest.version, '--json', 'url', '--jq', '.url']).trim());
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }

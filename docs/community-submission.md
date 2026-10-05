@@ -11,7 +11,7 @@
 | ID | `quick-ask` |
 | Author | FRANK-SMITH |
 | Owner | 关联 `JM-FRANK` 的个人账户 |
-| Version | `1.0.3` |
+| Version | `1.0.4` |
 | Minimum app version | `1.13.7` |
 | Platforms | Desktop only |
 | License | Apache-2.0 |
@@ -52,3 +52,21 @@
 这不是向 `obsidian-releases` 提交旧式登记 PR 的流程。网站登录、政策承诺与最终 Submit/Publish 由维护者完成。
 
 参考：[提交指南](https://docs.obsidian.md/plugins/releasing/submit-plugin)、[账号关联与登记](https://docs.obsidian.md/community-directory/set-up-and-claim)、[插件要求](https://docs.obsidian.md/community-directory/submission-requirements-for-plugins)、[开发者政策](https://docs.obsidian.md/community-directory/developer-policies)、[GitHub 来源证明](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)。
+
+
+## 1.0.4 自动审查建议处理（2026-10-05）
+
+- Release 额外附件：仅上传 `main.js`、`manifest.json`、`styles.css`。
+  许可证／NOTICE 留在仓库并内嵌主文件，SHA-256 放发布说明，不作额外下载附件。
+  对现有发布，只在维护者检查后删除多余附件；不创建新 Release、不替换安装附件。
+- Vault Enumeration：文件选择器的路径枚举是既有功能所需，不等于批量读取／外发正文。
+  保留公开 Vault API，并在中英文 README 披露范围及明确添加上下文才读取的边界。
+- Clipboard Access：粘贴、会话导入、复制／导出均由用户触发，不监听／轮询剪贴板。
+  保留功能及浏览器剪贴板 API，并披露外部剪贴板内容的输入边界。
+- 修正原 README 的“不读取 Vault 外文件”描述：用户主动拖入的外部图片会被读取并缓存。
+  不通过规避 API 名称或换私有文件扫描方式隐藏审查提示。
+
+依据：[官方发布附件说明](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin)、
+[公开 Vault API](https://docs.obsidian.md/Plugins/Vault)、
+[插件提交要求](https://docs.obsidian.md/community-directory/submission-requirements-for-plugins)、
+[开发者披露与许可证政策](https://docs.obsidian.md/community-directory/developer-policies)。
