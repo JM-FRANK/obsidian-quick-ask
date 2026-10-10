@@ -1,6 +1,7 @@
 const { activePickerQuery } = require("./file-picker");
 const { canReferencePath, supportedReferences } = require("./file-input");
 const { StateField, StateEffect } = require("@codemirror/state");
+const { parser } = require("@lezer/markdown");
 
 // The composer is an owned, minimal CodeMirror 6 editor. This module holds the
 // part that is pure editor state: which `[[folder/file.md]]` markers the
@@ -15,7 +16,7 @@ const { StateField, StateEffect } = require("@codemirror/state");
 // One chip per complete `[[folder/file.md]]` marker, in document order.
 const fileReferenceField = StateField.define({
   create: (state) => scanMarkers(state.doc.toString()),
-  update: (_references, transaction) => scanMarkers(transaction.state.doc.toString()),
+  update: (references, transaction) => transaction.docChanged ? scanMarkers(transaction.state.doc.toString()) : references,
 });
 
 const openReferenceEffect = StateEffect.define();
@@ -79,20 +80,41 @@ function referencesFrom(ranges, text) {
     }));
 }
 
-// Find every complete `[[...]]` marker in the document, left to right. A marker
-// stays on one line and never nests, so ordinary prose that merely contains
-// brackets is not treated as a reference.
+// Markdown owns code and escape boundaries; markers overlapping those ranges
+// remain literal, even when the code is inside the apparent link.
+function literalRanges(text) {
+  const ranges = [];
+  parser.parse(text).iterate({ enter(node) {
+    if (["InlineCode", "FencedCode", "CodeBlock", "Escape"].includes(node.name)) {
+      ranges.push({ from: node.from, to: node.to });
+      return false;
+    }
+  } });
+  return ranges;
+}
+
+function isLiteralRange(text, from, to) {
+  return literalRanges(text).some(range => range.from < to && range.to > from);
+}
+
+// Find complete single-line, non-nested markers outside literal syntax.
 function scanMarkers(text) {
   const own = typeof text === "string" ? text : String(text ?? "");
+  const literals = literalRanges(own);
   const ranges = [];
   let index = 0;
   while (index < own.length) {
     const open = own.indexOf("[[", index);
     if (open < 0) break;
+    if (literals.some(range => range.from < open + 2 && range.to > open)) {
+      index = open + 2;
+      continue;
+    }
     const close = own.indexOf("]]", open + 2);
     if (close < 0) break;
     const between = own.slice(open + 2, close);
-    if (between.length > 0 && !between.includes("\n") && !between.includes("[")) {
+    if (between.length > 0 && !/[\r\n\[\]]/.test(between) &&
+        !literals.some(range => range.from < close + 2 && range.to > open)) {
       ranges.push({ from: open, to: close + 2 });
     }
     index = close + 2;
@@ -139,11 +161,11 @@ function choosePath(state, option, query) {
   };
 }
 
-// The question text the model receives: every chip marker removed and the
-// leftover whitespace collapsed, so neither the marker nor the search query
-// reaches the API.
-function questionText(state) {
-  const references = [...referencesOf(state)].sort((left, right) => left.from - right.from);
+// Only sendable references are removed. Literal syntax and unresolved or
+// unsupported references stay in the question so user text is never lost.
+function questionText(state, isSupported = () => true) {
+  const references = referencesOf(state).filter(reference => isSupported(reference.path))
+    .sort((left, right) => left.from - right.from);
   const text = state.doc.toString();
   let result = "";
   let position = 0;
@@ -157,19 +179,21 @@ function questionText(state) {
 }
 
 // The exact Vault Paths of the staged chips, deduplicated in first-chip order.
-function referencedPaths(state, isSupported = () => true) {
+function referencedPaths(state, isSupported = () => true, resolvePath = path => path) {
   const seen = new Set();
   const paths = [];
   for (const reference of referencesOf(state)) {
-    if (seen.has(reference.path)) continue;
-    seen.add(reference.path);
-    paths.push(reference.path);
+    if (!isSupported(reference.path)) continue;
+    const path = resolvePath(reference.path);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    paths.push(path);
   }
-  return supportedReferences(paths, isSupported);
+  return supportedReferences(paths, () => true);
 }
 
-function removeReferences(state, path) {
-  return { changes: referencesOf(state).filter(reference => reference.path === path)
+function removeReferences(state, path, resolvePath = path => path) {
+  return { changes: referencesOf(state).filter(reference => resolvePath(reference.path) === path)
     .map(reference => ({ from: reference.from, to: reference.to, insert: "" })) };
 }
 
@@ -213,6 +237,7 @@ module.exports = {
   referencesOf,
   referencesFrom,
   scanMarkers,
+  isLiteralRange,
   stageReference,
   stageReferences,
   choosePath,

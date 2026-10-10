@@ -7,6 +7,7 @@ const { pickerOptions, isCompositionEvent } = require("./file-picker");
 const { selectionRange } = require("./pending-context");
 const { QUICK_ASK_VIEW_TYPE } = require("./view-type");
 const { sessionMenuEntries } = require("./session-navigation");
+const { createReferenceResolver } = require("./reference-resolution");
 
 // The Quick Ask host seam, matching the factory convention of
 // src/obsidian-adapter.js. It builds the capability slices that Quick Ask core
@@ -78,6 +79,13 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
     return file instanceof TFile ? file : null;
   }
 
+  const resolveReference = createReferenceResolver({
+    exactPath: path => fileOf(path)?.path ?? null,
+    linkPath: (path, sourcePath) => plugin.app.metadataCache.getFirstLinkpathDest(path, sourcePath)?.path ?? null,
+    resolveRole,
+    isExcluded: path => isInsideConfigDirectory(path, configDirectory),
+  });
+
   function join(directory, path) {
     return directory ? `${directory}/${path}` : path;
   }
@@ -143,6 +151,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         }
       },
       resolveRole,
+      resolveReference,
     },
 
     images: {

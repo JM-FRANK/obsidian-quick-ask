@@ -6,7 +6,7 @@ const { EditorView, ViewPlugin, WidgetType, Decoration, keymap, placeholder } = 
 const atomicRanges = EditorView.atomicRanges;
 const {
   fileReferenceField, referencesOf, choosePath, stageReferences, questionText, referencedPaths, removeReferences, referenceDeletion, labelFor,
-  editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery,
+  editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery, isLiteralRange,
 } = require("./composer-state");
 const { activePickerQuery } = require("./file-picker");
 
@@ -79,30 +79,31 @@ class FileReferenceWidget extends WidgetType {
   }
 }
 
-function chipDecorations(state, ownerDocument = null, isSupported = () => true, unsupportedLabel = "") {
+function chipDecorations(state, ownerDocument = null, isSupported = () => true, unsupportedLabel = "", resolvePath = path => path) {
   const builder = new RangeSetBuilder();
   const editing = state.field(editingReferenceField, false);
   for (const reference of referencesOf(state)) {
     if (editing && reference.from === editing.from) continue;
     const selection = state.selection.main;
+    const path = resolvePath(reference.path) ?? reference.path;
     builder.add(reference.from, reference.to, Decoration.replace({
-      widget: new FileReferenceWidget(reference.path, labelFor(reference.path), ownerDocument, {
-        ...reference, supported: isSupported(reference.path), unsupportedLabel, selected: !selection.empty && selection.from <= reference.from && selection.to >= reference.to,
+      widget: new FileReferenceWidget(path, labelFor(path), ownerDocument, {
+        ...reference, supported: isSupported(reference.path), unsupportedLabel: typeof unsupportedLabel === "function" ? unsupportedLabel(reference.path) : unsupportedLabel, selected: !selection.empty && selection.from <= reference.from && selection.to >= reference.to,
       }),
     }));
   }
   return builder.finish();
 }
 
-function createChipPlugin(ownerDocument, isSupported, unsupportedLabel) {
+function createChipPlugin(ownerDocument, isSupported, unsupportedLabel, resolvePath) {
   return ViewPlugin.fromClass(class {
     constructor(view) {
-      this.decorations = chipDecorations(view.state, ownerDocument, isSupported, unsupportedLabel);
+      this.decorations = chipDecorations(view.state, ownerDocument, isSupported, unsupportedLabel, resolvePath);
     }
 
     update(update) {
       if (update.docChanged || update.selectionSet || update.startState.field(editingReferenceField, false) !== update.state.field(editingReferenceField, false)) {
-        this.decorations = chipDecorations(update.state, ownerDocument, isSupported, unsupportedLabel);
+        this.decorations = chipDecorations(update.state, ownerDocument, isSupported, unsupportedLabel, resolvePath);
       }
     }
   }, {
@@ -119,6 +120,7 @@ const VISIBLE_ROWS = 6;
 
 function createComposerEditor({ parent, sidebar = parent, paths = [], createFileSuggester = null,
   isSupported = () => true, unsupportedLabel = "Unsupported file type",
+  resolvePath = path => path,
   onCommand = null, commandAvailable = () => true,
   placeholderText = "", onChange = () => {}, onSubmit = null,
 }) {
@@ -132,6 +134,7 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
     if (command) return command;
     const editing = state.field(editingReferenceField, false);
     const query = activePickerQuery(state.doc.toString(), state.selection.main.head, { editingFrom: editing?.from });
+    if (query && isLiteralRange(state.doc.toString(), query.from, query.to)) return null;
     return query ? { ...query, to: editing?.from === query.from ? editing.to : query.to } : null;
   }
   function refreshSuggest() {
@@ -151,7 +154,7 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   const view = new EditorView({
     parent,
     state: EditorState.create({ doc: "", extensions: [
-      fileReferenceField, editingReferenceField, createChipPlugin(ownerDocument, isSupported, unsupportedLabel), history(), EditorView.lineWrapping,
+      fileReferenceField, editingReferenceField, createChipPlugin(ownerDocument, isSupported, unsupportedLabel, resolvePath), history(), EditorView.lineWrapping,
       // The public theme extension outranks CodeMirror's default light theme.
       // Host CSS variables update with Obsidian's theme without a second palette.
       EditorView.theme({
@@ -200,7 +203,7 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
         // the user confirms it. The picker follows committed text only, so it
         // holds still until compositionend delivers the final transaction.
         if ((update.docChanged || update.selectionSet) && !update.view.composing) refreshSuggest();
-        if (update.docChanged) onChange(questionText(update.state), referencedPaths(update.state, isSupported));
+        if (update.docChanged) onChange(questionText(update.state, isSupported), referencedPaths(update.state, isSupported, resolvePath));
       }),
     ] }),
   });
@@ -230,8 +233,8 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   return {
     view,
     getEditorView: () => view,
-    get text() { return questionText(view.state); },
-    get paths() { return referencedPaths(view.state, isSupported); },
+    get text() { return questionText(view.state, isSupported); },
+    get paths() { return referencedPaths(view.state, isSupported, resolvePath); },
     get isPickerOpen() { return suggest?.isOpen === true; },
     get isEditingReference() { return view.state.field(editingReferenceField) !== null; },
     getDraft: () => view.state.doc.toString(),
@@ -239,7 +242,10 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
       suggest?.close();
       view.setState(emptyState.update({ changes: { from: 0, insert: text }, selection: { anchor: text.length }, annotations: Transaction.addToHistory.of(false) }).state);
     },
-    removeFile(path) { suggest?.close(); view.dispatch(removeReferences(view.state, path)); },
+    removeFile(path) {
+      suggest?.close();
+      view.dispatch(removeReferences(view.state, path, resolvePath));
+    },
     insertFiles(paths, coordinates = null) {
       const at = coordinates ? view.posAtCoords(coordinates) : null;
       const transaction = stageReferences(view.state, paths, at ?? view.state.selection.main.head);

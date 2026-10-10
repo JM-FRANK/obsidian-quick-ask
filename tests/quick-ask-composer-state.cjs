@@ -18,6 +18,35 @@ function composerState(text = '', selection = null) {
   });
 }
 
+test('code and escaped brackets stay literal, including code inside a marker', () => {
+  const cases = [
+    '`[[bb/a]]`', '[[`aa/c`]]', '``[[a.md]]``',
+    '```md\n[[a.md]]\n```', '~~~\n[[a.md]]\n~~~', '    [[a.md]]',
+    '\\[[a.md]]', '[[a.md\\]]]',
+  ];
+  for (const text of cases) {
+    const state = composerState(text);
+    assert.deepEqual(referencesOf(state), [], text);
+    assert.equal(questionText(state), text.trim(), text);
+  }
+  const state = composerState('`[[literal.md]]` and [[real.md]]');
+  assert.deepEqual(referencedPaths(state), ['real.md']);
+  assert.equal(questionText(state), '`[[literal.md]]` and');
+  assert.deepEqual(scanMarkers('`[[` and [[real.md]]').map(reference => reference.path), ['real.md']);
+});
+
+test('resolved paths deduplicate and only sendable markers leave the question', () => {
+  const state = composerState('看 [[bb/a]] [[bb/a.md]] [[missing]] [[paper.pdf]]');
+  const resolved = { 'bb/a': 'bb/a.md', 'bb/a.md': 'bb/a.md' };
+  const supported = path => Boolean(resolved[path]);
+  assert.deepEqual(referencedPaths(state, supported, path => resolved[path]), ['bb/a.md']);
+  assert.equal(questionText(state, supported), '看 [[missing]] [[paper.pdf]]');
+  const { removeReferences } = require('../src/quick-ask/composer-state');
+  const next = state.update(removeReferences(state, 'bb/a.md', path => resolved[path])).state;
+  assert.deepEqual(referencedPaths(next, supported, path => resolved[path]), []);
+  assert.equal(next.doc.toString().includes('[[bb/a'), false);
+});
+
 test('folder choices continue at the next level and only a file choice creates a chip', () => {
   let state = composerState('Explain [[pa');
   state = state.update(choosePath(state, { kind: 'folder', path: 'papers/' }, { from: 8, to: state.doc.length })).state;
