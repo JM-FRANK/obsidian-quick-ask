@@ -244,8 +244,9 @@ function applyQuickAskPatch(target, patch) {
   if (patch.profileAction) {
     Object.assign(target, applyProfileAction(target, patch.profileAction, { language: patch.profileAction.language }));
     applied++;
-  } else if (Object.hasOwn(patch, 'systemPrompt') || Object.hasOwn(patch, 'systemProfiles') || Object.hasOwn(patch, 'activeSystemProfileId')) {
+  } else if (Object.hasOwn(patch, 'systemPrompt') || Object.hasOwn(patch, 'systemProfiles') || Object.hasOwn(patch, 'activeSystemProfileId') || Object.hasOwn(patch, 'initialProfilesVersion')) {
     const incoming = { ...target, ...patch };
+    if (Object.hasOwn(patch, 'systemProfiles') && !Object.hasOwn(patch, 'initialProfilesVersion')) delete incoming.initialProfilesVersion;
     // Catalog-only updates choose their own active prompt. Legacy-only edits
     // remain authoritative; mixed action patches use the action exclusively.
     if (!Object.hasOwn(patch, 'systemPrompt')) delete incoming.systemPrompt;

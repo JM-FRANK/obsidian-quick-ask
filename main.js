@@ -3324,7 +3324,8 @@ const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
   "command.switchProfile": "Switch system profile",
-  "profiles.default": "Default",
+  "profiles.default": "Literature Reading",
+  "profiles.studyQuiz": "Study Quiz",
   "profiles.current": "System profile",
   "profiles.newSessionsOnly": "Applies to new sessions only. Existing conversations keep their saved role.",
   "profiles.name": "Profile name",
@@ -3544,7 +3545,8 @@ const EN = {
 
 const ZH_CN = {
   "command.switchProfile": "切换系统角色配置",
-  "profiles.default": "默认",
+  "profiles.default": "文献阅读",
+  "profiles.studyQuiz": "学习出题",
   "profiles.current": "系统角色配置",
   "profiles.newSessionsOnly": "仅对新会话生效。已有对话保留其保存的角色。",
   "profiles.name": "角色配置名称",
@@ -4904,6 +4906,8 @@ const { DEFAULT_ROLE_INSTRUCTIONS } = require("src/quick-ask/prompt-renderer");
 const { t } = require("src/quick-ask/i18n");
 
 const DEFAULT_PROFILE_ID = 'default';
+const STUDY_PROFILE_ID = 'study-quiz';
+const STUDY_ROLE_INSTRUCTIONS = '你是 Obsidian Quick Ask 中的学习出题助手。根据用户提供的学习笔记，结合你的知识出题，检验知识掌握、理解和应用能力。以笔记为主要依据，超出笔记范围的题目标注为拓展题；发现明显错误时指出，不将其作为标准答案。\n\n遵循用户指定的题量、题型和难度；未指定时出 3 道由浅入深的题，先不给答案。用户作答后，准确评判并简要解释，针对薄弱点继续练习。\n\n除非用户明确要求，不显示行号相关信息。';
 
 // The legacy systemPrompt remains the active request value. Profiles are a
 // settings catalog only; session snapshots and renderer semantics stay intact.
@@ -4912,7 +4916,7 @@ function normalizeProfiles(saved = {}) {
   const seen = new Set();
   for (const profile of Array.isArray(saved.systemProfiles) ? saved.systemProfiles : []) {
     if (!profile || typeof profile.id !== 'string' || !profile.id || seen.has(profile.id)) continue;
-    if (profile.id !== DEFAULT_PROFILE_ID && (typeof profile.name !== 'string' || !profile.name.trim())) continue;
+    if (![DEFAULT_PROFILE_ID, STUDY_PROFILE_ID].includes(profile.id) && (typeof profile.name !== 'string' || !profile.name.trim())) continue;
     seen.add(profile.id);
     profiles.push({ id: profile.id, name: typeof profile.name === 'string' && profile.name.trim() ? profile.name : null,
       prompt: typeof profile.prompt === 'string' ? profile.prompt : '', showDefaultRole: profile.showDefaultRole === true });
@@ -4920,6 +4924,32 @@ function normalizeProfiles(saved = {}) {
   if (!seen.has(DEFAULT_PROFILE_ID)) profiles.unshift({ id: DEFAULT_PROFILE_ID, name: null,
     prompt: typeof saved.systemPrompt === 'string' ? saved.systemPrompt : '',
     showDefaultRole: !Object.hasOwn(saved, 'systemPrompt') });
+  // Upgrade once, preserving every existing role and the current selection.
+  // The marker survives saves/exports, so explicitly deleting the added role
+  // does not cause it to reappear on every subsequent load.
+  const initialProfilesVersion = Number.isInteger(saved.initialProfilesVersion) && saved.initialProfilesVersion > 0
+    ? saved.initialProfilesVersion : 0;
+  if (initialProfilesVersion < 1) {
+    let study = profiles.find(profile => profile.id === STUDY_PROFILE_ID);
+    if (!study) {
+      study = { id: STUDY_PROFILE_ID, name: null, prompt: STUDY_ROLE_INSTRUCTIONS, showDefaultRole: false };
+      profiles.push(study);
+    }
+    if (study.name === null) {
+      const occupied = new Set(profiles.filter(profile => profile !== study).flatMap(profile =>
+        ['zh-CN', 'en'].map(language => profileName(profile, language).toLocaleLowerCase())));
+      const chinese = t('zh-CN', 'profiles.studyQuiz');
+      const english = t('en', 'profiles.studyQuiz');
+      if (occupied.has(chinese.toLocaleLowerCase()) || occupied.has(english.toLocaleLowerCase())) {
+        const base = occupied.has(chinese.toLocaleLowerCase()) ? `${chinese}-默认` : `${english}-Default`;
+        let name = base, n = 1;
+        while (occupied.has(name.toLocaleLowerCase())) {
+          name = base === `${chinese}-默认` ? `${base}（${n++}）` : `${base} (${n++})`;
+        }
+        study.name = name;
+      }
+    }
+  }
   const activeSystemProfileId = profiles.some(profile => profile.id === saved.activeSystemProfileId)
     ? saved.activeSystemProfileId : DEFAULT_PROFILE_ID;
   // Compatibility boundary: the persisted legacy field is authoritative on
@@ -4931,14 +4961,16 @@ function normalizeProfiles(saved = {}) {
     current.prompt = saved.systemPrompt;
     current.showDefaultRole = false;
   }
-  return { systemProfiles: profiles, activeSystemProfileId };
+  return { systemProfiles: profiles, activeSystemProfileId, initialProfilesVersion: Math.max(1, initialProfilesVersion) };
 }
 
 function activeProfile(settings) {
   const catalog = normalizeProfiles(settings);
   return catalog.systemProfiles.find(profile => profile.id === catalog.activeSystemProfileId);
 }
-function profileName(profile, settings) { return profile.name ?? t(settings, 'profiles.default'); }
+function profileName(profile, settings) {
+  return profile.name ?? t(settings, profile.id === STUDY_PROFILE_ID ? 'profiles.studyQuiz' : 'profiles.default');
+}
 function profilePromptText(profile) { return profile.showDefaultRole && !profile.prompt ? DEFAULT_ROLE_INSTRUCTIONS : profile.prompt; }
 
 // Actions run against the latest settings inside the host writer. Editing the
@@ -4969,7 +5001,8 @@ function applyProfileAction(settings, action, languageSettings) {
     } else if (action.type === 'prompt') {
       selected.prompt = String(action.prompt ?? ''); selected.showDefaultRole = false;
     } else if (action.type === 'reset') {
-      selected.prompt = ''; selected.showDefaultRole = true;
+      selected.prompt = action.id === STUDY_PROFILE_ID ? STUDY_ROLE_INSTRUCTIONS : '';
+      selected.showDefaultRole = action.id !== STUDY_PROFILE_ID;
     } else throw new Error('profiles.missing');
   }
   return { ...catalog, systemPrompt: profiles.find(profile => profile.id === catalog.activeSystemProfileId).prompt };
@@ -5018,7 +5051,7 @@ function createProfileManager({ getSettings, write, changed, notice }) {
     },
   };
 }
-module.exports = { DEFAULT_PROFILE_ID, normalizeProfiles, activeProfile, profileName, profilePromptText, applyProfileAction, createProfileManager };
+module.exports = { DEFAULT_PROFILE_ID, STUDY_PROFILE_ID, STUDY_ROLE_INSTRUCTIONS, normalizeProfiles, activeProfile, profileName, profilePromptText, applyProfileAction, createProfileManager };
 
 },
 "src/quick-ask/prompt-renderer": function(module, exports, require) {
@@ -6646,8 +6679,9 @@ function applyQuickAskPatch(target, patch) {
   if (patch.profileAction) {
     Object.assign(target, applyProfileAction(target, patch.profileAction, { language: patch.profileAction.language }));
     applied++;
-  } else if (Object.hasOwn(patch, 'systemPrompt') || Object.hasOwn(patch, 'systemProfiles') || Object.hasOwn(patch, 'activeSystemProfileId')) {
+  } else if (Object.hasOwn(patch, 'systemPrompt') || Object.hasOwn(patch, 'systemProfiles') || Object.hasOwn(patch, 'activeSystemProfileId') || Object.hasOwn(patch, 'initialProfilesVersion')) {
     const incoming = { ...target, ...patch };
+    if (Object.hasOwn(patch, 'systemProfiles') && !Object.hasOwn(patch, 'initialProfilesVersion')) delete incoming.initialProfilesVersion;
     // Catalog-only updates choose their own active prompt. Legacy-only edits
     // remain authoritative; mixed action patches use the action exclusively.
     if (!Object.hasOwn(patch, 'systemPrompt')) delete incoming.systemPrompt;

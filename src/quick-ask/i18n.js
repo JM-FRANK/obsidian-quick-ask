@@ -4,7 +4,8 @@ const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
   "command.switchProfile": "Switch system profile",
-  "profiles.default": "Default",
+  "profiles.default": "Literature Reading",
+  "profiles.studyQuiz": "Study Quiz",
   "profiles.current": "System profile",
   "profiles.newSessionsOnly": "Applies to new sessions only. Existing conversations keep their saved role.",
   "profiles.name": "Profile name",
@@ -224,7 +225,8 @@ const EN = {
 
 const ZH_CN = {
   "command.switchProfile": "切换系统角色配置",
-  "profiles.default": "默认",
+  "profiles.default": "文献阅读",
+  "profiles.studyQuiz": "学习出题",
   "profiles.current": "系统角色配置",
   "profiles.newSessionsOnly": "仅对新会话生效。已有对话保留其保存的角色。",
   "profiles.name": "角色配置名称",
