@@ -27,12 +27,20 @@ test('code and escaped brackets stay literal, including code inside a marker', (
   for (const text of cases) {
     const state = composerState(text);
     assert.deepEqual(referencesOf(state), [], text);
-    assert.equal(questionText(state), text.trim(), text);
+    assert.equal(questionText(state), text, text);
   }
   const state = composerState('`[[literal.md]]` and [[real.md]]');
   assert.deepEqual(referencedPaths(state), ['real.md']);
   assert.equal(questionText(state), '`[[literal.md]]` and');
   assert.deepEqual(scanMarkers('`[[` and [[real.md]]').map(reference => reference.path), ['real.md']);
+});
+
+test('sending code examples preserves internal spaces, tabs and block indentation', () => {
+  for (const text of ['代码 `a  b`', '```python\nif ok:\n    action()\n```', '    action()', '\tcode()', '~~~\n  a\t\tb\n~~~']) {
+    assert.equal(questionText(composerState(text)), text);
+  }
+  assert.equal(questionText(composerState('  解释 [[a.md]] `a  b`  谢谢  ')), '解释 `a  b` 谢谢');
+  assert.equal(questionText(composerState('   ')), '');
 });
 
 test('resolved paths deduplicate and only sendable markers leave the question', () => {

@@ -9,7 +9,9 @@ const notices = require("./build-notices.cjs")(bundledPackageDirectories);
 const check = process.argv.includes('--check');
 const outIndex = process.argv.indexOf('--out');
 const out = outIndex >= 0 ? path.resolve(process.argv[outIndex + 1]) : path.join(root, 'dist/quick-ask');
-const names = fs.readdirSync(path.join(root, 'src/quick-ask')).filter(name => name.endsWith('.js') && name !== 'composer-view.js')
+// Composer state is already compiled into the owned editor bundle. Including
+// its raw factory duplicates it and exposes imports the outer loader cannot use.
+const names = fs.readdirSync(path.join(root, 'src/quick-ask')).filter(name => name.endsWith('.js') && !['composer-view.js', 'composer-state.js'].includes(name))
   .sort().map(name => `src/quick-ask/${name}`);
 names.push('release/quick-ask/settings-store.js', 'release/quick-ask/main.js');
 const factories = names.map(name => {

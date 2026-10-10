@@ -8,7 +8,7 @@ The standalone command ID is `open` (qualified by Obsidian as `quick-ask:open`),
 
 Settings use `Plugin.loadData()`/`saveData()`. Per-session append-only logs use the Adapter API within the owning plugin directory; they are not collapsed into one potentially large settings file. The actual configuration directory comes from `Vault.configDir`. Existing note contents are read through the Vault API.
 
-Network access is limited to the configured API endpoint and enabled feature. Streaming uses the owning window's fetch/AbortController so streamed chunks and cancellation remain available; non-streaming fallback uses Obsidian's requestUrl. That API does not expose transport cancellation, so aborting stops awaiting its result. This is an intentional streaming-specific choice, not a claim that every endpoint or proxy supports streaming/CORS. Only Responses-compatible providers are supported.
+Model requests use the explicitly selected Responses or Chat Completions protocol at the configured API endpoint. The protocol is fixed when a session is created; the plugin does not auto-switch protocols after an error. Streaming uses the owning window's fetch/AbortController so streamed chunks and cancellation remain available; non-streaming fallback uses Obsidian's requestUrl. That API does not expose transport cancellation, so aborting stops awaiting its result. This is an intentional streaming-specific choice, not a claim that every endpoint or proxy supports streaming/CORS. When web search is enabled, requests may also contact the user-selected search service; server-side search is available only for supported Responses providers.
 
 ## Automated evidence
 

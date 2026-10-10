@@ -979,7 +979,7 @@ class QuickAskView {
     const captured = this.captureDraft();
     const submission = retrySubmission ?? {
       draft: captured.composer, pending: captured.pending,
-      question: (this.composer?.text ?? "").trim(), references: [...(this.composer?.paths ?? [])],
+      question: this.composer?.text ?? "", references: [...(this.composer?.paths ?? [])],
       images: this.pendingImagePaths(),
     };
     if (!submission.question && !submission.images?.length) return null;

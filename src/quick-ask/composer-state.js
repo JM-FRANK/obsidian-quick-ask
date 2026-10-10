@@ -86,7 +86,11 @@ function literalRanges(text) {
   const ranges = [];
   parser.parse(text).iterate({ enter(node) {
     if (["InlineCode", "FencedCode", "CodeBlock", "Escape"].includes(node.name)) {
-      ranges.push({ from: node.from, to: node.to });
+      // Lezer excludes the first line's indentation from CodeBlock.from.
+      const from = ["FencedCode", "CodeBlock"].includes(node.name)
+        ? Math.max(text.lastIndexOf("\n", node.from - 1), text.lastIndexOf("\r", node.from - 1)) + 1
+        : node.from;
+      ranges.push({ from, to: node.to });
       return false;
     }
   } });
@@ -175,7 +179,19 @@ function questionText(state, isSupported = () => true) {
     position = reference.to;
   }
   result += text.slice(position);
-  return result.replace(/[ \t]{2,}/g, " ").trim();
+  // Normalize only prose gaps left by removed chips. Code whitespace belongs
+  // to the user's example: collapsing it changes strings and indentation.
+  let normalized = "";
+  position = 0;
+  for (const range of literalRanges(result)) {
+    let prose = result.slice(position, range.from).replace(/[ \t]{2,}/g, " ");
+    if (position === 0) prose = prose.trimStart();
+    normalized += prose + result.slice(range.from, range.to);
+    position = range.to;
+  }
+  let tail = result.slice(position).replace(/[ \t]{2,}/g, " ");
+  if (position === 0) tail = tail.trimStart();
+  return normalized + tail.trimEnd();
 }
 
 // The exact Vault Paths of the staged chips, deduplicated in first-chip order.
