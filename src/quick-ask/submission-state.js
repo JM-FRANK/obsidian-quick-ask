@@ -1,3 +1,5 @@
+const { submissionSelections } = require("./history-selections");
+
 // The submitted draft and the next editable draft have different lifetimes.
 function clearSubmittedDraft(draft) {
   return { ...draft, ...(draft.images ? { images: [] } : {}), composer: "", pending: { ...draft.pending, selections: [], ...(draft.pending.images ? { images: [] } : {}) } };
@@ -20,7 +22,9 @@ function recoverSubmittedDraft(current, submission, { restoreDraft = true } = {}
 // submitting the same wording anew must still create a separate turn.
 function prepareSubmission(messages, current, submission, retry = false) {
   const index = retry ? messages.findIndex(entry => entry.submission === submission || entry.retry === submission) : -1;
-  const entry = { role: "user", text: submission.question, ...(submission.images?.length ? { images: submission.images } : {}), submission };
+  const historySelections = submissionSelections(submission);
+  const entry = { role: "user", text: submission.question, ...(submission.images?.length ? { images: submission.images } : {}),
+    ...(historySelections.length ? { selections: historySelections } : {}), submission };
   const next = [...messages];
   if (index < 0) next.push(entry);
   else next[index] = entry;

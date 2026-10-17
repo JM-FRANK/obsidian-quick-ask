@@ -1,5 +1,6 @@
 const { citedAnswer } = require("./web-search");
 const { isMessage, messageText, messageReasoning } = require("./protocol");
+const { selectionSnapshots } = require("./history-selections");
 // Reconstruct visible turns without losing their original Markdown or moving
 // readable reasoning into a separate, later assistant message.
 function questionFromInput(text) {
@@ -12,17 +13,28 @@ function conversationFromRecords(records) {
   const messages = [];
   let assistant = null;
   let nativeReasoning = "";
+  let selections = [];
   for (const record of records ?? []) {
     const payload = record.payload ?? {};
-    if (record.kind === "turn/started") { assistant = null; nativeReasoning = ""; }
+    if (record.kind === "turn/started") {
+      assistant = null; nativeReasoning = "";
+      selections = selectionSnapshots(payload.additions);
+    }
     if (record.kind === "item/output") nativeReasoning += messageReasoning(payload.item);
     if (record.kind === "item/input") {
       const items = payload.items ?? (payload.item ? [payload.item] : []);
       for (const [position, item] of items.entries()) {
         if (!isMessage(item)) continue;
-        const question = questionFromInput(messageText(item));
+        const text = messageText(item);
+        // Context envelopes are data, even when a selection contains tag-like text.
+        if (String(text).trim().startsWith("<quick_ask_context>")) continue;
+        const question = questionFromInput(text);
         const images = position === items.length - 1 ? payload.images : null;
-        if (question !== null || images?.length) messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}) });
+        if (question !== null || images?.length || selections.length) {
+          messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}),
+            ...(selections.length ? { selections } : {}) });
+          selections = [];
+        }
       }
     }
     if (record.kind === "item/output" && payload.tool !== true && isMessage(payload.item)) {
@@ -30,6 +42,7 @@ function conversationFromRecords(records) {
       if (text) { assistant = { role: "assistant", text }; const displayText = citedAnswer(text, [payload.item]); if (displayText !== text) assistant.displayText = displayText; messages.push(assistant); }
     }
     if (record.kind === "turn/finished") {
+      selections = [];
       if (!assistant && (payload.text || payload.reasoning || nativeReasoning)) {
         assistant = { role: "assistant", text: payload.text ?? "" };
         messages.push(assistant);

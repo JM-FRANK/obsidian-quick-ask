@@ -1228,6 +1228,7 @@ module.exports = { MIN_INPUT_HEIGHT, inputHeight, draggedInputHeight, availableI
 "src/quick-ask/conversation-messages": function(module, exports, require) {
 const { citedAnswer } = require("src/quick-ask/web-search");
 const { isMessage, messageText, messageReasoning } = require("src/quick-ask/protocol");
+const { selectionSnapshots } = require("src/quick-ask/history-selections");
 // Reconstruct visible turns without losing their original Markdown or moving
 // readable reasoning into a separate, later assistant message.
 function questionFromInput(text) {
@@ -1240,17 +1241,28 @@ function conversationFromRecords(records) {
   const messages = [];
   let assistant = null;
   let nativeReasoning = "";
+  let selections = [];
   for (const record of records ?? []) {
     const payload = record.payload ?? {};
-    if (record.kind === "turn/started") { assistant = null; nativeReasoning = ""; }
+    if (record.kind === "turn/started") {
+      assistant = null; nativeReasoning = "";
+      selections = selectionSnapshots(payload.additions);
+    }
     if (record.kind === "item/output") nativeReasoning += messageReasoning(payload.item);
     if (record.kind === "item/input") {
       const items = payload.items ?? (payload.item ? [payload.item] : []);
       for (const [position, item] of items.entries()) {
         if (!isMessage(item)) continue;
-        const question = questionFromInput(messageText(item));
+        const text = messageText(item);
+        // Context envelopes are data, even when a selection contains tag-like text.
+        if (String(text).trim().startsWith("<quick_ask_context>")) continue;
+        const question = questionFromInput(text);
         const images = position === items.length - 1 ? payload.images : null;
-        if (question !== null || images?.length) messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}) });
+        if (question !== null || images?.length || selections.length) {
+          messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}),
+            ...(selections.length ? { selections } : {}) });
+          selections = [];
+        }
       }
     }
     if (record.kind === "item/output" && payload.tool !== true && isMessage(payload.item)) {
@@ -1258,6 +1270,7 @@ function conversationFromRecords(records) {
       if (text) { assistant = { role: "assistant", text }; const displayText = citedAnswer(text, [payload.item]); if (displayText !== text) assistant.displayText = displayText; messages.push(assistant); }
     }
     if (record.kind === "turn/finished") {
+      selections = [];
       if (!assistant && (payload.text || payload.reasoning || nativeReasoning)) {
         assistant = { role: "assistant", text: payload.text ?? "" };
         messages.push(assistant);
@@ -2656,6 +2669,7 @@ module.exports = {
 const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
 const { t } = require("src/quick-ask/i18n");
 const { createImageViewer } = require("src/quick-ask/image-viewer");
+const { createSelectionHover } = require("src/quick-ask/selection-hover");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("src/quick-ask/images");
 const { droppedFilePaths } = require("src/quick-ask/file-input");
 const { pickerOptions, isCompositionEvent } = require("src/quick-ask/file-picker");
@@ -2707,6 +2721,9 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
   const language = { language: getLanguage };
   const imageViewer = createImageViewer({ labelForClose: () => t(language, "images.close") });
   plugin.register(() => imageViewer.dispose());
+  const selectionHover = createSelectionHover();
+  const selectionCleanups = new WeakMap();
+  plugin.register(() => selectionHover.dispose());
   let fuzzyQuery = null;
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
@@ -2980,6 +2997,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         return element;
       },
       clear(element) {
+        for (const dispose of selectionCleanups.get(element) ?? []) dispose();
+        selectionCleanups.delete(element);
         for (const component of markdownComponents.get(element) ?? []) component.unload();
         markdownComponents.delete(element);
         hoverParents.get(element)?.hoverPopover?.unload();
@@ -2991,6 +3010,11 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       },
       setTooltip(element, tooltip, options) {
         setTooltip(element, tooltip, options);
+      },
+      selectionPreview(element, selection, owner) {
+        let cleanups = selectionCleanups.get(owner);
+        if (!cleanups) { cleanups = new Set(); selectionCleanups.set(owner, cleanups); }
+        cleanups.add(selectionHover.bind(element, selection));
       },
       setIcon(element, icon) {
         setIcon(element, icon);
@@ -3592,6 +3616,22 @@ const geminiSearchWire = Object.freeze({
   partialOutput: state => state.geminiMessage ? [state.geminiMessage] : null,
 });
 module.exports = { geminiSearchWire, buildGeminiSearchBody };
+
+},
+"src/quick-ask/history-selections": function(module, exports, require) {
+// Display-only snapshots: never parse Context XML or reread a changed Vault file.
+function selectionSnapshots(additions) {
+  return (Array.isArray(additions) ? additions : [])
+    .filter(item => item?.kind === "selection" && typeof item.text === "string" && item.text.length > 0)
+    .map(item => ({ path: typeof item.path === "string" ? item.path : "", text: item.text }));
+}
+
+function submissionSelections(submission) {
+  return selectionSnapshots(submission.additions ??
+    (submission.pending?.selections ?? []).map(selection => ({ ...selection, kind: "selection" })));
+}
+
+module.exports = { selectionSnapshots, submissionSelections };
 
 },
 "src/quick-ask/i18n": function(module, exports, require) {
@@ -6354,6 +6394,124 @@ function createSearchClient({ network, secrets, scheduler }) {
 module.exports = { createSearchClient, requestFor, parseDuckDuckGo, textFromHTML };
 
 },
+"src/quick-ask/selection-hover": function(module, exports, require) {
+// A small read-only hover card. Native setTooltip accepts only a string and
+// cannot give the source filename its own hierarchy or align the card's right
+// edge to the quote. All elements and timers belong to the trigger's window.
+function selectionHoverPosition(anchor, viewport, height) {
+  const edge = 12;
+  const gap = 8;
+  const width = Math.max(0, Math.min(420, viewport.width - edge * 2));
+  const above = Math.max(0, anchor.top - edge - gap);
+  const below = Math.max(0, viewport.height - anchor.bottom - edge - gap);
+  const onTop = above >= Math.min(height, 360) || above >= below;
+  const maxHeight = Math.min(360, onTop ? above : below);
+  const visibleHeight = Math.min(height, maxHeight);
+  return {
+    width, maxHeight,
+    left: Math.max(edge, Math.min(anchor.right - width, viewport.width - edge - width)),
+    top: onTop ? anchor.top - gap - visibleHeight : anchor.bottom + gap,
+  };
+}
+
+function createSelectionHover() {
+  const bindings = new Set();
+  let closeActive = null;
+  let nextId = 0;
+  return {
+    bind(trigger, selection) {
+      const doc = trigger.ownerDocument;
+      const owner = doc.defaultView;
+      let timer = null;
+      let leaveTimer = null;
+      let card = null;
+      const cancelLeave = () => { owner.clearTimeout(leaveTimer); leaveTimer = null; };
+      const onScroll = event => { if (!card?.contains(event.target)) hide(); };
+      const onKey = event => { if (event.key === 'Escape') hide(); };
+      function hide() {
+        owner.clearTimeout(timer); timer = null;
+        cancelLeave();
+        card?.remove(); card = null;
+        trigger.removeAttribute('aria-describedby');
+        doc.removeEventListener('scroll', onScroll, true);
+        doc.removeEventListener('keydown', onKey);
+        owner.removeEventListener('resize', hide);
+        owner.removeEventListener('blur', hide);
+        if (closeActive === hide) closeActive = null;
+      }
+      function show() {
+        timer = null;
+        if (!trigger.isConnected) return;
+        const anchor = trigger.getBoundingClientRect();
+        if (anchor.bottom <= 0 || anchor.top >= owner.innerHeight) return;
+        closeActive?.();
+        closeActive = hide;
+        card = doc.createElement('div');
+        card.className = 'scholar-quick-ask-selection-popover';
+        card.id = `scholar-quick-ask-selection-hover-${++nextId}`;
+        card.setAttribute('role', 'tooltip');
+        // Carry only the configured user tint into the body-level portal.
+        const tint = owner.getComputedStyle(trigger).getPropertyValue('--scholar-user-bubble-tint').trim();
+        if (tint) card.style.setProperty('--scholar-user-bubble-tint', tint);
+        if (selection.path) {
+          const source = card.appendChild(doc.createElement('div'));
+          source.className = 'scholar-quick-ask-selection-source';
+          source.textContent = selection.path.split('/').at(-1);
+        }
+        const text = card.appendChild(doc.createElement('div'));
+        text.className = 'scholar-quick-ask-selection-quote';
+        text.textContent = selection.text;
+        // Measure only after the wrapping width is set. Keep hidden until placed.
+        card.style.visibility = 'hidden';
+        card.style.width = `${selectionHoverPosition(anchor, { width: owner.innerWidth, height: owner.innerHeight }, 0).width}px`;
+        doc.body.appendChild(card);
+        const position = selectionHoverPosition(anchor, { width: owner.innerWidth, height: owner.innerHeight }, card.scrollHeight + 2);
+        card.style.left = `${position.left}px`;
+        card.style.top = `${position.top}px`;
+        card.style.maxHeight = `${position.maxHeight}px`;
+        card.style.visibility = '';
+        trigger.setAttribute('aria-describedby', card.id);
+        card.addEventListener('pointerenter', cancelLeave);
+        card.addEventListener('pointerleave', leave);
+        doc.addEventListener('scroll', onScroll, true);
+        doc.addEventListener('keydown', onKey);
+        owner.addEventListener('resize', hide);
+        owner.addEventListener('blur', hide);
+      }
+      function enter() {
+        cancelLeave();
+        if (card || timer !== null) return;
+        closeActive?.();
+        closeActive = hide;
+        timer = owner.setTimeout(show, 750);
+      }
+      function leave() {
+        owner.clearTimeout(timer); timer = null;
+        cancelLeave();
+        leaveTimer = owner.setTimeout(hide, 120);
+      }
+      trigger.addEventListener('pointerenter', enter);
+      trigger.addEventListener('pointerleave', leave);
+      trigger.addEventListener('focus', enter);
+      trigger.addEventListener('blur', leave);
+      const dispose = () => {
+        hide();
+        trigger.removeEventListener('pointerenter', enter);
+        trigger.removeEventListener('pointerleave', leave);
+        trigger.removeEventListener('focus', enter);
+        trigger.removeEventListener('blur', leave);
+        bindings.delete(dispose);
+      };
+      bindings.add(dispose);
+      return dispose;
+    },
+    dispose() { for (const dispose of [...bindings]) dispose(); },
+  };
+}
+
+module.exports = { createSelectionHover, selectionHoverPosition };
+
+},
 "src/quick-ask/session-navigation": function(module, exports, require) {
 // A single policy for placeholder, existing-session and busy states. Titles
 // are labels only; an actionable session always has an ID in the real index.
@@ -7567,6 +7725,8 @@ module.exports = { createProjectionPublisher, reasoningPage, REASONING_PAGE_SIZE
 
 },
 "src/quick-ask/submission-state": function(module, exports, require) {
+const { submissionSelections } = require("src/quick-ask/history-selections");
+
 // The submitted draft and the next editable draft have different lifetimes.
 function clearSubmittedDraft(draft) {
   return { ...draft, ...(draft.images ? { images: [] } : {}), composer: "", pending: { ...draft.pending, selections: [], ...(draft.pending.images ? { images: [] } : {}) } };
@@ -7589,7 +7749,9 @@ function recoverSubmittedDraft(current, submission, { restoreDraft = true } = {}
 // submitting the same wording anew must still create a separate turn.
 function prepareSubmission(messages, current, submission, retry = false) {
   const index = retry ? messages.findIndex(entry => entry.submission === submission || entry.retry === submission) : -1;
-  const entry = { role: "user", text: submission.question, ...(submission.images?.length ? { images: submission.images } : {}), submission };
+  const historySelections = submissionSelections(submission);
+  const entry = { role: "user", text: submission.question, ...(submission.images?.length ? { images: submission.images } : {}),
+    ...(historySelections.length ? { selections: historySelections } : {}), submission };
   const next = [...messages];
   if (index < 0) next.push(entry);
   else next[index] = entry;
@@ -10739,6 +10901,7 @@ const { createScrollFollow } = require("src/quick-ask/stream-presentation");
 const { createReasoningView } = require("src/quick-ask/reasoning-view");
 const { normalizeDisplaySettings } = require("src/quick-ask/settings");
 const { conversationFromRecords, questionFromInput } = require("src/quick-ask/conversation-messages");
+const { selectionSnapshots } = require("src/quick-ask/history-selections");
 const { MIN_INPUT_HEIGHT, inputHeight, draggedInputHeight, availableInputHeight } = require("src/quick-ask/composer-layout");
 const {
   createPendingContext, addFile, addSelection, removeFile, removeSelection, clearSelections,
@@ -10847,6 +11010,7 @@ class QuickAskView {
     this.mounted = true;
     this.renderedMessages = null;
     openViews.add(this);
+    if (this.roots.history) ui.clear(this.roots.history);
     ui.clear(container);
     this.roots = {
       container,
@@ -10932,7 +11096,12 @@ class QuickAskView {
     if (!appendOnly) ui.clear(area);
     for (const entry of this.messages.slice(appendOnly ? rendered.length : 0)) {
       if (entry.kind === "compaction") { this.renderCompactionDivider(area, entry); continue; }
-      const bubble = ui.createEl(area, "div", { cls: `scholar-quick-ask-message scholar-quick-ask-message-${entry.role}` });
+      let parent = area;
+      if (entry.role === "user" && entry.selections?.length) {
+        parent = ui.createEl(area, "div", { cls: "scholar-quick-ask-user-turn" });
+        this.renderHistorySelections(parent, entry.selections);
+      }
+      const bubble = ui.createEl(parent, "div", { cls: `scholar-quick-ask-message scholar-quick-ask-message-${entry.role}` });
       this.labelMessageRole(bubble, entry.role);
       if (entry.role === "assistant" && entry.reasoning) {
         const reasoning = this.settlingReasoning ?? this.makeReasoning(bubble);
@@ -10962,6 +11131,17 @@ class QuickAskView {
     this.renderedMessages = [...this.messages];
     this.renderLive();
     if (this.scrollFollow.following) this.scrollToBottom();
+  }
+
+  renderHistorySelections(parent, selections) {
+    const group = this.ui.createEl(parent, "div", { cls: "scholar-quick-ask-history-selections" });
+    for (const selection of selections) {
+      const row = this.ui.createEl(group, "div", { cls: "scholar-quick-ask-history-selection", attributes: { tabindex: "0" } });
+      const icon = this.ui.createEl(row, "span", { cls: "scholar-quick-ask-history-selection-icon", attributes: { "aria-hidden": "true" } });
+      this.ui.setIcon(icon, "quote");
+      this.ui.createEl(row, "span", { cls: "scholar-quick-ask-history-selection-preview", text: selection.text.replace(/\s+/g, " ").trim() });
+      this.ui.selectionPreview(row, selection, this.roots.history);
+    }
   }
 
   renderSearchSources(parent, sources) {
@@ -11725,7 +11905,7 @@ class QuickAskView {
     if (prepared.draft.composer !== captured.composer) this.composer.setDraft(prepared.draft.composer);
     this.drafts.set(sessionId, prepared.draft);
     this.saveDraft();
-    const entry = prepared.entry;
+    let entry = prepared.entry;
     this.messages = prepared.messages;
     this.lastSubmission = submission;
     this.streaming = { status: "running", reasoning: "", text: "", error: null };
@@ -11739,6 +11919,15 @@ class QuickAskView {
     try {
       const additions = submission.additions ?? await this.stagedMutations(submission.references, submission.pending.selections, sessionId);
       submission.additions = additions;
+      // Staging can refresh a selection. Replace the visible snapshot only when
+      // its display changed, preserving append-only painting in the common case.
+      const selections = selectionSnapshots(additions);
+      const index = this.messages.indexOf(entry);
+      if (index >= 0 && JSON.stringify(entry.selections ?? []) !== JSON.stringify(selections)) {
+        entry = { ...entry, selections };
+        this.messages[index] = entry;
+        if (this.activeSessionId === sessionId && this.mounted) this.renderConversation();
+      }
       result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion, images: submission.images ?? [] });
     } catch {
       result = { status: "failed", accepted: false };

@@ -110,6 +110,85 @@
   align-self: flex-end;
   max-width: 90%;
 }
+.scholar-quick-ask-user-turn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  align-self: flex-end;
+  gap: 3px;
+  min-width: 0;
+  width: fit-content;
+  max-width: 90%;
+}
+.scholar-quick-ask-user-turn > .scholar-quick-ask-message-user { max-width: 100%; }
+.scholar-quick-ask-history-selections {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Let the question determine the group width, not the unbroken quote. */
+  width: 0;
+  min-width: 100%;
+}
+.scholar-quick-ask-history-selection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 6%, var(--scholar-bubble-base));
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  cursor: default;
+}
+.scholar-quick-ask-history-selection-icon {
+  display: flex;
+  flex: 0 0 auto;
+  color: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 25%, var(--text-muted));
+  opacity: 0.75;
+}
+.scholar-quick-ask-history-selection-icon svg { width: 12px; height: 12px; }
+.scholar-quick-ask-history-selection-preview {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  mask-image: linear-gradient(to right, #000 max(0px, calc(100% - 48px)), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 max(0px, calc(100% - 48px)), transparent);
+}
+.scholar-quick-ask-selection-popover {
+  position: fixed;
+  z-index: var(--layer-popover, 300);
+  box-sizing: border-box;
+  background: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 4%, var(--background-secondary));
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 16%);
+  max-width: calc(100vw - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  text-align: left;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.scholar-quick-ask-selection-source {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.scholar-quick-ask-selection-quote { white-space: pre-wrap; }
 .scholar-quick-ask-message-assistant {
   --scholar-bubble-surface: color-mix(in oklch, var(--scholar-assistant-bubble-tint, #39c5bb) 12%, var(--scholar-bubble-base));
   align-self: flex-start;

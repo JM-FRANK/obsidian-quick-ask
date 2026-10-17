@@ -1,6 +1,7 @@
 const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
+const { createSelectionHover } = require("./selection-hover");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("./images");
 const { droppedFilePaths } = require("./file-input");
 const { pickerOptions, isCompositionEvent } = require("./file-picker");
@@ -52,6 +53,9 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
   const language = { language: getLanguage };
   const imageViewer = createImageViewer({ labelForClose: () => t(language, "images.close") });
   plugin.register(() => imageViewer.dispose());
+  const selectionHover = createSelectionHover();
+  const selectionCleanups = new WeakMap();
+  plugin.register(() => selectionHover.dispose());
   let fuzzyQuery = null;
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
@@ -325,6 +329,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         return element;
       },
       clear(element) {
+        for (const dispose of selectionCleanups.get(element) ?? []) dispose();
+        selectionCleanups.delete(element);
         for (const component of markdownComponents.get(element) ?? []) component.unload();
         markdownComponents.delete(element);
         hoverParents.get(element)?.hoverPopover?.unload();
@@ -336,6 +342,11 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       },
       setTooltip(element, tooltip, options) {
         setTooltip(element, tooltip, options);
+      },
+      selectionPreview(element, selection, owner) {
+        let cleanups = selectionCleanups.get(owner);
+        if (!cleanups) { cleanups = new Set(); selectionCleanups.set(owner, cleanups); }
+        cleanups.add(selectionHover.bind(element, selection));
       },
       setIcon(element, icon) {
         setIcon(element, icon);

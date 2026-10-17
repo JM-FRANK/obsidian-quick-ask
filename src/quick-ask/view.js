@@ -11,6 +11,7 @@ const { createScrollFollow } = require("./stream-presentation");
 const { createReasoningView } = require("./reasoning-view");
 const { normalizeDisplaySettings } = require("./settings");
 const { conversationFromRecords, questionFromInput } = require("./conversation-messages");
+const { selectionSnapshots } = require("./history-selections");
 const { MIN_INPUT_HEIGHT, inputHeight, draggedInputHeight, availableInputHeight } = require("./composer-layout");
 const {
   createPendingContext, addFile, addSelection, removeFile, removeSelection, clearSelections,
@@ -119,6 +120,7 @@ class QuickAskView {
     this.mounted = true;
     this.renderedMessages = null;
     openViews.add(this);
+    if (this.roots.history) ui.clear(this.roots.history);
     ui.clear(container);
     this.roots = {
       container,
@@ -204,7 +206,12 @@ class QuickAskView {
     if (!appendOnly) ui.clear(area);
     for (const entry of this.messages.slice(appendOnly ? rendered.length : 0)) {
       if (entry.kind === "compaction") { this.renderCompactionDivider(area, entry); continue; }
-      const bubble = ui.createEl(area, "div", { cls: `scholar-quick-ask-message scholar-quick-ask-message-${entry.role}` });
+      let parent = area;
+      if (entry.role === "user" && entry.selections?.length) {
+        parent = ui.createEl(area, "div", { cls: "scholar-quick-ask-user-turn" });
+        this.renderHistorySelections(parent, entry.selections);
+      }
+      const bubble = ui.createEl(parent, "div", { cls: `scholar-quick-ask-message scholar-quick-ask-message-${entry.role}` });
       this.labelMessageRole(bubble, entry.role);
       if (entry.role === "assistant" && entry.reasoning) {
         const reasoning = this.settlingReasoning ?? this.makeReasoning(bubble);
@@ -234,6 +241,17 @@ class QuickAskView {
     this.renderedMessages = [...this.messages];
     this.renderLive();
     if (this.scrollFollow.following) this.scrollToBottom();
+  }
+
+  renderHistorySelections(parent, selections) {
+    const group = this.ui.createEl(parent, "div", { cls: "scholar-quick-ask-history-selections" });
+    for (const selection of selections) {
+      const row = this.ui.createEl(group, "div", { cls: "scholar-quick-ask-history-selection", attributes: { tabindex: "0" } });
+      const icon = this.ui.createEl(row, "span", { cls: "scholar-quick-ask-history-selection-icon", attributes: { "aria-hidden": "true" } });
+      this.ui.setIcon(icon, "quote");
+      this.ui.createEl(row, "span", { cls: "scholar-quick-ask-history-selection-preview", text: selection.text.replace(/\s+/g, " ").trim() });
+      this.ui.selectionPreview(row, selection, this.roots.history);
+    }
   }
 
   renderSearchSources(parent, sources) {
@@ -997,7 +1015,7 @@ class QuickAskView {
     if (prepared.draft.composer !== captured.composer) this.composer.setDraft(prepared.draft.composer);
     this.drafts.set(sessionId, prepared.draft);
     this.saveDraft();
-    const entry = prepared.entry;
+    let entry = prepared.entry;
     this.messages = prepared.messages;
     this.lastSubmission = submission;
     this.streaming = { status: "running", reasoning: "", text: "", error: null };
@@ -1011,6 +1029,15 @@ class QuickAskView {
     try {
       const additions = submission.additions ?? await this.stagedMutations(submission.references, submission.pending.selections, sessionId);
       submission.additions = additions;
+      // Staging can refresh a selection. Replace the visible snapshot only when
+      // its display changed, preserving append-only painting in the common case.
+      const selections = selectionSnapshots(additions);
+      const index = this.messages.indexOf(entry);
+      if (index >= 0 && JSON.stringify(entry.selections ?? []) !== JSON.stringify(selections)) {
+        entry = { ...entry, selections };
+        this.messages[index] = entry;
+        if (this.activeSessionId === sessionId && this.mounted) this.renderConversation();
+      }
       result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion, images: submission.images ?? [] });
     } catch {
       result = { status: "failed", accepted: false };
