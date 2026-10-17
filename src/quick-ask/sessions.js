@@ -97,6 +97,7 @@ class QuickAskSessionStore {
     this.indexPath = join(this.directory, "index.json");
     this.tails = new Map();
     this.index = null;
+    this.indexTail = Promise.resolve();
     this._newId = createIdGenerator({
       now: () => scheduler?.now?.() ?? Date.now(),
       random: () => Math.random(),
@@ -195,8 +196,16 @@ class QuickAskSessionStore {
     };
   }
 
-  async writeIndex(index) {
+  writeIndex(index) {
+    this.index = index;
+    const attempt = this.indexTail.then(() => this.persistIndex());
+    this.indexTail = attempt.catch(() => {});
+    return attempt;
+  }
+
+  async persistIndex() {
     await this.ensureDirectories();
+    const index = this.index;
     const payload = {
       kind: INDEX_KIND,
       activeSessionId: index.activeSessionId ?? null,
@@ -211,7 +220,6 @@ class QuickAskSessionStore {
       })),
     };
     await this.pluginData.dataAdapter.write(this.indexPath, `${JSON.stringify(payload)}\n`);
-    this.index = index;
   }
 
   // The index is a derived navigation cache. When it is missing or invalid it
@@ -354,40 +362,42 @@ class QuickAskSessionStore {
       }
       const record = { seq: parsed.nextSeq, at: timestamp, kind, payload: payload ?? {} };
       await this.pluginData.dataAdapter.append(this.adapterPathFor(id), `${JSON.stringify(record)}\n`);
-      await this.touch(id, { at: timestamp, kind, payload });
-      await this.notifyCommitted(id);
+      // The JSONL remains immediate. Only its derived activity cache waits for
+      // the turn boundary; standalone Context changes still flush immediately.
+      const indexChanged = await this.touch(id, { at: timestamp, kind, payload,
+        deferIndex: parsed.running && kind !== "turn/started" && kind !== "turn/finished" && kind !== "session/renamed" });
+      await this.notifyCommitted(id, { indexChanged });
       return record;
     });
   }
 
   // Best-effort post-commit notification. A mirror failure never fails or rolls
   // back the live session.
-  async notifyCommitted(id) {
+  async notifyCommitted(id, commit = { indexChanged: true }) {
     if (typeof this.onCommitted !== "function") return;
     try {
-      await this.onCommitted(id, this);
+      await this.onCommitted(id, this, commit);
     } catch (error) {
       this.onError(error);
     }
   }
 
-  async touch(id, { at, kind }) {
+  async touch(id, { at, kind, payload, deferIndex = false }) {
     const index = await this.ensureIndex();
     const entry = index.sessions.find((session) => session.id === id);
-    if (!entry) return;
+    if (!entry) return false;
     entry.lastActivity = at;
-    if (kind === "session/renamed") entry.title = normalizeTitle(entry.title);
+    if (kind === "session/renamed") entry.title = normalizeTitle(payload?.title);
+    if (kind === "turn/started") entry.running = true;
+    if (kind === "turn/finished") entry.running = false;
+    if (deferIndex) return false;
     await this.writeIndex(index);
+    return true;
   }
 
   async rename(id, title) {
     const normalized = normalizeTitle(title);
-    const record = await this.append(id, "session/renamed", { title: normalized });
-    const index = await this.ensureIndex();
-    const entry = index.sessions.find((session) => session.id === id);
-    if (entry) entry.title = normalized;
-    await this.writeIndex(index);
-    return record;
+    return await this.append(id, "session/renamed", { title: normalized });
   }
 
   async delete(id) {

@@ -1,7 +1,8 @@
+const { geminiSearchWire, buildGeminiSearchBody } = require("./gemini-search");
 const { imagePaths: normalizeImagePaths } = require("./images");
 const { normalizeReasoningEffort } = require("./reasoning");
 const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
-const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("./web-search");
+const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, responseSuggestions, normalizeSources, citedAnswer } = require("./web-search");
 const { createSearchClient } = require("./search-client");
 const { createStore } = require("zustand/vanilla");
 const { createProjectionPublisher } = require("./stream-presentation");
@@ -60,8 +61,19 @@ function createConversation(options) {
   const searchClient = createSearchClient(environment);
   function toolsFor(state) {
     const route = state.requestSearch;
-    return [protocolFor(state.config).functionTool(GET_FULL_FILE_TOOL), ...(route && route.kind !== "off" ? [route.kind === "server" ? route.tool : protocolFor(state.config).functionTool(WEB_SEARCH_TOOL)] : [])];
+    const protocol = protocolFor(state.config);
+    const tools = route?.kind === "server" && route.localTools === false ? [] : [protocol.functionTool(GET_FULL_FILE_TOOL)];
+    if (route?.kind === "server") {
+      if (route.tool) tools.push(route.tool);
+    } else if (route && route.kind !== "off") {
+      const searchTool = route.queryLimit ? { ...WEB_SEARCH_TOOL,
+        description: WEB_SEARCH_TOOL.description.replace('500', String(route.queryLimit)),
+        parameters: { ...WEB_SEARCH_TOOL.parameters, properties: { query: { ...WEB_SEARCH_TOOL.parameters.properties.query, maxLength: route.queryLimit } } } } : WEB_SEARCH_TOOL;
+      tools.push(protocol.functionTool(searchTool));
+    }
+    return tools;
   }
+
   function searchEnabled(sessionId) {
     const state = stateFor(sessionId);
     return typeof state.searchEnabled === "boolean" ? state.searchEnabled : normalizeSearchSettings(getSettings()?.quickAsk?.webSearch).defaultEnabled;
@@ -97,7 +109,7 @@ function createConversation(options) {
     const route = searchRoute(enabled, settings, state.config);
     const errors = {};
     if (route.kind === "invalid") errors[route.error] = true;
-    if (route.kind === "independent" && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
+    if (["independent", "provider-api"].includes(route.kind) && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
     return { valid: Object.keys(errors).length === 0, errors, route };
   }
   // Per-session live state. Everything durable also lands in the JSONL log.
@@ -147,6 +159,7 @@ function createConversation(options) {
     const draftEffort = state.reasoningDirty ? state.reasoningEffort : undefined;
     state.reasoningEffort = undefined;
     state.usage = createTurnUsage();
+    state.usageSamples = [];
     state.sessionUsage = createSessionUsage();
     state.searchEnabled = undefined;
     state.items = [];
@@ -178,9 +191,10 @@ function createConversation(options) {
         break;
       case "item/input":
       case "item/output":
-        if (payload.item) {
-          // Image-only records remain visible history but have no replay input.
-          if (!(payload.images?.length && !messageText(payload.item))) appendCanonicalItem(state, payload.item);
+        for (const [position, item] of (payload.items ?? (payload.item ? [payload.item] : [])).entries()) {
+          // Images belong to the final question, never the Context envelope.
+          const isQuestion = !payload.items || position === payload.items.length - 1;
+          if (!(isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item);
         }
         break;
       case "compaction/checkpoint":
@@ -205,6 +219,7 @@ function createConversation(options) {
         if (typeof payload.nextSearchEnabled === "boolean") state.searchEnabled = payload.nextSearchEnabled;
         if (payload.reasoningEffort) state.reasoningEffort = normalizeReasoningEffort(payload.reasoningEffort);
         state.usage = createTurnUsage();
+        state.usageSamples = [];
         state.turn = {
           turnId: payload.turnId,
           question: payload.question ?? "",
@@ -218,6 +233,12 @@ function createConversation(options) {
         };
         break;
       case "turn/finished":
+        if (Array.isArray(payload.usageSamples)) {
+          state.usage = createTurnUsage();
+          state.usageSamples = [];
+          recordUsage(state, payload.usageSamples);
+          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor;
+        }
         state.sessionUsage.addTurn(state.usage.totals());
         if (state.turn && state.turn.turnId === payload.turnId) {
           state.turn = {
@@ -297,17 +318,19 @@ function createConversation(options) {
     const config = state.config ?? {};
     const settings = normalizeQuickAskSettings(getSettings()?.quickAsk ?? config);
     const { input, previousResponseId } = requestInput(state, staged);
-    return protocolFor(state.config).buildRequestBody({
+    const body = protocolFor(state.config).buildRequestBody({
       reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
       instructions: buildInstructions({ rendererVersion: staged.rendererVersion ?? RENDERER_VERSION, customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
       input,
       tools: toolsFor(state),
-      toolChoice: "auto",
+      toolChoice: state.requestSearch?.kind === "server" ? (state.requestSearch.toolChoice ?? "auto") : "auto",
       parallelToolCalls: true,
+      serverSearch: state.requestSearch?.kind === "server" ? state.requestSearch : undefined,
       previousResponseId,
       store: state.storedState,
       model: config.model ?? settings.model,
     });
+    return state.requestSearch?.native ? buildGeminiSearchBody(body) : body;
   }
 
   function resolveApiKey(state) {
@@ -615,6 +638,7 @@ function createConversation(options) {
     for (const sample of samples) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
+      (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
       const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
       if (sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length) {
         state.occupancyAnchor = { inputTokens };
@@ -681,6 +705,7 @@ function createConversation(options) {
       if (preflight.blocked) return preflight;
       const turnId = `turn-${environment.scheduler.now?.() ?? Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       state.usage = createTurnUsage();
+      state.usageSamples = [];
       state.pendingMutations = stagedAdditions;
       const turn = { turnId, question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
@@ -734,7 +759,9 @@ function createConversation(options) {
     let retryAfterNonStreaming = state.nonStreaming;
     for (;;) {
       if (!isEnabled() || signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
-      const body = buildBody(state, turn);
+      let body;
+      try { body = buildBody(state, turn); }
+      catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
       if (turn.toolQuestion && turn.toolQuestion.state.callsUsed >= turn.toolQuestion.state.callLimit) {
         body.tools = responsesBuiltInTools(body.tools);
         if (protocolFor(state.config).emptyToolsAreInvalid && body.tools.length === 0) {
@@ -742,7 +769,7 @@ function createConversation(options) {
         }
       }
       const result = await streamAttempt({
-        protocol: protocolFor(state.config),
+        protocol: state.requestSearch?.native ? geminiSearchWire : protocolFor(state.config),
         network: environment.network,
         scheduler: environment.scheduler,
         baseUrl: (state.config?.baseUrl ?? normalizeQuickAskSettings(getSettings()?.quickAsk).baseUrl),
@@ -751,15 +778,18 @@ function createConversation(options) {
         signal,
         idleTimeoutMs,
         policy,
-        nonStreaming: retryAfterNonStreaming,
+        nonStreaming: state.requestSearch?.native || retryAfterNonStreaming,
         onEvent: (event) => handleStreamEvent(state, turn, event),
       });
 
-      if (result.output) turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
+      if (result.output) {
+        turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
+        turn.searchSuggestions = [...new Set([...(turn.searchSuggestions ?? []), ...responseSuggestions(result.output)])];
+      }
 
       // The endpoint demonstrably needed the non-streaming transport; remember
       // it for the rest of the plugin lifecycle.
-      if (result.nonStreaming) {
+      if (result.nonStreaming && !state.requestSearch?.native) {
         state.nonStreaming = true;
         retryAfterNonStreaming = true;
       }
@@ -778,6 +808,11 @@ function createConversation(options) {
       }
       if (result.status === "completed" || result.status === "incomplete") {
         if (result.status === "completed" && Array.isArray(result.functionCalls) && result.functionCalls.length > 0) {
+          if (state.requestSearch?.kind === "server" && state.requestSearch.localTools === false) {
+            return await finishTurn(state, turn, "failed", { text: result.text, reasoning: result.reasoning,
+              output: result.output, usage: result.usageSamples,
+              error: { code: "TOOLS_UNSUPPORTED", message: "This provider's web-search turn does not support local function tools." } });
+          }
           const continued = await runToolContinuation(state, turn, result, signal, retryAfterNonStreaming);
           if (continued) return continued;
         }
@@ -875,7 +910,6 @@ function createConversation(options) {
       pushProjection(state, { kind: "tool", item, turnId: turn.turnId });
     }
     recordUsage(state, result.usageSamples);
-    for (const sample of result.usageSamples ?? []) await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
     for (const status of question.statuses) {
       pushProjection(state, { kind: "tool-status", turnId: turn.turnId, status });
     }
@@ -940,9 +974,9 @@ function createConversation(options) {
       for (const item of rendered) {
         const isQuestion = item === rendered[rendered.length - 1];
         if (!isQuestion || turn.question || !turn.imagePaths?.length) appendCanonicalItem(state, item);
-        await sessionStore.append(state.sessionId, "item/input", { item,
-          ...(isQuestion && turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
       }
+      await sessionStore.append(state.sessionId, "item/input", { items: rendered,
+        ...(turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
       pushProjection(state, { kind: "accepted", turnId: turn.turnId });
     }).catch(() => {});
     return acceptQueue;
@@ -977,9 +1011,6 @@ function createConversation(options) {
     }
     if (Array.isArray(usage)) {
       recordUsage(state, usage);
-      for (const sample of usage) {
-        await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
-      }
     }
     const turnTotals = state.usage.totals();
     state.sessionUsage.addTurn(turnTotals);
@@ -988,10 +1019,12 @@ function createConversation(options) {
     await sessionStore.append(state.sessionId, "turn/finished", {
       turnId: turn.turnId,
       state: status,
+      usageSamples: state.usageSamples ?? [],
+      occupancyAnchor: state.occupancyAnchor,
       text,
       reasoning,
       error: error ? { code: error.code, message: error.message, status: error.status ?? null } : null,
-      sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
+      sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
     });
     turn.status = status;
     turn.text = text;
@@ -1000,7 +1033,7 @@ function createConversation(options) {
     turn.controller = null;
     turn.images = [];
     pushProjection(state, { kind: "turn", status, turnId: turn.turnId });
-    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
+    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
   }
 
   // Stop aborts only the owning session's current turn and commits whatever

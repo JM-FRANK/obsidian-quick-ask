@@ -212,13 +212,14 @@ function responsesFunctionTool({ name, description, parameters }) {
 
 // Built-in server-side search tools. Only these providers expose one, and each
 // names it differently on the wire; which endpoint/model may select one is
-// caller policy. The three `web_search` providers share one frozen value, so a
+// caller policy. The `web_search` providers share one frozen value, so a
 // request's tool bytes stay identical wherever it is selected.
 const RESPONSES_WEB_SEARCH_TOOL = Object.freeze({ type: "web_search" });
 const RESPONSES_SERVER_SEARCH_TOOLS = Object.freeze({
   openai: RESPONSES_WEB_SEARCH_TOOL,
   xai: RESPONSES_WEB_SEARCH_TOOL,
   bailian: RESPONSES_WEB_SEARCH_TOOL,
+  deepseek: RESPONSES_WEB_SEARCH_TOOL,
   openrouter: Object.freeze({ type: "openrouter:web_search" }),
 });
 
@@ -227,14 +228,14 @@ function responsesServerSearchTool(provider) {
 }
 
 function responsesMessageBlocks(item) {
-  return Array.isArray(item?.content) ? item.content : [];
+  return Array.isArray(item?.content) ? item.content.filter(block => block && typeof block === "object") : [];
 }
 
 // The URL citations carried by one content part, flattening the annotation's
 // `url_citation` wrapper. Caller policy decides what to do with them.
 function responsesCitationAnnotations(block) {
-  return (block?.annotations ?? [])
-    .filter((annotation) => annotation.type === "url_citation")
+  return (Array.isArray(block?.annotations) ? block.annotations : [])
+    .filter((annotation) => annotation?.type === "url_citation")
     .map((annotation) => annotation.url_citation ?? annotation);
 }
 
@@ -244,6 +245,8 @@ function responsesCitationRows(output) {
   const rows = [];
   for (const item of output ?? []) {
     rows.push(...(item?.action?.sources ?? []));
+    if (isResponsesWebSearchCall(item) && ['open_page', 'find_in_page'].includes(item.action?.type) && item.action.url)
+      rows.push({ url: item.action.url });
     for (const block of responsesMessageBlocks(item)) rows.push(...responsesCitationAnnotations(block));
   }
   return rows;
@@ -1024,7 +1027,7 @@ async function runStreamAttempt({
   }
 
   const headers = {
-    Authorization: `Bearer ${apiKey}`,
+    ...(protocol.requestHeaders ? protocol.requestHeaders(apiKey) : { Authorization: `Bearer ${apiKey}` }),
     "Content-Type": "application/json",
     Accept: "text/event-stream",
   };
@@ -1197,10 +1200,10 @@ function derivedEventsFromResponse(payload, state, emit) {
 async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal, onEvent, attempts, protocol }) {
   const state = emptyAttemptState();
   state.wire = protocol;
-  const requestBody = { ...body };
+  const requestBody = protocol.requestBody ? protocol.requestBody(body) : { ...body };
   delete requestBody.stream;
   const headers = {
-    Authorization: `Bearer ${apiKey}`,
+    ...(protocol.requestHeaders ? protocol.requestHeaders(apiKey) : { Authorization: `Bearer ${apiKey}` }),
     "Content-Type": "application/json",
     Accept: "application/json",
   };
@@ -1212,6 +1215,7 @@ async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
+      signal,
     });
   } catch (error) {
     if (signal !== null && signal !== undefined && signal.aborted) return abortedAttempt(attempts, true);
@@ -1328,7 +1332,9 @@ async function streamAttempt(options = {}) {
       message: "A request protocol adapter is required",
     }), 0, false);
   }
-  const url = protocol.createUrl(baseUrl);
+  let url;
+  try { url = protocol.createUrl(baseUrl, body); }
+  catch (error) { return failedAttempt(emptyAttemptState(), normalizeError(error), 0, false); }
   // A caller-marked endpoint starts on the non-streaming transport. A pre-event
   // native transport failure switches to it once, and the caller marks the
   // endpoint for the rest of the plugin lifecycle from the result.

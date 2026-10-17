@@ -1,8 +1,8 @@
-const { validContextWindowControl } = require("./settings-controls");
+const { providerSettings } = require("./provider-settings");
 const { profileSettings } = require("./profile-settings");
 const { normalizeSearchSettings } = require("./web-search");
 const { t } = require("./i18n");
-const { quickAskDisplayPage, baseUrlError, normalizeBaseUrl } = require("./settings");
+const { quickAskDisplayPage } = require("./settings");
 
 function quickAskPreservedStatusDescription(host) {
   const preserved = host.quickAskIntegration?.preservedCopy?.() ?? null;
@@ -100,127 +100,72 @@ function searchSettingsPage(host, SecretComponent) {
 }
 
 function quickAskPage(host, SecretComponent) {
-  const values = host.current().quickAsk;
-  const quickAsk = host.quickAskIntegration;
-  const storage = quickAsk?.storageSummary?.();
+  const tr = key => t(host.settings, key);
+  const storage = host.quickAskIntegration?.storageSummary?.();
   return {
     type: "page",
-    name: t(host.settings, "settings.page.quickAsk.name"),
-    desc: t(host.settings, "settings.page.quickAsk.desc"),
+    name: tr("settings.page.quickAsk.name"),
+    desc: tr("settings.page.quickAsk.desc"),
     items: [
-      quickAskDisplayPage(host.settings),
-      searchSettingsPage(host, SecretComponent),
       {
-        type: "group",
-        heading: t(host.settings, "settings.group.quickAsk"),
+        type: "group", heading: tr("settings.quickAsk.generalGroup"),
         items: [
           {
-            name: t(host.settings, "settings.quickAsk.enable.name"),
-            desc: t(host.settings, "settings.quickAsk.enable.desc"),
+            name: tr("settings.quickAsk.enable.name"),
+            desc: tr("settings.quickAsk.enable.desc"),
             control: { type: "toggle", key: "quickAsk.enable" },
           },
           {
-            name: t(host.settings, "settings.quickAsk.protocol.name"),
-            desc: t(host.settings, "settings.quickAsk.protocol.desc"),
-            control: { type: "dropdown", key: "quickAsk.protocol", options: { responses: "Responses", "chat-completions": "Chat Completions" } },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.baseUrl.name"),
-            desc: t(host.settings, "settings.quickAsk.baseUrl.desc"),
-            control: {
-              type: "text", key: "quickAsk.baseUrl",
-              placeholder: t(host.settings, "settings.quickAsk.baseUrl.example"),
-              validate: (value) => {
-                const error = baseUrlError(normalizeBaseUrl(value));
-                return error ? t(host.settings, error === "baseUrlMissing" ? "settings.quickAsk.validation.required" : "settings.quickAsk.validation.baseUrl") : undefined;
-              },
-            },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.secret.name"),
-            desc: t(host.settings, "settings.quickAsk.secret.desc"),
-            render: setting => {
-              const validate = id => setting.setErrorMessage(id ? "" : t(host.settings, "settings.quickAsk.validation.required"));
-              new SecretComponent(host.app, setting.controlEl).setValue(values.secretId).onChange(async id => {
-                await host.setControlValue("quickAsk.secretId", id ?? "");
-                validate(id);
-              });
-              validate(values.secretId);
-            },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.model.name"),
-            desc: t(host.settings, "settings.quickAsk.model.desc"),
-            control: { type: "text", key: "quickAsk.model", validate: value => String(value).trim() ? undefined : t(host.settings, "settings.quickAsk.validation.required") },
-          },
-          ...profileSettings(host),
-          {
-            name: t(host.settings, "settings.quickAsk.contextWindow.name"),
-            desc: t(host.settings, "settings.quickAsk.contextWindow.desc"),
-            // SettingTextControl has no suffix API. Use the public Setting
-            // primitives to keep the unit outside the editable value.
-            render: setting => {
-              setting.addText(input => {
-                input.setValue(host.getControlValue("quickAsk.contextWindowTokens"));
-                input.inputEl.setAttribute("aria-label", `${t(host.settings, "settings.quickAsk.contextWindow.name")} (K)`);
-                input.onChange(async value => {
-                  const valid = validContextWindowControl(value);
-                  setting.setErrorMessage(valid ? "" : t(host.settings, "settings.quickAsk.validation.contextWindow"));
-                  if (valid) await host.setControlValue("quickAsk.contextWindowTokens", value);
-                });
-              });
-              setting.controlEl.createSpan({ text: "K" });
-            },
-          },
-          {
-            name: t(host.settings, "images.keepCache"),
-            desc: t(host.settings, "images.keepCacheHelp"),
-            control: { type: "toggle", key: "quickAsk.keepCachedImages" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.callLimit.name"),
-            desc: t(host.settings, "settings.quickAsk.callLimit.desc"),
+            name: tr("settings.quickAsk.callLimit.name"),
+            desc: tr("settings.quickAsk.callLimit.desc"),
             control: {
               type: "number", key: "quickAsk.callLimit", min: 1, max: 10, step: 1,
-              validate: (value) => (Number.isInteger(value) && value >= 1 && value <= 10
-                ? undefined : t(host.settings, "settings.quickAsk.validation.callLimit")),
+              validate: value => Number.isInteger(value) && value >= 1 && value <= 10
+                ? undefined : tr("settings.quickAsk.validation.callLimit"),
             },
           },
         ],
       },
       {
-        type: "group",
-        heading: t(host.settings, "settings.quickAsk.preservedCopy.name"),
-        items: [
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.name"),
-            desc: t(host.settings, "settings.quickAsk.preservedCopy.desc"),
-            control: { type: "toggle", key: "quickAsk.preservedCopy.enabled" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.directory.name"),
-            desc: t(host.settings, "settings.quickAsk.preservedCopy.directory.desc"),
-            control: { type: "text", key: "quickAsk.preservedCopy.directory" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.status.name"),
-            desc: quickAskPreservedStatusDescription(host),
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.data.name"),
-            desc: t(host.settings, "settings.quickAsk.data.desc"),
-            render: (setting) => renderQuickAskDataActions(host, setting),
-          },
-        ],
+        type: "page", name: tr("providers.pageTitle"), desc: tr("providers.pageDescription"),
+        items: providerSettings(host, SecretComponent),
       },
       {
-        type: "group",
-        heading: t(host.settings, "settings.quickAsk.storage.name"),
-        items: [{ name: t(host.settings, "settings.quickAsk.storage.name"), desc: storage?.text ?? "" }],
+        type: "page", name: tr("profiles.pageTitle"), desc: tr("profiles.pageDescription"),
+        items: profileSettings(host),
+      },
+      searchSettingsPage(host, SecretComponent),
+      quickAskDisplayPage(host.settings),
+      {
+        type: "page", name: tr("settings.quickAsk.dataPage"), desc: tr("settings.quickAsk.dataPageDescription"),
+        items: [
+          {
+            type: "group", heading: tr("settings.quickAsk.conversationDataGroup"),
+            items: [
+              { name: tr("settings.quickAsk.data.name"), desc: tr("settings.quickAsk.data.desc"),
+                render: setting => renderQuickAskDataActions(host, setting) },
+              { name: tr("settings.quickAsk.storage.name"), desc: storage?.text ?? "" },
+            ],
+          },
+          {
+            type: "group", heading: tr("settings.quickAsk.preservedCopy.name"),
+            items: [
+              { name: tr("settings.quickAsk.preservedCopy.name"), desc: tr("settings.quickAsk.preservedCopy.desc"),
+                control: { type: "toggle", key: "quickAsk.preservedCopy.enabled" } },
+              { name: tr("settings.quickAsk.preservedCopy.directory.name"), desc: tr("settings.quickAsk.preservedCopy.directory.desc"),
+                control: { type: "text", key: "quickAsk.preservedCopy.directory" } },
+              { name: tr("settings.quickAsk.preservedCopy.status.name"), desc: quickAskPreservedStatusDescription(host) },
+            ],
+          },
+          {
+            type: "group", heading: tr("settings.quickAsk.imageCacheGroup"),
+            items: [{ name: tr("images.keepCache"), desc: tr("images.keepCacheHelp"),
+              control: { type: "toggle", key: "quickAsk.keepCachedImages" } }],
+          },
+        ],
       },
     ],
   };
 }
-
 
 module.exports = { quickAskPage, searchSettingsPage };

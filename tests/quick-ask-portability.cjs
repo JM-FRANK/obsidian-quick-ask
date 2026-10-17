@@ -193,3 +193,64 @@ test('image history export and preserved copies retain paths without bundling im
   assert.deepEqual(parsed.export.sessions[0].records[0].payload.images, records[0].payload.images);
   assert.equal(Object.hasOwn(exported, 'attachments'), false);
 });
+
+test('preserved copies append only the missing suffix, repair drift and retry partial failures', async () => {
+  const vault = makeVault();
+  const appends = [];
+  let fail = false;
+  vault.appendText = async (path, text) => {
+    appends.push(text);
+    if (fail) { vault.written.set(path, vault.written.get(path) + text.slice(0, 8)); throw new Error('partial append'); }
+    vault.written.set(path, vault.written.get(path) + text);
+  };
+  const settings = makeSettings();
+  const makeCopy = () => createPreservedCopy({ vault, getSettings: () => settings });
+  let copy = makeCopy();
+  const header = { kind: 'header', sessionId: 's1', config: { secretValue: 'never-copy' } };
+  const records = [];
+  const snapshot = () => ({ id: 's1', header, records: [...records] });
+  await copy.syncSession(snapshot());
+  const path = `${copy.backupPaths().sessions}/s1.jsonl`;
+  for (let i = 0; i < 10; i++) {
+    records.push({ seq: i, kind: 'item/output', payload: { text: '正文' + i } });
+    await copy.syncSession(snapshot());
+  }
+  assert.equal(vault.writes.length, 1, 'one initial full write');
+  assert.equal(appends.length, 10);
+  assert.equal(vault.written.get(path), serializeLog(header, records));
+  assert.equal(vault.written.get(path).includes('never-copy'), false);
+  copy = makeCopy();
+  await copy.syncSession(snapshot());
+  assert.equal(vault.writes.length, 1, 'reload and no-op do not rewrite');
+  for (const edited of ['corrupt\n', vault.written.get(path).slice(0, -5), vault.written.get(path) + 'extra\n']) {
+    vault.written.set(path, edited);
+    await copy.syncSession(snapshot());
+    assert.equal(vault.written.get(path), serializeLog(header, records));
+  }
+  records.push({ seq: 10, kind: 'turn/finished', payload: {} });
+  fail = true;
+  assert.equal((await copy.syncSession(snapshot())).status, 'failed');
+  fail = false;
+  assert.equal((await copy.syncSession(snapshot())).status, 'synced');
+  assert.equal(vault.written.get(path), serializeLog(header, records));
+  assert.equal(copy.status().lastError, null);
+  settings.preservedCopy.directory = 'other';
+  await copy.syncSession(snapshot());
+  assert.equal(vault.written.get(`${copy.backupPaths().sessions}/s1.jsonl`), serializeLog(header, records));
+});
+
+test('concurrent preserved-copy snapshots cannot interleave suffixes or overwrite a later index', async () => {
+  const vault = makeVault();
+  vault.appendText = async (path, text) => {
+    const old = vault.written.get(path);
+    await new Promise(resolve => setImmediate(resolve));
+    vault.written.set(path, old + text);
+  };
+  const copy = createPreservedCopy({ vault, getSettings: () => makeSettings() });
+  const header = { kind: 'header', sessionId: 's1', config: {} };
+  const records = [0, 1, 2].map(seq => ({ seq, kind: 'item/output', payload: {} }));
+  await copy.syncSession({ id: 's1', header, records: [] });
+  await Promise.all(records.map((r, i) => copy.syncSession({ id: 's1', header, records: records.slice(0, i + 1), index: { activeSessionId: `s${i}`, sessions: [] } })));
+  assert.equal(vault.written.get(`${copy.backupPaths().sessions}/s1.jsonl`), serializeLog(header, records));
+  assert.equal(JSON.parse(vault.written.get(copy.backupPaths().index)).activeSessionId, 's2');
+});

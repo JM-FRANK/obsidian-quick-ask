@@ -811,3 +811,8 @@
   font-size: 24px; line-height: 1; cursor: pointer;
 }
 .scholar-quick-ask-image-viewer-close:hover { background: rgba(255, 255, 255, .12); }
+
+.scholar-quick-ask-search-suggestions {
+  display: block; width: 100%; height: 112px; border: 0; margin-top: 8px;
+  background: transparent;
+}

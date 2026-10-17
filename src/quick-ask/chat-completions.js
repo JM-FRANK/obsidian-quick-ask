@@ -2,11 +2,30 @@
 // this module only builds native messages and folds protocol payloads.
 function userMessage(content) { return { role: "user", content }; }
 function assistantMessage(content) { return { role: "assistant", content }; }
-function buildRequestBody({ model, instructions, input = [], tools = [], toolChoice = "auto", parallelToolCalls = true, maxOutputTokens, reasoningEffort } = {}) {
-  const body = { model, messages: [{ role: "system", content: instructions ?? "" }, ...input] };
+function buildRequestBody({ model, instructions, input = [], tools = [], toolChoice = "auto", parallelToolCalls = true, maxOutputTokens, reasoningEffort, serverSearch } = {}) {
+  const messages = serverSearch?.native ? input : input.map(item => {
+    if (!item?.extra_content?.google?.nativeContent) return item;
+    // Native search metadata belongs to our preserved response. Standard Chat
+    // requests replay its text, without sending app-owned native wrapper fields.
+    const { extra_content, ...message } = item;
+    const { nativeContent, groundingMetadata, finishReason, safetyRatings, finishMessage, ...google } = extra_content.google;
+    const remaining = { ...extra_content };
+    if (Object.keys(google).length) remaining.google = google;
+    else delete remaining.google;
+    if (Object.keys(remaining).length) message.extra_content = remaining;
+    return message;
+  });
+  const body = { model, messages: [{ role: "system", content: instructions ?? "" }, ...messages] };
   if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort;
   if (tools.length) Object.assign(body, { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls });
   if (Number.isInteger(maxOutputTokens) && maxOutputTokens > 0) body.max_completion_tokens = maxOutputTokens;
+  if (serverSearch?.chatSearch === 'google-search') {
+    // CPA's AGY Chat translator recognizes the native-shaped google_search
+    // tool. Never mix it with function tools or send Responses tool_choice.
+    body.tools = [{ google_search: {} }];
+    delete body.tool_choice;
+    delete body.parallel_tool_calls;
+  } else if (serverSearch?.provider === "google") body.web_search_options = {};
   return body;
 }
 function functionTool(tool) {
@@ -35,6 +54,21 @@ function usage(state, value, emit) {
   state.usageSamples.push(sample);
   emit({ type: "usage", ...sample });
 }
+function searchMetadata(state, message, emit) {
+  if (Array.isArray(message.annotations)) {
+    state.chatAnnotations ??= [];
+    state.chatAnnotations.push(...message.annotations);
+    if (message.annotations.some(annotation => annotation?.type === "url_citation")) emit({ type: "search-progress" });
+  }
+  // Keep opaque provider extensions without guessing a vendor-specific schema.
+  if (message.extra_content && typeof message.extra_content === "object" && !Array.isArray(message.extra_content)) {
+    state.chatExtraContent = { ...state.chatExtraContent, ...message.extra_content };
+  }
+}
+function metadataFields(state) {
+  return { ...(state.chatAnnotations ? { annotations: state.chatAnnotations } : {}),
+    ...(state.chatExtraContent ? { extra_content: state.chatExtraContent } : {}) };
+}
 function complete(state, emit) {
   if (!state.chatFinish) protocolError("Chat Completions stream ended without a finish_reason");
   const calls = state.callOrder;
@@ -49,6 +83,7 @@ function complete(state, emit) {
   }
   const message = state.chatMessage ?? assistantMessage(state.chatContent || (calls.length || state.chatRefusal ? null : ""));
   if (!state.chatMessage) Object.assign(message, state.chatReasoning ?? {});
+  if (!state.chatMessage) Object.assign(message, metadataFields(state));
   if (!state.chatMessage && state.chatRefusal) message.refusal = state.chatRefusal;
   if (!state.chatMessage && calls.length) message.tool_calls = calls.map(call => ({
     id: call.callId, type: "function", function: { name: call.name, arguments: call.arguments },
@@ -72,6 +107,7 @@ function handleFrame(frame, state, emit) {
   if (!choice.delta || typeof choice.delta !== "object") protocolError("Missing Chat Completions delta");
   accept(state, payload, emit);
   const delta = choice.delta;
+  searchMetadata(state, delta, emit);
   for (const key of ["reasoning_content", "reasoning"]) {
     if (typeof delta[key] !== "string" || !delta[key]) continue;
     state.chatReasoning ??= {};
@@ -113,6 +149,7 @@ function fromResponse(payload, state, emit) {
   state.accepted = true;
   accept(state, payload, emit);
   state.chatMessage = choice.message;
+  searchMetadata(state, choice.message, emit);
   state.reasoning = readableReasoning(choice.message);
   if (state.reasoning) emit({ type: "reasoning-text-delta", delta: state.reasoning });
   state.text = (typeof choice.message.content === "string" ? choice.message.content : "") + (choice.message.refusal ?? "");
@@ -131,6 +168,7 @@ function readableReasoning(message) {
 function partialOutput(state) {
   if (!state.chatCreated) return null;
   return [{ ...assistantMessage(state.chatContent ?? ""), ...state.chatReasoning,
+    ...metadataFields(state),
     ...(state.chatRefusal ? { refusal: state.chatRefusal } : {}) }];
 }
 // The Chat Completions wire adapter: everything the shared transport shell

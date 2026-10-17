@@ -23,3 +23,11 @@ test('a stopped response already present as canonical output is not duplicated',
   ]);
   assert.equal(messages.length, 1);
 });
+
+test('batched inputs keep Context hidden and attach image paths only to the question', () => {
+  const message = text => ({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
+  assert.deepEqual(conversationFromRecords([
+    { kind: 'item/input', payload: { items: [message('<quick_ask_context>context</quick_ask_context>'), message('')], images: ['a.png'] } },
+    { kind: 'item/input', payload: { item: message('Legacy question') } },
+  ]), [{ role: 'user', text: '', images: ['a.png'] }, { role: 'user', text: 'Legacy question' }]);
+});

@@ -10,6 +10,15 @@ const scheduler = { now: Date.now, delay: (ms, fn) => setTimeout(fn, ms), cancel
 const frame = value => `data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`;
 const chunk = (delta, finish_reason = null) => ({ id: 'cc1', choices: [{ index: 0, delta, finish_reason }] });
 
+test('Google server search adds only the documented empty web_search_options field', () => {
+  const { buildRequestBody } = require('../src/quick-ask/chat-completions');
+  const options = { model: 'google/gemini-3-flash-preview', instructions: 'system', input: [{ role: 'user', content: 'q' }], reasoningEffort: 'low', maxOutputTokens: 200 };
+  const ordinary = buildRequestBody(options);
+  assert.equal(JSON.stringify(ordinary), '{"model":"google/gemini-3-flash-preview","messages":[{"role":"system","content":"system"},{"role":"user","content":"q"}],"reasoning_effort":"low","max_completion_tokens":200}');
+  assert.deepEqual(buildRequestBody({ ...options, serverSearch: { provider: 'google' } }), { ...ordinary, web_search_options: {} });
+  assert.deepEqual(buildRequestBody({ ...options, serverSearch: { provider: 'unrelated' } }), ordinary);
+});
+
 test('explicit Chat Completions streams native messages and terminal usage through the shared transport', async () => {
   const requests = [], events = [];
   const result = await streamAttempt({ protocol: CHAT, baseUrl: 'https://example.test/v1',
@@ -72,6 +81,30 @@ async function attemptFrames(frames, extra = {}) {
   });
   return { result, requests };
 }
+
+const citationFixture = { type: 'url_citation', url_citation: { start_index: 0, end_index: 6, url: 'https://example.test/source', title: 'Source' } };
+test('streaming Chat citations and opaque extra_content survive completion and partial failure', async () => {
+  for (const finish of [true, false]) {
+    const events = [];
+    const frames = [chunk({ content: 'Answer', annotations: [citationFixture], extra_content: { google: { opaque: 'preserve' } } })];
+    if (finish) frames.push(chunk({}, 'stop'), '[DONE]');
+    const { result } = await attemptFrames(frames, { onEvent: event => events.push(event) });
+    assert.equal(result.status, finish ? 'completed' : 'failed');
+    assert.deepEqual(result.output[0], { role: 'assistant', content: 'Answer', annotations: [citationFixture], extra_content: { google: { opaque: 'preserve' } } });
+    assert.equal(events.filter(event => event.type === 'search-progress').length, 1);
+  }
+});
+
+test('nonstreaming Chat preserves native annotated message and reports search progress', async () => {
+  const message = { role: 'assistant', content: 'Answer', annotations: [citationFixture], extra_content: { google: { opaque: 'preserve' } } };
+  const events = [];
+  const { result } = await attemptFrames([], { nonStreaming: true, onEvent: event => events.push(event), network: { request: async () => ({ status: 200, json: {
+    id: 'cc', choices: [{ index: 0, message, finish_reason: 'stop' }],
+  } }) } });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.output, [message]);
+  assert.equal(events.filter(event => event.type === 'search-progress').length, 1);
+});
 
 test('fragmented tool arguments are reconstructed once in native Chat Completions output', async () => {
   const { result } = await attemptFrames([
@@ -207,4 +240,11 @@ test('CC rejection or cancellation before the first frame has no fabricated part
     });
     assert.equal(result.output, null, mode);
   }
+});
+
+test('CPA CC search emits only google_search with no mixed functions or unrelated search options',()=>{
+ const {buildRequestBody}=require('../src/quick-ask/chat-completions');
+ const body=buildRequestBody({model:'gemini-3-flash',instructions:'system',input:[{role:'user',content:'Question'}],tools:[{type:'function',function:{name:'get-full-file'}}],serverSearch:{provider:'google',chatSearch:'google-search'}});
+ assert.deepEqual(body.tools,[{google_search:{}}]);assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,undefined);assert.equal(body.parallel_tool_calls,undefined);
+ assert.equal(body.messages.at(-1).content,'Question');
 });

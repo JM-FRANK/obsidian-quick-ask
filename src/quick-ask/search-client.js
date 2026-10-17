@@ -28,14 +28,21 @@ function parseDuckDuckGo(html) {
   if (!sources.length && !/no results|result--no-result/i.test(html)) throw new Error('PARSE');
   return sources;
 }
-function requestFor(provider, query, key) {
+function requestFor(provider, query, key, route = {}) {
   const headers = { 'Content-Type': 'application/json' };
+  let url = ENDPOINTS[provider];
   let body;
   if (provider === 'firecrawl') { headers.Authorization = `Bearer ${key}`; body = { query, limit: LIMIT, sources: ['web'] }; }
   if (provider === 'exa') { headers['x-api-key'] = key; body = { query, numResults: LIMIT, contents: { highlights: { maxCharacters: 2000 } } }; }
   if (provider === 'parallel') { headers['x-api-key'] = key; body = { objective: query, search_queries: [query], advanced_settings: { max_results: LIMIT, excerpt_settings: { max_chars_per_result: 2000 } } }; }
   if (provider === 'perplexity') { headers.Authorization = `Bearer ${key}`; body = { query, max_results: LIMIT, max_tokens_per_page: 512 }; }
-  return { url: ENDPOINTS[provider], method: 'POST', headers, body: JSON.stringify(body) };
+  if (provider === 'deepseek') {
+    const base = String(route.baseUrl ?? '').replace(/\/+$/, '');
+    url = base + (base.endsWith('/v1') ? '/tools/search' : '/v1/tools/search');
+    headers.Authorization = `Bearer ${key}`;
+    body = { query, count: LIMIT, need_content: false };
+  }
+  return { url, method: 'POST', headers, body: JSON.stringify(body) };
 }
 function createSearchClient({ network, secrets, scheduler }) {
   async function request(options, signal) {
@@ -55,14 +62,18 @@ function createSearchClient({ network, secrets, scheduler }) {
   }
   async function search(query, route, { signal, config, onRoute = () => {} } = {}) {
     if (route?.kind === 'off' || route?.kind === 'server') return { ok: false, code: 'DISABLED', sources: [] };
-    if (typeof query !== 'string' || !query.trim() || query.length > 500) return { ok: false, code: 'QUERY', sources: [] };
+    const deepseek = route?.provider === 'deepseek';
+    if (deepseek) {
+      if (typeof query !== 'string' || !query.trim() || [...query.trim()].length > 128)
+        return { ok: false, code: 'QUERY', message: 'DeepSeek Search requires a non-empty query of at most 128 Unicode characters. Retry with a shorter query.', sources: [] };
+    } else if (typeof query !== 'string' || !query.trim() || query.length > 500) return { ok: false, code: 'QUERY', sources: [] };
     query = query.trim();
     try {
       let response;
-      if (route.kind === 'independent') {
+      if (route.kind === 'independent' || route.kind === 'provider-api') {
         const key = secrets.resolve(route.secretId);
-        if (!key) return { ok: false, code: 'MISSING_SECRET', sources: [] };
-        response = await request(requestFor(route.provider, query, key), signal);
+        if (!key || (deepseek && !key.trim())) return { ok: false, code: 'MISSING_SECRET', sources: [] };
+        response = await request(requestFor(route.provider, query, key, route), signal);
       } else response = await request({ url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, method: 'GET' }, signal);
       const status = response.status;
       if (!(status >= 200 && status < 300)) {
@@ -74,7 +85,7 @@ function createSearchClient({ network, secrets, scheduler }) {
         const data = response.json && typeof response.json === 'object' ? response.json : JSON.parse(response.text);
         const rows = route.provider === 'firecrawl' ? data.data?.web : data.results;
         if (data.success === false || !Array.isArray(rows)) throw new Error('PARSE');
-        sources = normalizeSources(rows, LIMIT);
+        sources = normalizeSources(deepseek ? rows.map(row => ({ ...row, snippet: row?.summary || row?.snippet })) : rows, LIMIT);
         if (rows.length && !sources.length) throw new Error('PARSE');
       }
       onRoute(route);

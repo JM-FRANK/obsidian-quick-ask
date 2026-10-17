@@ -16,10 +16,14 @@ function conversationFromRecords(records) {
     const payload = record.payload ?? {};
     if (record.kind === "turn/started") { assistant = null; nativeReasoning = ""; }
     if (record.kind === "item/output") nativeReasoning += messageReasoning(payload.item);
-    if (record.kind === "item/input" && isMessage(payload.item)) {
-      const text = messageText(payload.item);
-      const question = questionFromInput(text);
-      if (question !== null || payload.images?.length) messages.push({ role: "user", text: question ?? "", ...(payload.images?.length ? { images: payload.images } : {}) });
+    if (record.kind === "item/input") {
+      const items = payload.items ?? (payload.item ? [payload.item] : []);
+      for (const [position, item] of items.entries()) {
+        if (!isMessage(item)) continue;
+        const question = questionFromInput(messageText(item));
+        const images = position === items.length - 1 ? payload.images : null;
+        if (question !== null || images?.length) messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}) });
+      }
     }
     if (record.kind === "item/output" && payload.tool !== true && isMessage(payload.item)) {
       const text = messageText(payload.item);
@@ -33,6 +37,7 @@ function conversationFromRecords(records) {
       if (assistant && payload.displayText && payload.displayText !== assistant.text) assistant.displayText = payload.displayText;
       if (assistant && (payload.reasoning || nativeReasoning)) assistant.reasoning = payload.reasoning || nativeReasoning;
       if (assistant && payload.sources?.length) assistant.sources = payload.sources;
+      if (assistant && payload.searchSuggestions?.length) assistant.searchSuggestions = payload.searchSuggestions;
       if (assistant && payload.searchStatuses?.length) assistant.searchStatuses = payload.searchStatuses;
       if (payload.state === "interrupted") messages.push({ kind: "interrupted", text: payload.error?.message ?? "" });
     }

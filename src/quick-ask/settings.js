@@ -1,6 +1,7 @@
 const { normalizeProfiles, applyProfileAction } = require("./profiles");
 const { normalizeSearchSettings } = require("./web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("./i18n");
+const { DEFAULT_CONTEXT_WINDOW_TOKENS, CONNECTION_FIELDS, normalizeProviderProfiles, providerValues, providerPatch } = require('./provider-profiles');
 const DISPLAY_FIELDS = {
   fontSize: { default: 14, min: 12, max: 24, step: 1 },
   lineHeight: { default: 1.5, min: 1.2, max: 2, step: 0.1 },
@@ -60,7 +61,6 @@ function quickAskDisplayPage(settings) {
 // The fixed answer reserve, in tokens. It follows pi-agent's reserveTokens
 // default and is deliberately not a setting.
 const ANSWER_RESERVE_TOKENS = 16384;
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
 const DEFAULT_CALL_LIMIT = 3;
 const MIN_CALL_LIMIT = 1;
 const MAX_CALL_LIMIT = 10;
@@ -87,6 +87,7 @@ function defaultQuickAskSettings() {
     contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     callLimit: DEFAULT_CALL_LIMIT,
     preservedCopy: { enabled: false, directory: DEFAULT_PRESERVED_COPY_DIRECTORY },
+    ...providerValues(normalizeProviderProfiles()),
   };
 }
 
@@ -133,7 +134,11 @@ function normalizeQuickAskSettings(saved) {
         : defaults.preservedCopy.directory,
     },
   };
-  return values;
+  const catalog = normalizeProviderProfiles(saved, values);
+  // Preserve explicit legacy-field edits from older clients/imports. Catalog
+  // actions always publish these compatibility fields atomically.
+  const legacyPatch = Object.fromEntries(CONNECTION_FIELDS.filter(key => Object.hasOwn(saved, key)).map(key => [key, values[key]]));
+  return { ...values, ...providerPatch({ ...values, ...catalog }, legacyPatch) };
 }
 
 // Deliberately dependency-free: the plugin bundle runs in a host context that
@@ -208,6 +213,7 @@ function redactQuickAskSettings(settings) {
     // usable after an import, and a reference is not a credential. The value it
     // names is what never leaves SecretStorage.
     secretId: values.secretId,
+    ...normalizeProviderProfiles(values),
   };
 }
 
@@ -239,7 +245,8 @@ function applyQuickAskPatch(target, patch) {
   const search = { ...target.webSearch, ...patch.webSearch, secretIds: { ...target.webSearch?.secretIds, ...patch.webSearch?.secretIds } };
   if (Object.hasOwn(patch.webSearch ?? {}, "secretId")) search.secretIds[search.provider] = patch.webSearch.secretId;
   if (Object.hasOwn(patch.webSearch ?? {}, "provider") && patch.webSearch.provider !== target.webSearch?.provider) search.secretId = search.secretIds[patch.webSearch.provider] ?? "";
-  const normalized = normalizeQuickAskSettings({ ...target, ...patch, webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
+  const normalized = normalizeQuickAskSettings({ ...target, ...patch, providerProfiles: undefined, activeProviderProfileId: undefined,
+    webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
   let applied = 0;
   if (patch.profileAction) {
     Object.assign(target, applyProfileAction(target, patch.profileAction, { language: patch.profileAction.language }));
@@ -284,6 +291,9 @@ function applyQuickAskPatch(target, patch) {
       }
     }
   }
+  const providers = providerPatch(target, patch);
+  if (JSON.stringify(target.providerProfiles) !== JSON.stringify(providers.providerProfiles) || target.activeProviderProfileId !== providers.activeProviderProfileId || patch.providerAction || Object.hasOwn(patch, 'providerProfiles')) applied++;
+  Object.assign(target, providers);
   return applied;
 }
 

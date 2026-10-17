@@ -14,6 +14,7 @@ const { createQuickAskDragExtension, createCaptureHolder } = require("./drag-sou
 const { derivePendingView } = require("./pending-context");
 const { t } = require("./i18n");
 const { createSessionActionQueue } = require("./session-navigation");
+const { createProviderManager } = require('./model-discovery');
 
 // The one Quick Ask integration entry point. Scholar Workbench calls it with
 // the host plugin, and it registers the view, commands, composer dependencies,
@@ -61,6 +62,12 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     notice: key => environment.ui.notice(t(settings(), key)),
   });
   plugin.register(() => profiles.dispose());
+  const providers = createProviderManager({ getSettings: settings,
+    write: patch => plugin.settings.update({ quickAsk: patch }, { propagate: true }),
+    network: environment.network, secrets: environment.secrets, scheduler: environment.scheduler,
+    notice: key => environment.ui.notice(t(settings(), key)),
+  });
+  plugin.register(() => providers.dispose());
   // The preserved copy mirrors affected files after each durable local commit;
   // a failure is reported in settings and never rolls back the live session.
   const preservedCopy = createPreservedCopy({
@@ -72,11 +79,11 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     pluginData: environment.pluginData,
     scheduler: environment.scheduler,
     onError: (error) => console.error("Scholar Workbench: Quick Ask session write failed", error),
-    onCommitted: async (sessionId) => {
+    onCommitted: async (sessionId, store, { indexChanged = true } = {}) => {
       if (!preservedCopy.isEnabled()) return;
       const parsed = await sessionStore.readLog(sessionId);
       if (!parsed?.header) return;
-      const index = await sessionStore.loadIndex();
+      const index = indexChanged ? await sessionStore.loadIndex() : undefined;
       await preservedCopy.syncSession({ id: sessionId, header: parsed.header, records: parsed.records, index });
     },
   });
@@ -292,6 +299,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
 
   const integration = {
     profiles,
+    providers,
     environment,
     sessionStore,
     conversation,

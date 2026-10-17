@@ -632,7 +632,7 @@ test('server sources are preserved and progress reaches a terminal state',async(
 
 
 test('invalid selected server search blocks before requests and preserves one-shot permission',async()=>{
- const f=makeConversation({settings:{baseUrl:'https://unknown.test/v1',webSearch:{provider:'server'}}});
+ const f=makeConversation({settings:{baseUrl:'https://unknown.test/v1',model:'unrecognized-model',webSearch:{provider:'server'}}});
  const id=await newSession(f.sessionStore,f.conversation,f.settings);
  await f.conversation.setSearchEnabled(id,true);
  const result=await f.conversation.send(id,'question');
@@ -814,7 +814,7 @@ test('reported Chat Completions usage survives disconnection before DONE and ses
   }) });
   const id = await newSession(sessionStore, conversation, settings);
   assert.equal((await conversation.send(id, 'Question')).status, 'failed');
-  assert.equal(sessionStore.records.get(id).find(r => r.kind === 'turn/usage')?.payload.usage.total_tokens, 10);
+  assert.equal(sessionStore.records.get(id).find(r => r.kind === 'turn/finished')?.payload.usageSamples.at(-1).usage.total_tokens, 10);
   conversation.forget(id); await conversation.load(id);
   assert.equal(conversation.snapshot(id).sessionUsage, 10);
 });
@@ -831,7 +831,7 @@ test('reported Chat Completions usage is kept when the user cancels after the us
   const id = await newSession(sessionStore, conversation, settings);
   assert.equal((await conversation.send(id, 'Question', { signal: controller.signal })).status, 'stopped');
   assert.equal(conversation.snapshot(id).turnUsage.total, 10);
-  assert.equal(sessionStore.records.get(id).find(r => r.kind === 'turn/usage')?.payload.usage.total_tokens, 10);
+  assert.equal(sessionStore.records.get(id).find(r => r.kind === 'turn/finished')?.payload.usageSamples.at(-1).usage.total_tokens, 10);
 });
 
 test('draft search toggles write nothing until valid send, then restore the committed post-send state', async () => {
@@ -1077,3 +1077,270 @@ for (const protocol of ['responses', 'chat-completions']) {
     assert.equal(JSON.stringify(f.sessionStore.records.get(id)).includes('data:image'), false);
   });
 }
+
+test('one input record and terminal usage preserve requests, history and totals after reload for both protocols', async () => {
+  for (const protocol of ['responses', 'chat-completions']) {
+    const f = makeConversation({ settings: { protocol }, script: protocol === 'chat-completions' ? () => chatResponse() : () => sseResponse(streamedTurn()) });
+    const id = await newSession(f.sessionStore, f.conversation, f.settings);
+    await f.conversation.send(id, 'Question', { additions: [{ kind: 'file', path: 'paper.md', text: 'CONTEXT_SENTINEL' }] });
+    const records = f.sessionStore.records.get(id);
+    const inputs = records.filter(r => r.kind === 'item/input');
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].payload.items.length, 2);
+    assert.equal(records.some(r => r.kind === 'turn/usage'), false);
+    assert.ok(records.at(-1).payload.usageSamples.length > 0);
+    const before = f.conversation.snapshot(id);
+    f.conversation.forget(id); await f.conversation.load(id);
+    const after = f.conversation.snapshot(id);
+    assert.deepEqual(after.turnUsage, before.turnUsage);
+    assert.equal(after.sessionUsage, before.sessionUsage);
+    await f.conversation.send(id, 'Follow up', { additions: [] });
+    const body = JSON.parse(f.network.requests.at(-1).options.body);
+    const serialized = JSON.stringify(body.messages ?? body.input);
+    assert.equal(serialized.split('CONTEXT_SENTINEL').length - 1, 1);
+    assert.ok(serialized.includes('Question'));
+    assert.ok(serialized.includes('Follow up'));
+  }
+});
+
+test('legacy usage records and terminal sample arrays can coexist without double counting', async () => {
+  const f = makeConversation();
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  const sample = { source: 'terminal', attemptId: 'attempt-1', usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } };
+  await f.sessionStore.append(id, 'turn/started', { turnId: 'old', question: 'Old' });
+  await f.sessionStore.append(id, 'turn/usage', sample);
+  await f.sessionStore.append(id, 'turn/finished', { turnId: 'old', state: 'complete' });
+  await f.sessionStore.append(id, 'turn/started', { turnId: 'mixed', question: 'Mixed' });
+  await f.sessionStore.append(id, 'turn/usage', sample);
+  await f.sessionStore.append(id, 'turn/finished', { turnId: 'mixed', state: 'complete', usageSamples: [sample], occupancyAnchor: null });
+  f.conversation.forget(id); await f.conversation.load(id);
+  assert.equal(f.conversation.snapshot(id).sessionUsage, 24);
+  assert.equal(f.conversation.snapshot(id).turnUsage.total, 12);
+});
+
+test('tool-attempt usage is retained once in the terminal record and replays with the final attempt anchor', async () => {
+  const f = makeConversation({ settings: { protocol: 'chat-completions' }, script: [
+    () => chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'a', type: 'function', function: { name: 'get-full-file', arguments: '{"path":"a.md"}' } }] }),
+    () => chatResponse(),
+  ] });
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  assert.equal((await f.conversation.send(id, 'Read')).status, 'complete');
+  assert.equal(f.network.requests.length, 2);
+  const records = f.sessionStore.records.get(id);
+  assert.equal(records.some(r => r.kind === 'turn/usage'), false);
+  assert.equal(new Set(records.at(-1).payload.usageSamples.map(s => s.attemptId)).size, 2);
+  assert.equal(f.conversation.snapshot(id).sessionUsage, 50);
+  f.conversation.forget(id); await f.conversation.load(id);
+  assert.equal(f.conversation.snapshot(id).sessionUsage, 50);
+  assert.equal(f.conversation.snapshot(id).turnUsage.attempts, 2);
+});
+
+const GOOGLE_VERTEX_BASE = 'https://aiplatform.googleapis.com/v1/projects/qa-fixture/locations/global/endpoints/openapi';
+const SEARCH_CITATION = { type: 'url_citation', url_citation: { start_index: 5, end_index: 8, url: 'https://example.org/grounded', title: 'Grounded evidence' } };
+
+test('Vertex native search sends only documented search options and keeps citations across replay and off toggles', async () => {
+  const f = makeConversation({ settings: { protocol: 'chat-completions', baseUrl: GOOGLE_VERTEX_BASE, model: 'google/gemini-3-flash-preview', webSearch: { provider: 'server' } },
+    script: (_url, options) => chatResponse(JSON.parse(options.body).web_search_options ? { role: 'assistant', content: 'Fact [1]', annotations: [SEARCH_CITATION] } : { role: 'assistant', content: 'Offline follow up' }),
+  });
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  const result = await f.conversation.send(id, 'Ground this', { webSearch: true, additions: [{ kind: 'file', path: 'a.md', text: 'EXPLICIT_CONTEXT' }] });
+  assert.equal(result.status, 'complete');
+  const body = JSON.parse(f.network.requests[0].options.body);
+  assert.equal(f.network.requests[0].url, GOOGLE_VERTEX_BASE + '/chat/completions');
+  assert.deepEqual(body.web_search_options, {});
+  assert.equal(body.tools, undefined); assert.equal(body.tool_choice, undefined); assert.equal(body.parallel_tool_calls, undefined);
+  assert.ok(JSON.stringify(body.messages).includes('EXPLICIT_CONTEXT'));
+  assert.deepEqual(result.sources.map(s => s.url), ['https://example.org/grounded']);
+  assert.ok(result.displayText.includes('](https://example.org/grounded)'));
+  assert.equal(result.searchStatuses[0].provider, 'google');
+  const records = f.sessionStore.records.get(id);
+  assert.deepEqual(records.find(r => r.kind === 'item/output').payload.item.annotations, [SEARCH_CITATION]);
+  f.conversation.forget(id); await f.conversation.load(id);
+  const history = require('../src/quick-ask/conversation-messages').conversationFromRecords(records);
+  assert.equal(history.find(m => m.role === 'assistant').displayText, result.displayText);
+  assert.deepEqual(history.find(m => m.role === 'assistant').sources, result.sources);
+  await f.conversation.send(id, 'No new search', { webSearch: false, additions: [] });
+  const followup = JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(followup.web_search_options, undefined);
+  assert.ok(followup.tools.every(tool => tool.function.name !== 'web_search'));
+  assert.deepEqual(followup.messages.find(m => m.annotations)?.annotations, [SEARCH_CITATION]);
+});
+
+test('Vertex server-search model cannot execute an unadvertised local function call', async () => {
+  const f = makeConversation({ settings: { protocol: 'chat-completions', baseUrl: GOOGLE_VERTEX_BASE, model: 'google/gemini-3.1-pro-preview', webSearch: { provider: 'server' } },
+    script: () => chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'unexpected', type: 'function', function: { name: 'get-full-file', arguments: '{"path":"a.md"}' } }] }),
+  });
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  const result = await f.conversation.send(id, 'Question', { webSearch: true });
+  assert.equal(result.status, 'failed'); assert.equal(result.error.code, 'TOOLS_UNSUPPORTED');
+  assert.equal(f.network.requests.length, 1);
+  const records = f.sessionStore.records.get(id);
+  assert.ok(records.filter(r => r.kind === 'item/output').some(r => r.payload.item.tool_call_id === 'unexpected' && /not executed/.test(r.payload.item.content)));
+});
+
+test('DeepSeek Flash uses independent Search with the model key through both conversation protocols', async () => {
+ for (const protocol of ['responses', 'chat-completions']) {
+  let modelCalls=0;
+  const f=makeConversation({settings:{protocol,baseUrl:'https://relay.example/deepseek/v1',model:'deepseek-flash',webSearch:{provider:'server'}},script:(url,options)=>{
+   if(url.endsWith('/tools/search'))return {status:200,json:{results:[{url:'https://example.org/search-result',title:'Evidence',summary:'Public web fact'}]}};
+   const first=modelCalls++===0;
+   if(protocol==='chat-completions')return chatResponse(first?{role:'assistant',content:null,tool_calls:[{index:0,id:'search-call',type:'function',function:{name:'web_search',arguments:'{"query":"public query"}'}}]}:{role:'assistant',content:'Answer'});
+   return sseResponse([
+    {type:'response.created',data:{response:{id:'deepseek-fixture'}}},
+    {type:'response.output_text.delta',data:{delta:first?'':'Answer'}},
+    {type:'response.completed',data:{response:{id:'deepseek-fixture',output:first?[{type:'function_call',call_id:'search-call',name:'web_search',arguments:'{"query":"public query"}'}]:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Answer'}]}],usage:{input_tokens:10,output_tokens:2,total_tokens:12}}}},
+   ]);
+  }});
+  const id=await newSession(f.sessionStore,f.conversation,f.settings);
+  const result=await f.conversation.send(id,'Find public facts',{webSearch:true});
+  assert.equal(result.status,'complete');assert.deepEqual(result.sources.map(source=>source.url),['https://example.org/search-result']);
+  const search=f.network.requests.find(request=>request.url.endsWith('/tools/search'));
+  assert.equal(search.url,'https://relay.example/deepseek/v1/tools/search');
+  assert.equal(search.options.headers.Authorization,'Bearer sk-test');
+  assert.deepEqual(JSON.parse(search.options.body),{query:'public query',count:5,need_content:false});
+  const model=f.network.requests.filter(request=>!request.url.endsWith('/tools/search'));
+  assert.equal(model.length,2);
+  const body=JSON.parse(model[0].options.body);
+  const tool=body.tools.find(tool=>(tool.function?.name??tool.name)==='web_search');
+  assert.equal((tool.function??tool).parameters.properties.query.maxLength,128);
+  assert.equal(body.tools.some(tool=>tool.type==='web_search'),false);
+  await f.conversation.send(id,'No new search',{webSearch:false,additions:[]});
+  const off=JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(off.tools.some(tool=>(tool.function?.name??tool.name)==='web_search'),false);
+ }
+});
+
+test('unsupported server capabilities fail before accepting the draft or making any request', async () => {
+  for (const settings of [
+    { baseUrl: 'https://relay.example/v1', model: 'renamed-unknown-model' },
+    { baseUrl: 'https://relay.example/v1', model: 'gpt-5', protocol: 'chat-completions' },
+    { baseUrl: GOOGLE_VERTEX_BASE, model: 'unknown-family', protocol: 'responses' },
+  ]) {
+    const f = makeConversation({ settings: { ...settings, webSearch: { provider: 'server' } } });
+    const id = await newSession(f.sessionStore, f.conversation, f.settings);
+    const result = await f.conversation.send(id, 'Keep draft', { webSearch: true });
+    assert.equal(result.status, 'invalid'); assert.equal(result.errors.searchServer, true);
+    assert.equal(f.network.requests.length, 0); assert.equal(f.sessionStore.records.get(id).length, 0);
+  }
+});
+
+test('native server search authentication errors never switch endpoints or providers', async () => {
+  for (const config of [
+    { baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-pro' },
+    { baseUrl: GOOGLE_VERTEX_BASE, model: 'google/gemini-3-flash-preview', protocol: 'chat-completions' },
+  ]) {
+    const f = makeConversation({ settings: { ...config, webSearch: { provider: 'server' } }, script: () => ({ status: 401, ok: false, text: async () => JSON.stringify({ error: { message: 'Expired token', code: 'invalid_api_key' } }) }) });
+    const id = await newSession(f.sessionStore, f.conversation, f.settings);
+    const result = await f.conversation.send(id, 'Question', { webSearch: true });
+    assert.equal(result.status, 'failed'); assert.equal(result.error.code, 'AUTH');
+    assert.equal(f.network.requests.length, 1);
+    assert.ok(f.network.requests.every(request => request.url.startsWith(config.baseUrl)));
+  }
+});
+
+test('Google local summary generation never inherits the active native search permission', async () => {
+  const f = makeConversation({ settings: { protocol: 'chat-completions', baseUrl: GOOGLE_VERTEX_BASE, model: 'google/gemini-3-flash-preview', webSearch: { provider: 'server' } },
+    script: (_url, options) => chatResponse({ role: 'assistant', content: JSON.parse(options.body).web_search_options ? 'Answer' : '## Goal\nKeep the facts.' }),
+  });
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  await f.conversation.send(id, 'Old question '.repeat(600), { webSearch: true });
+  await f.conversation.send(id, 'Newest question', { webSearch: true });
+  const compacted = await f.conversation.compactNow(id);
+  assert.equal(compacted.status, 'committed');
+  assert.equal(f.network.requests.length, 3);
+  const summary = JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(summary.web_search_options, undefined);
+  assert.equal(summary.tool_choice, 'none');
+  assert.ok(summary.tools.every(tool => tool.function.name !== 'web_search'));
+});
+
+const GEMINI_STUDIO_BASE = 'https://relay.example/gemini/v1beta/openai';
+const GOOGLE_SUGGESTIONS = '<div>Google Search suggestions</div>';
+function nativeGeminiResponse() {
+ return {candidates:[{content:{role:'model',parts:[{text:'中文🌏事实',thoughtSignature:'native-signature'}]},finishReason:'STOP',groundingMetadata:{webSearchQueries:['公开信息'],groundingChunks:[{web:{uri:'https://example.org/google-evidence',title:'Google evidence'}}],groundingSupports:[{segment:{partIndex:0,startIndex:0,endIndex:10,text:'中文🌏'},groundingChunkIndices:[0]}],searchEntryPoint:{renderedContent:GOOGLE_SUGGESTIONS}}}],usageMetadata:{promptTokenCount:20,candidatesTokenCount:5,totalTokenCount:25}};
+}
+
+test('ordinary Gemini API keys use native search on relay URLs and preserve grounding through replay and off', async()=>{
+ for(const model of ['gemini-2.5-flash','gemini-2.5-pro','gemini-3.8-flash','google/gemini-4-argon']){
+  const f=makeConversation({settings:{protocol:'chat-completions',baseUrl:GEMINI_STUDIO_BASE,model,webSearch:{provider:'server'}},script:(url,options)=> url.endsWith(':generateContent')?{status:200,json:nativeGeminiResponse()}:chatResponse({role:'assistant',content:'No new search'})});
+  const id=await newSession(f.sessionStore,f.conversation,f.settings);
+  const result=await f.conversation.send(id,'Search',{webSearch:true,additions:[{kind:'file',path:'a.md',text:'EXPLICIT_NATIVE_CONTEXT'}]});
+  assert.equal(result.status,'complete');
+  assert.deepEqual(result.sources.map(s=>s.url),['https://example.org/google-evidence']);
+  assert.deepEqual(result.searchSuggestions,[GOOGLE_SUGGESTIONS]);
+  assert.equal(result.displayText,'中文🌏[1](https://example.org/google-evidence)事实');
+  const first=f.network.requests[0];
+  assert.equal(first.url,GEMINI_STUDIO_BASE.replace('/openai','')+'/models/'+model.replace('google/','')+':generateContent');
+  assert.equal(first.options.headers['x-goog-api-key'],'sk-test');assert.equal(first.options.headers.Authorization,undefined);
+  const body=JSON.parse(first.options.body);
+  assert.deepEqual(body.tools,[{google_search:{}}]);assert.equal(body.model,undefined);assert.equal(body.stream,undefined);
+  assert.ok(JSON.stringify(body.contents).includes('EXPLICIT_NATIVE_CONTEXT'));
+  const records=f.sessionStore.records.get(id);
+  f.conversation.forget(id);await f.conversation.load(id);
+  const history=require('../src/quick-ask/conversation-messages').conversationFromRecords(records);
+  assert.deepEqual(history.find(m=>m.role==='assistant').searchSuggestions,[GOOGLE_SUGGESTIONS]);
+  await f.conversation.send(id,'Search again',{webSearch:true,additions:[]});
+  assert.ok(JSON.stringify(JSON.parse(f.network.requests.at(-1).options.body).contents).includes('native-signature'));
+  await f.conversation.send(id,'Offline next',{webSearch:false,additions:[]});
+  const off=f.network.requests.at(-1);
+  assert.equal(off.url,GEMINI_STUDIO_BASE+'/chat/completions');
+  assert.equal(off.nonStreaming,undefined,'native nonstreaming does not disable later Chat streaming');
+  const chat=JSON.parse(off.options.body);
+  assert.equal(chat.web_search_options,undefined);assert.ok(chat.messages.some(m=>m.content==='中文🌏事实'));
+  assert.equal(chat.messages.some(m=>m.extra_content?.google?.nativeContent),false);
+ }
+});
+
+test('cancelling native Gemini search passes the abort signal and creates no followup requests',async()=>{
+ const f=makeConversation({settings:{protocol:'chat-completions',baseUrl:GEMINI_STUDIO_BASE,model:'gemini-2.5-flash',webSearch:{provider:'server'}},script:(_url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Object.assign(new Error('cancelled'),{name:'AbortError'})),{once:true}))});
+ const id=await newSession(f.sessionStore,f.conversation,f.settings);
+ const controller=new AbortController();
+ const pending=f.conversation.send(id,'Search',{webSearch:true,signal:controller.signal});
+ for(let i=0;i<50&&!f.network.requests.length;i++)await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.network.requests.length,1);controller.abort();
+ assert.equal((await pending).status,'stopped');assert.equal(f.network.requests.length,1);
+});
+
+test('CPA Gemini hosted search sends the proven Responses shape and replays opaque provider state without new search',async()=>{
+ // Shape taken from the successful CPA response; no local files or live carrier tokens.
+ const successful={id:'cpa-fixture',status:'completed',model:'gemini-3-flash',output:[
+  {id:'search',type:'web_search_call',status:'completed',action:{type:'search',query:'public fact',queries:['public fact'],sources:[{type:'url',url:'https://example.org/cpa-source'}]}},
+  {id:'carrier',type:'reasoning',encrypted_content:'cpa-gemini-responses-carrier-v1:fixture-only',summary:[]},
+  {id:'message',type:'message',status:'completed',role:'assistant',content:[{type:'output_text',text:'Fact [1]',annotations:[{type:'url_citation',url:'https://example.org/cpa-source',title:'Evidence',start_index:5,end_index:8}]}]},
+ ],usage:{input_tokens:10,output_tokens:2,total_tokens:12}};
+ const f=makeConversation({settings:{protocol:'responses',baseUrl:'http://127.0.0.1:8317/v1',model:'gemini-3-flash',webSearch:{provider:'server'}},script:(_url,options)=>{
+  const body=JSON.parse(options.body);
+  const response=body.tools.some(t=>t.type==='web_search')?successful:{id:'followup',status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Followup without search'}]}],usage:{input_tokens:5,output_tokens:2,total_tokens:7}};
+  return sseResponse([{type:'response.created',data:{response:{id:response.id}}},{type:'response.output_text.delta',data:{delta:response.output.filter(item=>item.type==='message').flatMap(item=>item.content??[]).map(part=>part.text??'').join('')}},{type:'response.completed',data:{response}}]);
+ }});
+ const id=await newSession(f.sessionStore,f.conversation,f.settings);
+ const result=await f.conversation.send(id,'Search public facts',{webSearch:true,additions:[{kind:'file',path:'fixture.md',text:'USER_CONTEXT_SENTINEL'}]});
+ assert.equal(result.status,'complete');assert.ok(result.text);assert.ok(result.sources.length);
+ const sent=f.network.requests[0];const body=JSON.parse(sent.options.body);
+ assert.equal(sent.url,'http://127.0.0.1:8317/v1/responses');assert.deepEqual(body.tools,[{type:'web_search'}]);assert.equal(body.tool_choice,'required');
+ assert.ok(JSON.stringify(body.input).includes('USER_CONTEXT_SENTINEL'));
+ const canonical=f.sessionStore.records.get(id).filter(r=>r.kind==='item/output').map(r=>r.payload.item);
+ assert.deepEqual(canonical,successful.output);
+ f.conversation.forget(id);await f.conversation.load(id);
+ await f.conversation.send(id,'Repeat that fact without searching',{webSearch:false,additions:[]});
+ const followup=JSON.parse(f.network.requests.at(-1).options.body);
+ assert.equal(followup.tools.some(t=>t.type==='web_search'),false);assert.equal(followup.tool_choice,'auto');
+ assert.ok(followup.input.some(item=>item.type==='reasoning'&&item.encrypted_content===successful.output.find(i=>i.type==='reasoning').encrypted_content));
+});
+
+test('CPA Gemini CC searches without changing protocol and does not fabricate structured search evidence',async()=>{
+ const f=makeConversation({settings:{protocol:'chat-completions',baseUrl:'http://127.0.0.1:8317/v1',model:'gemini-3-flash',webSearch:{provider:'server'}},script:()=>chatResponse({role:'assistant',content:'Answer with [source](https://example.org/)'} )});
+ const id=await newSession(f.sessionStore,f.conversation,f.settings);
+ const result=await f.conversation.send(id,'Question',{webSearch:true,additions:[{kind:'file',path:'a.md',text:'EXPLICIT_CPA_CC_CONTEXT'}]});
+ assert.equal(result.status,'complete');assert.equal(f.network.requests.length,1);
+ const request=f.network.requests[0],body=JSON.parse(request.options.body);
+ assert.equal(request.url,'http://127.0.0.1:8317/v1/chat/completions');assert.deepEqual(body.tools,[{google_search:{}}]);
+ assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,undefined);assert.equal(body.parallel_tool_calls,undefined);
+ assert.ok(JSON.stringify(body.messages).includes('EXPLICIT_CPA_CC_CONTEXT'));
+ assert.deepEqual(result.sources,[]);assert.deepEqual(result.searchStatuses,[]);
+ f.conversation.forget(id);await f.conversation.load(id);
+ await f.conversation.send(id,'No new search',{webSearch:false,additions:[]});
+ const off=JSON.parse(f.network.requests.at(-1).options.body);
+ assert.ok(off.tools.some(tool=>tool.function?.name==='get-full-file'));assert.equal(off.tools.some(tool=>tool.google_search),false);
+ assert.ok(off.messages.some(message=>message.content.includes('Answer with')));
+});

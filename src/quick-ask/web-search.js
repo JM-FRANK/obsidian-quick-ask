@@ -18,19 +18,39 @@ function normalizeSearchSettings(value = {}) {
   return { defaultEnabled: value?.defaultEnabled === true, provider, secretIds,
     secretId: secretIds[provider] ?? '' };
 }
+// Route by the selected wire protocol and model family, including relay URLs.
+// No paid capability probe or silent service fallback is performed.
 function serverSearch(config = {}) {
-  if (config.protocol && config.protocol !== "responses") return null;
   const base = String(config.baseUrl ?? '').replace(/\/+$/, '');
   const model = String(config.model ?? '');
-  if (base === 'https://api.openai.com/v1' && /^(gpt-(4\.1|4o|5)(?:[.-]|$)|gpt-6-astra(?:$|-)|o[34](?:-|$))/.test(model))
-    return { provider: 'openai', tool: responsesServerSearchTool('openai') };
-  if (base === 'https://api.x.ai/v1' && /^grok-4(?:[.-]|$)/.test(model))
-    return { provider: 'xai', tool: responsesServerSearchTool('xai') };
-  if (base === 'https://openrouter.ai/api/v1')
+  const protocol = config.protocol ?? 'responses';
+  if (!['responses', 'chat-completions'].includes(protocol)) return null;
+  if (protocol === 'responses' && base === 'https://openrouter.ai/api/v1')
     return { provider: 'openrouter', tool: responsesServerSearchTool('openrouter') };
-  const aliEndpoint = /^https:\/\/[a-z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com\/compatible-mode\/v1$/.test(base);
-  const aliModel = /^(qwen3\.[578](?!.*omni)|qwen3\.6-(?:plus|flash|35b-a3b)(?:-|$)|qwen3-max(?:$|-2026-01-23$)|deepseek-v4-(?:flash(?:-0731)?|pro(?:-0813)?)$|glm-5\.2$|kimi-k3$)/i.test(model);
-  if (aliEndpoint && aliModel) return { provider: 'bailian', tool: responsesServerSearchTool('bailian') };
+  if (protocol === 'responses' && /^(?:google\/)?gemini-/i.test(model)) {
+    // CPA/AGY exposes Google Search through the selected Responses protocol.
+    // Its hosted-search path must not be mixed with local function tools.
+    return { provider: 'google', localTools: false, tool: responsesServerSearchTool('openai'), toolChoice: 'required' };
+  }
+  if (/^(?:deepseek\/)?deepseek[-_]/i.test(model)) {
+    return { kind: 'provider-api', provider: 'deepseek', secretId: config.secretId ?? '', baseUrl: base, queryLimit: 128 };
+  }
+  if (protocol === 'chat-completions' && /^(?:google\/)?gemini-/i.test(model)) {
+    if (/\/endpoints\/openapi$/.test(base)) return { provider: 'google', localTools: false, native: false };
+    // Explicit Gemini API paths retain the native API-key adapter. Standard
+    // OpenAI-compatible bases (including CPA /v1) stay on Chat Completions.
+    const native = /\/v1(?:beta|alpha)(?:\/openai)?$/.test(base)
+      || /^https:\/\/generativelanguage\.googleapis\.com(?:\/|$)/.test(base);
+    return native ? { provider: 'google', localTools: false, native: true }
+      : { provider: 'google', localTools: false, chatSearch: 'google-search' };
+  }
+  if (protocol !== 'responses') return null;
+  if (/^(?:openai\/)?(gpt-(4\.1|4o|5)(?:[.-]|$)|gpt-6-astra(?:$|-)|o[34](?:-|$))/.test(model))
+    return { provider: 'openai', tool: responsesServerSearchTool('openai') };
+  if (/^(?:x-ai\/)?grok-4(?:[.-]|$)/.test(model))
+    return { provider: 'xai', tool: responsesServerSearchTool('xai') };
+  if (/^(qwen3\.[578](?!.*omni)|qwen3\.6-(?:plus|flash|35b-a3b)(?:-|$)|qwen3-max(?:$|-2026-01-23$)|glm-5\.2$|kimi-k3$)/i.test(model))
+    return { provider: 'bailian', tool: responsesServerSearchTool('bailian') };
   return null;
 }
 function searchRoute(enabled, settings = {}, config = {}) {
@@ -67,17 +87,78 @@ function normalizeSources(rows, limit = 20) {
   }
   return result;
 }
+function citationBlocks(item) {
+  return item?.role === 'assistant' && typeof item.content === 'string'
+    ? [{ text: item.content, annotations: item.annotations }]
+    : responsesMessageBlocks(item);
+}
 function responseSources(output) {
-  return normalizeSources(responsesCitationRows(output));
+  const chatRows = (output ?? []).flatMap(item => item?.role === 'assistant'
+    ? responsesCitationAnnotations({ annotations: item.annotations }) : []);
+  const googleRows = (output ?? []).flatMap(item => {
+    const chunks = item?.extra_content?.google?.groundingMetadata?.groundingChunks;
+    return Array.isArray(chunks) ? chunks.map(chunk => ({ url: chunk?.web?.uri, title: chunk?.web?.title })) : [];
+  });
+  return normalizeSources([...responsesCitationRows(output), ...chatRows, ...googleRows]);
+}
+function responseSuggestions(output) {
+  return [...new Set((output ?? []).flatMap(item => {
+    const html = item?.extra_content?.google?.groundingMetadata?.searchEntryPoint?.renderedContent;
+    return typeof html === 'string' && html.trim() ? [html] : [];
+  }))];
+}
+
+// Gemini segment offsets are UTF-8 bytes within a native Part, not JS string
+// indices. Validate both byte boundaries and the supplied segment text before
+// adding display-only links; raw model content always remains unchanged.
+function googleCitedAnswer(text, item) {
+  const metadata = item?.extra_content?.google?.groundingMetadata;
+  if (!metadata || item.content !== text) return null;
+  const parts = item.extra_content.google.nativeContent?.parts ?? [{ text }];
+  if (!Array.isArray(parts)) return text;
+  if (!Array.isArray(metadata.groundingSupports) || !Array.isArray(metadata.groundingChunks)) return text;
+  const insertions = new Map();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (const support of metadata.groundingSupports) {
+    const segment = support?.segment;
+    if (!segment || typeof segment !== 'object' || Array.isArray(segment)) continue;
+    const partIndex = segment.partIndex ?? 0;
+    const part = parts[partIndex];
+    if (!part || part.thought || typeof part.text !== 'string' || !Number.isInteger(partIndex)) continue;
+    const start = segment.startIndex ?? 0, end = segment.endIndex;
+    const bytes = new TextEncoder().encode(part.text);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > bytes.length) continue;
+    let matched, prefix;
+    try { matched = decoder.decode(bytes.slice(start, end)); prefix = decoder.decode(bytes.slice(0, end)); } catch { continue; }
+    if (typeof segment.text === 'string' && matched !== segment.text) continue;
+    const position = parts.slice(0, partIndex).reduce((size, previous) => size + (previous && !previous.thought && typeof previous.text === 'string' ? previous.text.length : 0), 0) + prefix.length;
+    if (position > text.length || !Array.isArray(support.groundingChunkIndices)) continue;
+    const links = insertions.get(position) ?? new Map();
+    for (const index of support.groundingChunkIndices) {
+      if (!Number.isInteger(index) || index < 0) continue;
+      const url = safeSourceUrl(metadata.groundingChunks[index]?.web?.uri);
+      if (url) links.set(url, `[${index + 1}](${url.replace(/[()<>]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase())})`);
+    }
+    insertions.set(position, links);
+  }
+  let result = text;
+  for (const [position, links] of [...insertions].sort((a, b) => b[0] - a[0])) {
+    result = result.slice(0, position) + [...links.values()].join(', ') + result.slice(position);
+  }
+  return result;
 }
 module.exports = { SEARCH_PROVIDERS, WEB_SEARCH_TOOL, normalizeSearchSettings, serverSearch, searchRoute,
-  nextSearchState, searchUnsupported, safeSourceUrl, normalizeSources, responseSources };
+  nextSearchState, searchUnsupported, safeSourceUrl, normalizeSources, responseSources, responseSuggestions };
 
 // Annotated citations become Markdown links only for display. Original answer
 // text and canonical provider items remain unchanged for copy/replay.
 function citedAnswer(text, output = []) {
   let result = String(text ?? '');
-  for (const item of output) for (const block of responsesMessageBlocks(item)) {
+  for (const item of output) {
+    const google = googleCitedAnswer(result, item);
+    if (google !== null) return google;
+  }
+  for (const item of output) for (const block of citationBlocks(item)) {
     if (block.text !== result || !Array.isArray(block.annotations)) continue;
     const citations = responsesCitationAnnotations(block)
       .filter(a => Number.isInteger(a.start_index) && Number.isInteger(a.end_index) && a.start_index >= 0 && a.end_index >= a.start_index && a.end_index <= result.length && safeSourceUrl(a.url))

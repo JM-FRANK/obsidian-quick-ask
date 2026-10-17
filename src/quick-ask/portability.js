@@ -30,13 +30,33 @@ function createPreservedCopy({ pluginData, vault, getSettings, now = () => new D
     return state.enabled && state.directory.length > 0;
   }
 
+  let syncTail = Promise.resolve();
+
   // Copying never blocks or rolls back the live session: a failure is recorded
   // and reported in settings instead.
-  async function syncSession({ id, header, records, index }) {
+  function syncSession(snapshot) {
+    const attempt = syncTail.then(() => synchronize(snapshot));
+    syncTail = attempt.catch(() => {});
+    return attempt;
+  }
+
+  async function synchronize({ id, header, records, index }) {
     if (!isEnabled()) return { status: "disabled" };
     const paths = backupPaths(state.directory);
     try {
-      await vault.writeText(`${paths.sessions}/${id}.jsonl`, serializeLog(header, records));
+      const path = `${paths.sessions}/${id}.jsonl`;
+      const text = serializeLog(header, records);
+      // Read the actual copy, including after reload or an external edit. A
+      // complete matching prefix can be extended; torn/edited copies rebuild.
+      const read = vault.readPreservedText ?? vault.readText;
+      const existing = await read.call(vault, path);
+      if (existing !== text) {
+        if (existing && existing.endsWith("\n") && text.startsWith(existing) && typeof vault.appendText === "function") {
+          await vault.appendText(path, text.slice(existing.length));
+        } else {
+          await vault.writeText(path, text);
+        }
+      }
       if (index) await vault.writeText(paths.index, `${JSON.stringify(sanitizeIndex(index))}\n`);
       state.lastSuccessAt = now();
       state.lastError = null;

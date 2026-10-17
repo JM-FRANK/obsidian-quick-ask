@@ -225,6 +225,7 @@ class QuickAskView {
         const retry = ui.createEl(bubble, "button", { text: this.t(this.getSettings(), "submission.retry"), attributes: { type: "button" } });
         retry.addEventListener("click", () => { void this.send(entry.retry); });
       }
+      if (entry.role === "assistant") for (const html of entry.searchSuggestions ?? []) this.ui.renderSearchSuggestions?.(bubble, html);
       if (entry.role === "assistant" && entry.sources?.length) this.renderSearchSources(bubble, entry.sources);
       if (entry.role === "assistant" && entry.searchStatuses?.some(status => status.status === "failed"))
         ui.createEl(bubble, "small", { cls: "scholar-quick-ask-search-status", text: this.t(this.getSettings(), "search.failed") });
@@ -1038,7 +1039,7 @@ class QuickAskView {
       this.settlingReasoning = this.liveParts?.reasoning ?? null;
       if (result.text || result.reasoning) this.messages.push({
         role: "assistant", text: result.text ?? "", reasoning: result.reasoning ?? "", settled: true,
-        sources: result.sources ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
+        sources: result.sources ?? [], searchSuggestions: result.searchSuggestions ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
         usage: this.usage ?? null, model: (this.getConfig?.(sessionId) ?? {}).model ?? null,
       });
       this.streaming = null;

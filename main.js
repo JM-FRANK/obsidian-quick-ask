@@ -580,11 +580,30 @@ const factories = {"src/quick-ask/chat-completions": function(module, exports, r
 // this module only builds native messages and folds protocol payloads.
 function userMessage(content) { return { role: "user", content }; }
 function assistantMessage(content) { return { role: "assistant", content }; }
-function buildRequestBody({ model, instructions, input = [], tools = [], toolChoice = "auto", parallelToolCalls = true, maxOutputTokens, reasoningEffort } = {}) {
-  const body = { model, messages: [{ role: "system", content: instructions ?? "" }, ...input] };
+function buildRequestBody({ model, instructions, input = [], tools = [], toolChoice = "auto", parallelToolCalls = true, maxOutputTokens, reasoningEffort, serverSearch } = {}) {
+  const messages = serverSearch?.native ? input : input.map(item => {
+    if (!item?.extra_content?.google?.nativeContent) return item;
+    // Native search metadata belongs to our preserved response. Standard Chat
+    // requests replay its text, without sending app-owned native wrapper fields.
+    const { extra_content, ...message } = item;
+    const { nativeContent, groundingMetadata, finishReason, safetyRatings, finishMessage, ...google } = extra_content.google;
+    const remaining = { ...extra_content };
+    if (Object.keys(google).length) remaining.google = google;
+    else delete remaining.google;
+    if (Object.keys(remaining).length) message.extra_content = remaining;
+    return message;
+  });
+  const body = { model, messages: [{ role: "system", content: instructions ?? "" }, ...messages] };
   if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort;
   if (tools.length) Object.assign(body, { tools, tool_choice: toolChoice, parallel_tool_calls: parallelToolCalls });
   if (Number.isInteger(maxOutputTokens) && maxOutputTokens > 0) body.max_completion_tokens = maxOutputTokens;
+  if (serverSearch?.chatSearch === 'google-search') {
+    // CPA's AGY Chat translator recognizes the native-shaped google_search
+    // tool. Never mix it with function tools or send Responses tool_choice.
+    body.tools = [{ google_search: {} }];
+    delete body.tool_choice;
+    delete body.parallel_tool_calls;
+  } else if (serverSearch?.provider === "google") body.web_search_options = {};
   return body;
 }
 function functionTool(tool) {
@@ -613,6 +632,21 @@ function usage(state, value, emit) {
   state.usageSamples.push(sample);
   emit({ type: "usage", ...sample });
 }
+function searchMetadata(state, message, emit) {
+  if (Array.isArray(message.annotations)) {
+    state.chatAnnotations ??= [];
+    state.chatAnnotations.push(...message.annotations);
+    if (message.annotations.some(annotation => annotation?.type === "url_citation")) emit({ type: "search-progress" });
+  }
+  // Keep opaque provider extensions without guessing a vendor-specific schema.
+  if (message.extra_content && typeof message.extra_content === "object" && !Array.isArray(message.extra_content)) {
+    state.chatExtraContent = { ...state.chatExtraContent, ...message.extra_content };
+  }
+}
+function metadataFields(state) {
+  return { ...(state.chatAnnotations ? { annotations: state.chatAnnotations } : {}),
+    ...(state.chatExtraContent ? { extra_content: state.chatExtraContent } : {}) };
+}
 function complete(state, emit) {
   if (!state.chatFinish) protocolError("Chat Completions stream ended without a finish_reason");
   const calls = state.callOrder;
@@ -627,6 +661,7 @@ function complete(state, emit) {
   }
   const message = state.chatMessage ?? assistantMessage(state.chatContent || (calls.length || state.chatRefusal ? null : ""));
   if (!state.chatMessage) Object.assign(message, state.chatReasoning ?? {});
+  if (!state.chatMessage) Object.assign(message, metadataFields(state));
   if (!state.chatMessage && state.chatRefusal) message.refusal = state.chatRefusal;
   if (!state.chatMessage && calls.length) message.tool_calls = calls.map(call => ({
     id: call.callId, type: "function", function: { name: call.name, arguments: call.arguments },
@@ -650,6 +685,7 @@ function handleFrame(frame, state, emit) {
   if (!choice.delta || typeof choice.delta !== "object") protocolError("Missing Chat Completions delta");
   accept(state, payload, emit);
   const delta = choice.delta;
+  searchMetadata(state, delta, emit);
   for (const key of ["reasoning_content", "reasoning"]) {
     if (typeof delta[key] !== "string" || !delta[key]) continue;
     state.chatReasoning ??= {};
@@ -691,6 +727,7 @@ function fromResponse(payload, state, emit) {
   state.accepted = true;
   accept(state, payload, emit);
   state.chatMessage = choice.message;
+  searchMetadata(state, choice.message, emit);
   state.reasoning = readableReasoning(choice.message);
   if (state.reasoning) emit({ type: "reasoning-text-delta", delta: state.reasoning });
   state.text = (typeof choice.message.content === "string" ? choice.message.content : "") + (choice.message.refusal ?? "");
@@ -709,6 +746,7 @@ function readableReasoning(message) {
 function partialOutput(state) {
   if (!state.chatCreated) return null;
   return [{ ...assistantMessage(state.chatContent ?? ""), ...state.chatReasoning,
+    ...metadataFields(state),
     ...(state.chatRefusal ? { refusal: state.chatRefusal } : {}) }];
 }
 // The Chat Completions wire adapter: everything the shared transport shell
@@ -1206,10 +1244,14 @@ function conversationFromRecords(records) {
     const payload = record.payload ?? {};
     if (record.kind === "turn/started") { assistant = null; nativeReasoning = ""; }
     if (record.kind === "item/output") nativeReasoning += messageReasoning(payload.item);
-    if (record.kind === "item/input" && isMessage(payload.item)) {
-      const text = messageText(payload.item);
-      const question = questionFromInput(text);
-      if (question !== null || payload.images?.length) messages.push({ role: "user", text: question ?? "", ...(payload.images?.length ? { images: payload.images } : {}) });
+    if (record.kind === "item/input") {
+      const items = payload.items ?? (payload.item ? [payload.item] : []);
+      for (const [position, item] of items.entries()) {
+        if (!isMessage(item)) continue;
+        const question = questionFromInput(messageText(item));
+        const images = position === items.length - 1 ? payload.images : null;
+        if (question !== null || images?.length) messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}) });
+      }
     }
     if (record.kind === "item/output" && payload.tool !== true && isMessage(payload.item)) {
       const text = messageText(payload.item);
@@ -1223,6 +1265,7 @@ function conversationFromRecords(records) {
       if (assistant && payload.displayText && payload.displayText !== assistant.text) assistant.displayText = payload.displayText;
       if (assistant && (payload.reasoning || nativeReasoning)) assistant.reasoning = payload.reasoning || nativeReasoning;
       if (assistant && payload.sources?.length) assistant.sources = payload.sources;
+      if (assistant && payload.searchSuggestions?.length) assistant.searchSuggestions = payload.searchSuggestions;
       if (assistant && payload.searchStatuses?.length) assistant.searchStatuses = payload.searchStatuses;
       if (payload.state === "interrupted") messages.push({ kind: "interrupted", text: payload.error?.message ?? "" });
     }
@@ -1238,10 +1281,11 @@ module.exports = { conversationFromRecords, questionFromInput };
 
 },
 "src/quick-ask/conversation": function(module, exports, require) {
+const { geminiSearchWire, buildGeminiSearchBody } = require("src/quick-ask/gemini-search");
 const { imagePaths: normalizeImagePaths } = require("src/quick-ask/images");
 const { normalizeReasoningEffort } = require("src/quick-ask/reasoning");
 const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("src/quick-ask/protocol");
-const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, normalizeSources, citedAnswer } = require("src/quick-ask/web-search");
+const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, responseSuggestions, normalizeSources, citedAnswer } = require("src/quick-ask/web-search");
 const { createSearchClient } = require("src/quick-ask/search-client");
 const { createStore } = require("zustand/vanilla");
 const { createProjectionPublisher } = require("src/quick-ask/stream-presentation");
@@ -1300,8 +1344,19 @@ function createConversation(options) {
   const searchClient = createSearchClient(environment);
   function toolsFor(state) {
     const route = state.requestSearch;
-    return [protocolFor(state.config).functionTool(GET_FULL_FILE_TOOL), ...(route && route.kind !== "off" ? [route.kind === "server" ? route.tool : protocolFor(state.config).functionTool(WEB_SEARCH_TOOL)] : [])];
+    const protocol = protocolFor(state.config);
+    const tools = route?.kind === "server" && route.localTools === false ? [] : [protocol.functionTool(GET_FULL_FILE_TOOL)];
+    if (route?.kind === "server") {
+      if (route.tool) tools.push(route.tool);
+    } else if (route && route.kind !== "off") {
+      const searchTool = route.queryLimit ? { ...WEB_SEARCH_TOOL,
+        description: WEB_SEARCH_TOOL.description.replace('500', String(route.queryLimit)),
+        parameters: { ...WEB_SEARCH_TOOL.parameters, properties: { query: { ...WEB_SEARCH_TOOL.parameters.properties.query, maxLength: route.queryLimit } } } } : WEB_SEARCH_TOOL;
+      tools.push(protocol.functionTool(searchTool));
+    }
+    return tools;
   }
+
   function searchEnabled(sessionId) {
     const state = stateFor(sessionId);
     return typeof state.searchEnabled === "boolean" ? state.searchEnabled : normalizeSearchSettings(getSettings()?.quickAsk?.webSearch).defaultEnabled;
@@ -1337,7 +1392,7 @@ function createConversation(options) {
     const route = searchRoute(enabled, settings, state.config);
     const errors = {};
     if (route.kind === "invalid") errors[route.error] = true;
-    if (route.kind === "independent" && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
+    if (["independent", "provider-api"].includes(route.kind) && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
     return { valid: Object.keys(errors).length === 0, errors, route };
   }
   // Per-session live state. Everything durable also lands in the JSONL log.
@@ -1387,6 +1442,7 @@ function createConversation(options) {
     const draftEffort = state.reasoningDirty ? state.reasoningEffort : undefined;
     state.reasoningEffort = undefined;
     state.usage = createTurnUsage();
+    state.usageSamples = [];
     state.sessionUsage = createSessionUsage();
     state.searchEnabled = undefined;
     state.items = [];
@@ -1418,9 +1474,10 @@ function createConversation(options) {
         break;
       case "item/input":
       case "item/output":
-        if (payload.item) {
-          // Image-only records remain visible history but have no replay input.
-          if (!(payload.images?.length && !messageText(payload.item))) appendCanonicalItem(state, payload.item);
+        for (const [position, item] of (payload.items ?? (payload.item ? [payload.item] : [])).entries()) {
+          // Images belong to the final question, never the Context envelope.
+          const isQuestion = !payload.items || position === payload.items.length - 1;
+          if (!(isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item);
         }
         break;
       case "compaction/checkpoint":
@@ -1445,6 +1502,7 @@ function createConversation(options) {
         if (typeof payload.nextSearchEnabled === "boolean") state.searchEnabled = payload.nextSearchEnabled;
         if (payload.reasoningEffort) state.reasoningEffort = normalizeReasoningEffort(payload.reasoningEffort);
         state.usage = createTurnUsage();
+        state.usageSamples = [];
         state.turn = {
           turnId: payload.turnId,
           question: payload.question ?? "",
@@ -1458,6 +1516,12 @@ function createConversation(options) {
         };
         break;
       case "turn/finished":
+        if (Array.isArray(payload.usageSamples)) {
+          state.usage = createTurnUsage();
+          state.usageSamples = [];
+          recordUsage(state, payload.usageSamples);
+          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor;
+        }
         state.sessionUsage.addTurn(state.usage.totals());
         if (state.turn && state.turn.turnId === payload.turnId) {
           state.turn = {
@@ -1537,17 +1601,19 @@ function createConversation(options) {
     const config = state.config ?? {};
     const settings = normalizeQuickAskSettings(getSettings()?.quickAsk ?? config);
     const { input, previousResponseId } = requestInput(state, staged);
-    return protocolFor(state.config).buildRequestBody({
+    const body = protocolFor(state.config).buildRequestBody({
       reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
       instructions: buildInstructions({ rendererVersion: staged.rendererVersion ?? RENDERER_VERSION, customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
       input,
       tools: toolsFor(state),
-      toolChoice: "auto",
+      toolChoice: state.requestSearch?.kind === "server" ? (state.requestSearch.toolChoice ?? "auto") : "auto",
       parallelToolCalls: true,
+      serverSearch: state.requestSearch?.kind === "server" ? state.requestSearch : undefined,
       previousResponseId,
       store: state.storedState,
       model: config.model ?? settings.model,
     });
+    return state.requestSearch?.native ? buildGeminiSearchBody(body) : body;
   }
 
   function resolveApiKey(state) {
@@ -1855,6 +1921,7 @@ function createConversation(options) {
     for (const sample of samples) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
+      (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
       const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
       if (sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length) {
         state.occupancyAnchor = { inputTokens };
@@ -1921,6 +1988,7 @@ function createConversation(options) {
       if (preflight.blocked) return preflight;
       const turnId = `turn-${environment.scheduler.now?.() ?? Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       state.usage = createTurnUsage();
+      state.usageSamples = [];
       state.pendingMutations = stagedAdditions;
       const turn = { turnId, question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
@@ -1974,7 +2042,9 @@ function createConversation(options) {
     let retryAfterNonStreaming = state.nonStreaming;
     for (;;) {
       if (!isEnabled() || signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
-      const body = buildBody(state, turn);
+      let body;
+      try { body = buildBody(state, turn); }
+      catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
       if (turn.toolQuestion && turn.toolQuestion.state.callsUsed >= turn.toolQuestion.state.callLimit) {
         body.tools = responsesBuiltInTools(body.tools);
         if (protocolFor(state.config).emptyToolsAreInvalid && body.tools.length === 0) {
@@ -1982,7 +2052,7 @@ function createConversation(options) {
         }
       }
       const result = await streamAttempt({
-        protocol: protocolFor(state.config),
+        protocol: state.requestSearch?.native ? geminiSearchWire : protocolFor(state.config),
         network: environment.network,
         scheduler: environment.scheduler,
         baseUrl: (state.config?.baseUrl ?? normalizeQuickAskSettings(getSettings()?.quickAsk).baseUrl),
@@ -1991,15 +2061,18 @@ function createConversation(options) {
         signal,
         idleTimeoutMs,
         policy,
-        nonStreaming: retryAfterNonStreaming,
+        nonStreaming: state.requestSearch?.native || retryAfterNonStreaming,
         onEvent: (event) => handleStreamEvent(state, turn, event),
       });
 
-      if (result.output) turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
+      if (result.output) {
+        turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
+        turn.searchSuggestions = [...new Set([...(turn.searchSuggestions ?? []), ...responseSuggestions(result.output)])];
+      }
 
       // The endpoint demonstrably needed the non-streaming transport; remember
       // it for the rest of the plugin lifecycle.
-      if (result.nonStreaming) {
+      if (result.nonStreaming && !state.requestSearch?.native) {
         state.nonStreaming = true;
         retryAfterNonStreaming = true;
       }
@@ -2018,6 +2091,11 @@ function createConversation(options) {
       }
       if (result.status === "completed" || result.status === "incomplete") {
         if (result.status === "completed" && Array.isArray(result.functionCalls) && result.functionCalls.length > 0) {
+          if (state.requestSearch?.kind === "server" && state.requestSearch.localTools === false) {
+            return await finishTurn(state, turn, "failed", { text: result.text, reasoning: result.reasoning,
+              output: result.output, usage: result.usageSamples,
+              error: { code: "TOOLS_UNSUPPORTED", message: "This provider's web-search turn does not support local function tools." } });
+          }
           const continued = await runToolContinuation(state, turn, result, signal, retryAfterNonStreaming);
           if (continued) return continued;
         }
@@ -2115,7 +2193,6 @@ function createConversation(options) {
       pushProjection(state, { kind: "tool", item, turnId: turn.turnId });
     }
     recordUsage(state, result.usageSamples);
-    for (const sample of result.usageSamples ?? []) await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
     for (const status of question.statuses) {
       pushProjection(state, { kind: "tool-status", turnId: turn.turnId, status });
     }
@@ -2180,9 +2257,9 @@ function createConversation(options) {
       for (const item of rendered) {
         const isQuestion = item === rendered[rendered.length - 1];
         if (!isQuestion || turn.question || !turn.imagePaths?.length) appendCanonicalItem(state, item);
-        await sessionStore.append(state.sessionId, "item/input", { item,
-          ...(isQuestion && turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
       }
+      await sessionStore.append(state.sessionId, "item/input", { items: rendered,
+        ...(turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
       pushProjection(state, { kind: "accepted", turnId: turn.turnId });
     }).catch(() => {});
     return acceptQueue;
@@ -2217,9 +2294,6 @@ function createConversation(options) {
     }
     if (Array.isArray(usage)) {
       recordUsage(state, usage);
-      for (const sample of usage) {
-        await sessionStore.append(state.sessionId, "turn/usage", { turnId: turn.turnId, source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
-      }
     }
     const turnTotals = state.usage.totals();
     state.sessionUsage.addTurn(turnTotals);
@@ -2228,10 +2302,12 @@ function createConversation(options) {
     await sessionStore.append(state.sessionId, "turn/finished", {
       turnId: turn.turnId,
       state: status,
+      usageSamples: state.usageSamples ?? [],
+      occupancyAnchor: state.occupancyAnchor,
       text,
       reasoning,
       error: error ? { code: error.code, message: error.message, status: error.status ?? null } : null,
-      sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
+      sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
     });
     turn.status = status;
     turn.text = text;
@@ -2240,7 +2316,7 @@ function createConversation(options) {
     turn.controller = null;
     turn.images = [];
     pushProjection(state, { kind: "turn", status, turnId: turn.turnId });
-    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
+    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
   }
 
   // Stop aborts only the owning session's current turn and commits whatever
@@ -2577,7 +2653,7 @@ module.exports = {
 
 },
 "src/quick-ask/environment": function(module, exports, require) {
-const { AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
+const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
 const { t } = require("src/quick-ask/i18n");
 const { createImageViewer } = require("src/quick-ask/image-viewer");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("src/quick-ask/images");
@@ -2729,6 +2805,15 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
           throw error;
         }
       },
+      async readPreservedText(path) {
+        const file = fileOf(path);
+        return file ? await vault.read(file) : null;
+      },
+      async appendText(path, text) {
+        const file = fileOf(path);
+        if (!file) throw new Error(`Quick Ask preserved copy is missing: ${path}`);
+        await vault.append(file, text);
+      },
       resolveRole,
       resolveReference,
     },
@@ -2841,6 +2926,24 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
     },
 
     ui: {
+      renderSearchSuggestions(parent, html) {
+        const doc = parent.ownerDocument;
+        const content = doc.createElement('div');
+        content.appendChild(sanitizeHTMLToDom(html));
+        for (const anchor of content.querySelectorAll('a')) {
+          anchor.setAttribute('target', '_blank');
+          anchor.setAttribute('rel', 'noopener noreferrer');
+        }
+        const frame = doc.createElement('iframe');
+        frame.className = 'scholar-quick-ask-search-suggestions';
+        frame.title = 'Google Search';
+        frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        // Provider HTML/CSS stays isolated from Obsidian, without scripts,
+        // filesystem access or background resource loads. Links require a click.
+        frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"></head><body>${content.innerHTML}</body></html>`;
+        parent.appendChild(frame);
+      },
       clipboardImages(event) {
         return Array.from(event.clipboardData?.items ?? []).filter(item => item.kind === "file")
           .map(item => item.getAsFile()).filter(Boolean);
@@ -3317,18 +3420,232 @@ function pickerOptions(paths, query, fuzzy) {
 module.exports = { MAX_RESULTS, activePickerQuery, isCompositionEvent, rankFiles, pickerOptions };
 
 },
+"src/quick-ask/gemini-search": function(module, exports, require) {
+// Search-only Gemini wire for a Chat Completions session. The stored session
+// remains Chat-native; this boundary translates one request and preserves the
+// complete native response for faithful replay of thoughts and signatures.
+const { normalizeError } = require("src/quick-ask/transport");
+
+function protocolError(message) { throw { kind: 'protocol', message }; }
+function imagePart(value) {
+  const url = typeof value === 'string' ? value : value?.url;
+  if (typeof url !== 'string') protocolError('Missing Gemini search image URL');
+  const data = /^data:([^;,]+);base64,([a-z0-9+/=\r\n]+)$/i.exec(url);
+  if (data) return { inlineData: { mimeType: data[1], data: data[2] } };
+  let parsed;
+  try { parsed = new URL(url); } catch { protocolError('Invalid Gemini search image URL'); }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) protocolError('Unsupported Gemini search image URL');
+  return { fileData: { mimeType: value?.mime_type ?? 'image/*', fileUri: url } };
+}
+function contentParts(content) {
+  if (content == null) return [];
+  if (typeof content === 'string') return content ? [{ text: content }] : [];
+  if (!Array.isArray(content)) protocolError('Unsupported Gemini search message content');
+  return content.map(part => {
+    if (part?.type === 'text' && typeof part.text === 'string') return { text: part.text };
+    if (part?.type === 'image_url') return imagePart(part.image_url);
+    protocolError('Unsupported Gemini search content part');
+  });
+}
+function thinkingConfig(model, effort) {
+  if (effort === undefined) return undefined;
+  // Off must never silently become Low. Models that cannot disable thoughts
+  // must reject the explicit zero budget rather than change the user's choice.
+  if (effort === 'none' && /^gemini-(?:2\.5|[34])(?:[.-]|$)/.test(model)) return { thinkingBudget: 0 };
+  if (/^gemini-2\.5(?:-|$)/.test(model)) {
+    // Native 2.5 uses a budget, and newer models use levels. XHigh/Max have no
+    // native counterpart: both use the same documented High boundary here.
+    return { thinkingBudget: effort === 'low' || effort === 'minimal' ? 1024 : effort === 'medium' ? 8192 : 24576 };
+  }
+  if (/^gemini-[34](?:[.-]|$)/.test(model)) return { thinkingLevel: effort === 'medium' ? 'MEDIUM'
+    : ['high', 'xhigh', 'max'].includes(effort) ? 'HIGH' : 'LOW' };
+  return undefined;
+}
+function buildGeminiSearchBody(chatBody = {}) {
+  const model = String(chatBody.model ?? '').replace(/^(?:google|models)\//, '');
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(model)) protocolError('Invalid Gemini search model');
+  if (!Array.isArray(chatBody.messages)) protocolError('Gemini search requires Chat Completions messages');
+  const contents = [], systemParts = [];
+  for (const message of chatBody.messages) {
+    if (!message || typeof message !== 'object') protocolError('Invalid Gemini search message');
+    if (message.role === 'system' || message.role === 'developer') {
+      const parts = contentParts(message.content);
+      if (parts.some(part => !Object.hasOwn(part, 'text'))) protocolError('Gemini system instructions must contain text');
+      systemParts.push(...parts);
+      continue;
+    }
+    if (!['user', 'assistant', 'tool'].includes(message.role)) protocolError('Unsupported Gemini search message role');
+    const native = message.role === 'assistant' ? message.extra_content?.google?.nativeContent : null;
+    if (native) {
+      if (native.role !== 'model' || !Array.isArray(native.parts) || !native.parts.length || native.parts.some(part => !part || typeof part !== 'object' || Array.isArray(part))) protocolError('Invalid preserved Gemini search content');
+      contents.push(native);
+      continue;
+    }
+    const parts = contentParts(message.content);
+    if (message.role === 'assistant' && typeof message.refusal === 'string' && message.refusal) parts.push({ text: message.refusal });
+    // Historical Chat tool batches are evidence, not new native function calls.
+    // Preserve their IDs, arguments and complete outputs without declaring tools
+    // whose Gemini signatures were never present in the old Chat session.
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+      parts.push({ text: JSON.stringify({ historical_tool_calls: message.tool_calls }) });
+    }
+    if (message.role === 'tool') {
+      parts.unshift({ text: JSON.stringify({ historical_tool_result: { tool_call_id: message.tool_call_id, ...(message.name ? { name: message.name } : {}) } }) });
+    }
+    if (parts.length) contents.push({ role: message.role === 'assistant' ? 'model' : 'user', parts });
+  }
+  if (!contents.length) protocolError('Gemini search requires nonempty conversation content');
+  const body = { model, contents, tools: [{ google_search: {} }] };
+  if (systemParts.length) body.systemInstruction = { parts: systemParts };
+  const max = chatBody.max_completion_tokens ?? chatBody.max_tokens;
+  const thinking = thinkingConfig(model, chatBody.reasoning_effort);
+  if ((Number.isInteger(max) && max > 0) || thinking) {
+    body.generationConfig = { ...(Number.isInteger(max) && max > 0 ? { maxOutputTokens: max } : {}),
+      ...(thinking ? { thinkingConfig: thinking } : {}) };
+  }
+  return body;
+}
+function nativeUrl(baseUrl, body) {
+  let base = String(baseUrl ?? '').replace(/\/+$/, '').replace(/\/openai$/, '');
+  let url;
+  try { url = new URL(base); } catch { protocolError('Invalid Gemini search base URL'); }
+  if (!['https:', 'http:'].includes(url.protocol) || url.search || url.hash || url.username || url.password) protocolError('Invalid Gemini search base URL');
+  if (url.pathname === '/' || !url.pathname) base += '/v1beta';
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(String(body?.model ?? ''))) protocolError('Invalid Gemini search model');
+  return `${base}/models/${encodeURIComponent(body.model)}:generateContent`;
+}
+function requestBody(body) {
+  const { model, stream, stream_options, ...native } = body;
+  return native;
+}
+function eventsFromResponse(payload, state, emit) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) protocolError('Invalid Gemini search response');
+  if (payload.error) throw { kind: 'provider', error: payload.error, status: payload.error.code };
+  state.accepted = true;
+  state.responseId = typeof payload.responseId === 'string' ? payload.responseId : null;
+  emit({ type: 'created', responseId: state.responseId });
+  const blocked = payload.promptFeedback?.blockReason;
+  if (blocked) throw { kind: 'provider', error: { code: blocked, message: payload.promptFeedback.blockReasonMessage ?? `Gemini blocked the prompt: ${blocked}` } };
+  if (!Array.isArray(payload.candidates) || payload.candidates.length !== 1) protocolError('Expected one Gemini search candidate');
+  const candidate = payload.candidates[0];
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) protocolError('Invalid Gemini search candidate');
+  if (candidate.index !== undefined && candidate.index !== 0) protocolError('Unexpected Gemini search candidate index');
+  if (typeof candidate.finishReason !== 'string' || !candidate.finishReason) protocolError('Gemini search response has no finishReason');
+  const native = candidate.content;
+  if (native !== undefined && (!native || native.role !== 'model' || !Array.isArray(native.parts) || native.parts.some(part => !part || typeof part !== 'object' || Array.isArray(part)))) protocolError('Invalid Gemini search model content');
+  const parts = native?.parts ?? [];
+  // Never attach rejected media/tool payloads to partial output: conversation
+  // persistence would otherwise serialize inline base64 into the session log.
+  if (parts.some(part => part.functionCall || part.functionResponse || part.inlineData || part.fileData || part.executableCode || part.codeExecutionResult)) {
+    protocolError('Unexpected Gemini search tool or media output');
+  }
+  const text = parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
+  const reasoning = parts.filter(part => part.thought && typeof part.text === 'string').map(part => part.text).join('');
+  const google = { ...(native ? { nativeContent: native } : {}),
+    ...(candidate.groundingMetadata ? { groundingMetadata: candidate.groundingMetadata } : {}),
+    finishReason: candidate.finishReason,
+    ...(candidate.safetyRatings ? { safetyRatings: candidate.safetyRatings } : {}),
+    ...(candidate.finishMessage ? { finishMessage: candidate.finishMessage } : {}) };
+  const message = { role: 'assistant', content: text, ...(reasoning ? { reasoning_content: reasoning } : {}), extra_content: { google } };
+  state.geminiMessage = message;
+  state.text = text;
+  state.reasoning = reasoning;
+  const grounding = candidate.groundingMetadata;
+  if ((Array.isArray(grounding?.webSearchQueries) && grounding.webSearchQueries.some(query => typeof query === 'string' && query.trim()))
+      || (Array.isArray(grounding?.groundingChunks) && grounding.groundingChunks.some(chunk => typeof chunk?.web?.uri === 'string' && chunk.web.uri.trim()))
+      || (typeof grounding?.searchEntryPoint?.renderedContent === 'string' && grounding.searchEntryPoint.renderedContent.trim())) emit({ type: 'search-progress' });
+  if (reasoning) emit({ type: 'reasoning-text-delta', delta: reasoning });
+  if (text) emit({ type: 'text-delta', delta: text });
+  const usage = payload.usageMetadata;
+  if (usage && typeof usage === 'object') {
+    const value = { ...(Number.isFinite(usage.promptTokenCount) ? { prompt_tokens: usage.promptTokenCount } : {}),
+      ...((Number.isFinite(usage.candidatesTokenCount) || Number.isFinite(usage.thoughtsTokenCount)) ? { completion_tokens: (Number.isFinite(usage.candidatesTokenCount) ? usage.candidatesTokenCount : 0) + (Number.isFinite(usage.thoughtsTokenCount) ? usage.thoughtsTokenCount : 0) } : {}),
+      ...(Number.isFinite(usage.totalTokenCount) ? { total_tokens: usage.totalTokenCount } : {}),
+      ...(Number.isFinite(usage.cachedContentTokenCount) ? { prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount } } : {}),
+      ...(Number.isFinite(usage.thoughtsTokenCount) ? { completion_tokens_details: { reasoning_tokens: usage.thoughtsTokenCount } } : {}) };
+    state.usage = state.terminalUsage = value;
+    const sample = { source: 'terminal', usage: value };
+    state.usageSamples.push(sample);
+    emit({ type: 'usage', ...sample });
+  }
+  const finish = candidate.finishReason;
+  const status = !['STOP', 'MAX_TOKENS'].includes(finish) ? 'failed' : finish === 'MAX_TOKENS' ? 'incomplete' : 'completed';
+  if (status === 'completed' && !text) protocolError('Gemini search returned no answer text');
+  if (status === 'failed') state.terminalError = normalizeError({ kind: 'provider', error: {
+    code: finish,
+    message: candidate.finishMessage ?? `Gemini search stopped: ${finish}`,
+  } });
+  state.terminalOutput = [message];
+  state.terminal = { type: 'terminal', status, responseId: state.responseId,
+    incompleteReason: status === 'completed' ? null : finish, output: state.terminalOutput };
+  emit(state.terminal);
+}
+const geminiSearchWire = Object.freeze({
+  id: 'gemini-search',
+  createUrl: nativeUrl,
+  requestUrl: nativeUrl,
+  requestHeaders: key => ({ 'x-goog-api-key': key, 'Content-Type': 'application/json', Accept: 'application/json' }),
+  requestBody,
+  streamRequestBody: () => protocolError('Gemini search requires non-streaming transport'),
+  handleFrame: () => protocolError('Gemini search requires non-streaming transport'),
+  eventsFromResponse,
+  partialOutput: state => state.geminiMessage ? [state.geminiMessage] : null,
+});
+module.exports = { geminiSearchWire, buildGeminiSearchBody };
+
+},
 "src/quick-ask/i18n": function(module, exports, require) {
 // Quick Ask owns its sidebar and settings translations in both releases.
 const DEFAULT_LANGUAGE = "en";
 const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
+  "settings.quickAsk.generalGroup": "General",
+  "providers.pageTitle": "Model connections",
+  "providers.pageDescription": "Manage connection profiles, then select a model and configure its protocol and context window. Applies only to new sessions.",
+  "providers.connectionGroup": "Connection details",
+  "providers.modelGroup": "Models in the selected connection",
+  "profiles.pageTitle": "System roles",
+  "profiles.pageDescription": "Manage role prompts independently of model connections. The selected role applies to new sessions.",
+  "settings.quickAsk.dataPage": "Data and backups",
+  "settings.quickAsk.dataPageDescription": "Manage conversation data, preserved copies and cached images.",
+  "settings.quickAsk.conversationDataGroup": "Conversation data",
+  "settings.quickAsk.imageCacheGroup": "Image cache",
+  "providers.current": "Connection profile",
+  "providers.default": "Default connection",
+  "providers.newSessionsOnly": "Changes apply only to new sessions. Existing conversations keep their saved connection and model.",
+  "providers.name": "Connection profile name",
+  "providers.nameHelp": "Use a unique name for each Base URL and API secret pair. Add a profile or rename the selected one.",
+  "providers.delete": "Delete connection profile",
+  "providers.deleteConfirm": "Delete “{name}”? Existing conversations retain their connection. The saved API secret will be kept.",
+  "providers.connectionHelp": "Enter the API base URL. Editing the address or secret automatically fetches models once both are configured.",
+  "providers.models": "Available models",
+  "providers.discoveryHelp": "Fetches the model list from this connection. Opening settings or restarting makes no request. List membership does not verify request compatibility.",
+  "providers.refresh": "Refresh models",
+  "providers.chooseModel": "Choose a model",
+  "providers.manualModel": "Manual model ID",
+  "providers.manualHelp": "Enter a model ID if it is absent or the service does not provide a model list. Refreshing keeps your saved models and overrides.",
+  "providers.useModel": "Use model",
+  "providers.removeModel": "Remove selected model",
+  "providers.modelSettings": "Saved separately for this model in this connection profile. Applies only to new sessions.",
+  "providers.invalidName": "Enter a nonempty, unique connection profile name.",
+  "providers.missing": "This connection profile no longer exists. Select another profile.",
+  "providers.lastProfile": "Keep at least one connection profile.",
+  "providers.modelMissing": "Enter or select a model ID.",
+  "providers.saveFailed": "Could not save the connection profile. Please try again.",
+  "providers.discovering": "Fetching models…",
+  "providers.discovered": "Model list updated. Existing model settings were preserved.",
+  "providers.discoveryEmpty": "The service returned no models. You can enter a model ID manually.",
+  "providers.discoveryConfig": "Configure a valid Base URL and saved API secret before fetching models.",
+  "providers.discoveryFailed": "Could not fetch models. Check the address, secret and service support, then refresh or enter a model ID manually.",
+  "providers.discoveryInvalid": "The service did not return a compatible model list. You can enter a model ID manually.",
+
   "command.switchProfile": "Switch system profile",
   "profiles.default": "Literature Reading",
   "profiles.studyQuiz": "Study Quiz",
-  "profiles.current": "System profile",
+  "profiles.current": "Current role",
   "profiles.newSessionsOnly": "Applies to new sessions only. Existing conversations keep their saved role.",
-  "profiles.name": "Profile name",
+  "profiles.name": "Role name",
   "profiles.nameHelp": "Enter a unique name, then rename this profile or add a new one. The default profile can be renamed but cannot be deleted.",
   "profiles.add": "Add",
   "profiles.rename": "Rename",
@@ -3476,7 +3793,7 @@ const EN = {
   "search.manualDescription": "Choose exactly one search method. It will not switch automatically. Invalid configuration blocks questions with web search enabled.",
   "search.serverOption": "Model provider’s web search",
   "search.duckHelp": "No API key needed. Requests DuckDuckGo directly. A CAPTCHA or network failure is reported; another service will not be selected automatically.",
-  "search.serverHelp": "Uses this conversation’s model endpoint and model API key; no separate search key is required. Only adapted OpenAI, OpenRouter, xAI and Bailian endpoints/models are accepted. Existing conversations retain their model configuration.",
+  "search.serverHelp": "Uses this conversation’s model key and Base URL, including compatible relays. DeepSeek models use the Search API; Gemini Responses relays such as CPA use the web_search tool without function tools; Gemini CC relays use google_search; explicit Gemini API paths use native Google Search with a Gemini API key (Vertex keeps its Cloud token). Google search turns retain added Context but do not call local file tools. Search errors are shown without switching services.",
   "search.keyHelp": "1. Obtain an API key from this service. 2. Paste the key below and click Save securely. Keys for different services are kept separately. ",
   "search.openProvider": "Open provider website",
   "search.saveKey": "Save securely",
@@ -3513,7 +3830,7 @@ const EN = {
   "submission.retry": "Retry this question",
   "message.user": "You",
   "message.assistant": "Assistant",
-  "display.title": "Display",
+  "display.title": "Conversation appearance",
   "display.customBubbleColors": "Custom bubble colors",
   "display.customBubbleColorsDescription": "Turn off to restore the theme's default blue and warm-sand tones. Your chosen colors are retained.",
   "display.userBubbleColor": "User bubble tint",
@@ -3544,12 +3861,52 @@ const EN = {
 };
 
 const ZH_CN = {
+  "settings.quickAsk.generalGroup": "常规",
+  "providers.pageTitle": "模型连接",
+  "providers.pageDescription": "先选择连接配置，再选择模型并设置其协议与上下文窗口。仅对新会话生效。",
+  "providers.connectionGroup": "连接信息",
+  "providers.modelGroup": "当前连接的模型",
+  "profiles.pageTitle": "系统角色",
+  "profiles.pageDescription": "管理角色提示词，独立于模型连接。所选角色仅用于新会话。",
+  "settings.quickAsk.dataPage": "数据与备份",
+  "settings.quickAsk.dataPageDescription": "管理会话数据、保留副本和图片缓存。",
+  "settings.quickAsk.conversationDataGroup": "会话数据",
+  "settings.quickAsk.imageCacheGroup": "图片缓存",
+  "providers.current": "连接配置",
+  "providers.default": "默认连接",
+  "providers.newSessionsOnly": "仅对新会话生效。已有对话保留其保存的连接和模型。",
+  "providers.name": "连接配置名称",
+  "providers.nameHelp": "每组 Base URL 和 API 密钥使用唯一名称。可新增配置或重命名当前配置。",
+  "providers.delete": "删除连接配置",
+  "providers.deleteConfirm": "删除“{name}”？已有对话保留原连接，已保存的 API 密钥不会删除。",
+  "providers.connectionHelp": "填写 API 基础地址。地址或密钥编辑完成且两者均已配置后，会自动获取模型列表。",
+  "providers.models": "可选模型",
+  "providers.discoveryHelp": "从当前连接获取模型列表。打开设置页或重启不会发起请求；列表中出现模型不代表已验证请求兼容性。",
+  "providers.refresh": "刷新模型",
+  "providers.chooseModel": "选择模型",
+  "providers.manualModel": "手工填写模型 ID",
+  "providers.manualHelp": "模型未列出或服务不支持模型列表时，可手工填写。刷新会保留已保存的模型及自定义设置。",
+  "providers.useModel": "使用模型",
+  "providers.removeModel": "移除当前模型",
+  "providers.modelSettings": "在当前连接配置内按模型独立保存，仅对新会话生效。",
+  "providers.invalidName": "请填写非空且不重复的连接配置名称。",
+  "providers.missing": "此连接配置已不存在，请选择其他配置。",
+  "providers.lastProfile": "至少保留一个连接配置。",
+  "providers.modelMissing": "请填写或选择模型 ID。",
+  "providers.saveFailed": "无法保存连接配置，请重试。",
+  "providers.discovering": "正在获取模型……",
+  "providers.discovered": "模型列表已更新，已有模型设置已保留。",
+  "providers.discoveryEmpty": "服务未返回模型，可手工填写模型 ID。",
+  "providers.discoveryConfig": "请先配置有效的 Base URL 和已保存的 API 密钥。",
+  "providers.discoveryFailed": "无法获取模型。请检查地址、密钥及服务支持情况，再刷新或手工填写模型 ID。",
+  "providers.discoveryInvalid": "服务未返回兼容的模型列表，可手工填写模型 ID。",
+
   "command.switchProfile": "切换系统角色配置",
   "profiles.default": "文献阅读",
   "profiles.studyQuiz": "学习出题",
-  "profiles.current": "系统角色配置",
+  "profiles.current": "当前角色",
   "profiles.newSessionsOnly": "仅对新会话生效。已有对话保留其保存的角色。",
-  "profiles.name": "角色配置名称",
+  "profiles.name": "角色名称",
   "profiles.nameHelp": "输入不重复的名称，然后重命名当前配置或新增配置。默认配置可重命名，但不能删除。",
   "profiles.add": "新增",
   "profiles.rename": "重命名",
@@ -3696,7 +4053,7 @@ const ZH_CN = {
   "search.manualDescription": "手动选择一种搜索方式，不自动切换；开启联网时，配置错误会阻止发送。",
   "search.serverOption": "模型提供商的服务端搜索",
   "search.duckHelp": "无需 API Key，直接访问 DuckDuckGo。遇到验证码或网络故障会报错，不自动换用其他服务。",
-  "search.serverHelp": "复用当前会话的模型端点和模型 API Key，无需另配搜索密钥。仅接受已适配的 OpenAI、OpenRouter、xAI、百炼端点及模型。已有会话仍使用创建时的模型配置。",
+  "search.serverHelp": "复用当前会话的模型密钥与 Base URL，支持兼容中转。DeepSeek 各模型使用 Search 接口；CPA 等 Gemini Responses 中转使用 web_search，搜索轮不混入函数工具；Gemini CC 中转使用 google_search；显式 Gemini 原生路径使用普通 API Key（Vertex 仍使用 Cloud 令牌）。Google 联网轮保留已添加的上下文，但不调用本地文件工具。搜索失败会直接提示，不切换服务。",
   "search.keyHelp": "1. 从该服务商获取 API Key。2. 在下方粘贴密钥，点击“安全保存”。不同服务的密钥分别保存。",
   "search.openProvider": "打开服务商网站",
   "search.saveKey": "安全保存",
@@ -3733,7 +4090,7 @@ const ZH_CN = {
   "submission.retry": "重试此问题",
   "message.user": "你",
   "message.assistant": "助手",
-  "display.title": "显示",
+  "display.title": "对话外观",
   "display.customBubbleColors": "自定义气泡色系",
   "display.customBubbleColorsDescription": "关闭后恢复主题默认的雾蓝与暖沙色，已选颜色会保留。",
   "display.userBubbleColor": "用户气泡色调",
@@ -4066,6 +4423,7 @@ const { createQuickAskDragExtension, createCaptureHolder } = require("src/quick-
 const { derivePendingView } = require("src/quick-ask/pending-context");
 const { t } = require("src/quick-ask/i18n");
 const { createSessionActionQueue } = require("src/quick-ask/session-navigation");
+const { createProviderManager } = require("src/quick-ask/model-discovery");
 
 // The one Quick Ask integration entry point. Scholar Workbench calls it with
 // the host plugin, and it registers the view, commands, composer dependencies,
@@ -4113,6 +4471,12 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     notice: key => environment.ui.notice(t(settings(), key)),
   });
   plugin.register(() => profiles.dispose());
+  const providers = createProviderManager({ getSettings: settings,
+    write: patch => plugin.settings.update({ quickAsk: patch }, { propagate: true }),
+    network: environment.network, secrets: environment.secrets, scheduler: environment.scheduler,
+    notice: key => environment.ui.notice(t(settings(), key)),
+  });
+  plugin.register(() => providers.dispose());
   // The preserved copy mirrors affected files after each durable local commit;
   // a failure is reported in settings and never rolls back the live session.
   const preservedCopy = createPreservedCopy({
@@ -4124,11 +4488,11 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     pluginData: environment.pluginData,
     scheduler: environment.scheduler,
     onError: (error) => console.error("Scholar Workbench: Quick Ask session write failed", error),
-    onCommitted: async (sessionId) => {
+    onCommitted: async (sessionId, store, { indexChanged = true } = {}) => {
       if (!preservedCopy.isEnabled()) return;
       const parsed = await sessionStore.readLog(sessionId);
       if (!parsed?.header) return;
-      const index = await sessionStore.loadIndex();
+      const index = indexChanged ? await sessionStore.loadIndex() : undefined;
       await preservedCopy.syncSession({ id: sessionId, header: parsed.header, records: parsed.records, index });
     },
   });
@@ -4344,6 +4708,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
 
   const integration = {
     profiles,
+    providers,
     environment,
     sessionStore,
     conversation,
@@ -4508,6 +4873,133 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
 module.exports = { createQuickAsk, shouldRegisterQuickAsk, QUICK_ASK_VIEW_TYPE, formatBytes };
 
 },
+"src/quick-ask/model-discovery": function(module, exports, require) {
+const { baseUrlError } = require("src/quick-ask/settings");
+const { activeProvider, applyProviderAction } = require("src/quick-ask/provider-profiles");
+
+async function discoverModels({ profile, apiKey, network, signal }) {
+  if (baseUrlError(profile.baseUrl) || !apiKey?.trim()) throw new Error('providers.discoveryConfig');
+  const response = await network.request({ url: `${profile.baseUrl}/models`, method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}` }, signal });
+  if (response.status < 200 || response.status >= 300) throw new Error('providers.discoveryFailed');
+  let body;
+  try { body = typeof response.json === 'function' ? await response.json() : response.json; }
+  catch { throw new Error('providers.discoveryInvalid'); }
+  if (!Array.isArray(body?.data)) throw new Error('providers.discoveryInvalid');
+  const ids = new Set(), models = [];
+  for (const item of body.data) {
+    if (typeof item?.id !== 'string' || !item.id.trim() || ids.has(item.id.trim())) continue;
+    const id = item.id.trim(); ids.add(id);
+    const model = { id };
+    // Only explicit metadata is used. A model ID never proves protocol support.
+    if (Number.isSafeInteger(item.context_window) && item.context_window > 16384) model.contextWindowTokens = item.context_window;
+    models.push(model);
+  }
+  return models.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function createProviderManager({ getSettings, write, network, secrets, scheduler, notice }) {
+  let pending = Promise.resolve(), disposed = false, edits = 0;
+  const revisions = new Map();
+  const listeners = new Map(), jobs = new Map(), statuses = new Map();
+  const values = () => getSettings().quickAsk;
+  const publish = () => {
+    if (disposed || edits) return;
+    for (const [element, listener] of listeners) {
+      if (element.isConnected) { listener.connected = true; listener.callback(); }
+      else if (listener.connected) listeners.delete(element);
+    }
+  };
+  function cancel(id) {
+    const job = jobs.get(id);
+    if (job) {
+      scheduler.cancelDelay(job.timer);
+      scheduler.cancelDelay(job.timeout);
+      job.controller?.abort();
+      jobs.delete(id);
+    }
+    statuses.delete(id);
+  }
+  function enqueue(operation) {
+    const result = pending.then(() => disposed ? false : operation());
+    pending = result.catch(() => {});
+    return result;
+  }
+  async function refresh(id) {
+    await pending;
+    if (disposed) return;
+    id ??= activeProvider(values()).id;
+    cancel(id);
+    const profile = values().providerProfiles.find(item => item.id === id);
+    if (!profile) return;
+    const job = { controller: network.AbortController ? new network.AbortController() : null };
+    jobs.set(id, job);
+    statuses.set(id, 'providers.discovering'); publish();
+    // A disabled feature or a service that never replies must not leave the
+    // setting in a permanent loading state. No retry or endpoint probing.
+    job.timeout = scheduler.delay(20000, () => {
+      if (jobs.get(id) !== job) return;
+      cancel(id); statuses.set(id, 'providers.discoveryFailed'); publish();
+    });
+    try {
+      const models = await discoverModels({ profile, apiKey: secrets.resolve(profile.secretId), network, signal: job.controller?.signal });
+      if (disposed || jobs.get(id) !== job) return;
+      await enqueue(async () => {
+        if (jobs.get(id) !== job) return;
+        const current = values().providerProfiles.find(item => item.id === id);
+        if (!current || current.baseUrl !== profile.baseUrl || current.secretId !== profile.secretId) return;
+        try { await write({ providerAction: { type: 'discovered', id, baseUrl: profile.baseUrl, secretId: profile.secretId, models } }); }
+        catch { throw new Error('providers.saveFailed'); }
+        if (jobs.get(id) === job) statuses.set(id, models.length ? 'providers.discovered' : 'providers.discoveryEmpty');
+      });
+    } catch (error) {
+      if (!disposed && jobs.get(id) === job) statuses.set(id, error.message?.startsWith('providers.') ? error.message : 'providers.discoveryFailed');
+    } finally {
+      if (jobs.get(id) === job) {
+        scheduler.cancelDelay(job.timeout); jobs.delete(id); publish();
+      }
+    }
+  }
+  function schedule(id) {
+    cancel(id);
+    const profile = values().providerProfiles.find(item => item.id === id);
+    if (!profile || baseUrlError(profile.baseUrl) || !secrets.resolve(profile.secretId)?.trim()) return;
+    const job = {};
+    job.timer = scheduler.delay(600, () => { if (!disposed && jobs.get(id) === job) void refresh(id); });
+    jobs.set(id, job);
+  }
+  return {
+    watch(element, callback) {
+      for (const [previous, listener] of listeners) if (listener.connected && !previous.isConnected) listeners.delete(previous);
+      listeners.set(element, { callback, connected: element.isConnected === true });
+    },
+    status: id => statuses.get(id) ?? 'providers.discoveryHelp',
+    refresh,
+    run(action) {
+      const connectionEdit = action.type === 'connection' || action.type === 'delete';
+      const revision = (revisions.get(action.id) ?? 0) + 1;
+      if (connectionEdit) { revisions.set(action.id, revision); cancel(action.id); }
+      edits++;
+      return enqueue(async () => {
+        applyProviderAction(values(), action);
+        await write({ providerAction: action });
+        if (action.type === 'connection' && revisions.get(action.id) === revision) schedule(action.id);
+        return true;
+      }).catch(error => {
+        notice(error.message?.startsWith('providers.') ? error.message : 'providers.saveFailed'); return false;
+      }).finally(() => { edits--; publish(); });
+    },
+    dispose() {
+      disposed = true;
+      for (const id of jobs.keys()) cancel(id);
+      listeners.clear();
+    },
+  };
+}
+
+module.exports = { discoverModels, createProviderManager };
+
+},
 "src/quick-ask/pending-context": function(module, exports, require) {
 // The pending-context UI state: File Rows and Selection Preview Rows staged
 // above the composer, plus the expand/collapse projection. This is presentation
@@ -4658,13 +5150,33 @@ function createPreservedCopy({ pluginData, vault, getSettings, now = () => new D
     return state.enabled && state.directory.length > 0;
   }
 
+  let syncTail = Promise.resolve();
+
   // Copying never blocks or rolls back the live session: a failure is recorded
   // and reported in settings instead.
-  async function syncSession({ id, header, records, index }) {
+  function syncSession(snapshot) {
+    const attempt = syncTail.then(() => synchronize(snapshot));
+    syncTail = attempt.catch(() => {});
+    return attempt;
+  }
+
+  async function synchronize({ id, header, records, index }) {
     if (!isEnabled()) return { status: "disabled" };
     const paths = backupPaths(state.directory);
     try {
-      await vault.writeText(`${paths.sessions}/${id}.jsonl`, serializeLog(header, records));
+      const path = `${paths.sessions}/${id}.jsonl`;
+      const text = serializeLog(header, records);
+      // Read the actual copy, including after reload or an external edit. A
+      // complete matching prefix can be extended; torn/edited copies rebuild.
+      const read = vault.readPreservedText ?? vault.readText;
+      const existing = await read.call(vault, path);
+      if (existing !== text) {
+        if (existing && existing.endsWith("\n") && text.startsWith(existing) && typeof vault.appendText === "function") {
+          await vault.appendText(path, text.slice(existing.length));
+        } else {
+          await vault.writeText(path, text);
+        }
+      }
       if (index) await vault.writeText(paths.index, `${JSON.stringify(sanitizeIndex(index))}\n`);
       state.lastSuccessAt = now();
       state.lastError = null;
@@ -5299,7 +5811,7 @@ const RESPONSE_PROTOCOL = Object.freeze({
 });
 const CHAT_PROTOCOL = Object.freeze({
   ...chat.chatWire,
-  remoteCompaction: false, inputTokens: false, serverSearch: false,
+  remoteCompaction: false, inputTokens: false, serverSearch: true, // restricted by endpoint/model searchRoute
   storedResponses: false,
   // Every native tool call keeps a matching tool message, so a turn that ends
   // without a usable tool batch still records explicit non-execution results.
@@ -5337,6 +5849,304 @@ function callsFromItem(item) {
 function toolOutputId(item) { return item.tool_call_id ?? item.call_id ?? item.id; }
 function truncateOutput(item, truncate) { return item.role === "tool" ? { ...item, content: truncate(item.content) } : { ...item, output: truncate(item.output) }; }
 module.exports = { protocolFor, isMessage, messageText, messageReasoning, isUserMessage, isToolOutput, callsFromItem, toolOutputId, truncateOutput };
+
+},
+"src/quick-ask/provider-profiles": function(module, exports, require) {
+// Connection profiles are separate from system-prompt profiles. This module is
+// pure data; credentials are represented exclusively by SecretStorage names.
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
+const DEFAULT_PROVIDER_ID = 'default';
+const CONNECTION_FIELDS = ['baseUrl', 'secretId', 'protocol', 'model', 'contextWindowTokens'];
+const cleanUrl = value => typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+const capacity = value => value == null || value === '' ? null : Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+
+function modelConfig(model = {}, fallback = {}) {
+  return {
+    id: typeof model.id === 'string' ? model.id.trim() : '',
+    protocol: typeof model.protocol === 'string' ? model.protocol : fallback.protocol ?? 'responses',
+    contextWindowTokens: Object.hasOwn(model, 'contextWindowTokens') ? capacity(model.contextWindowTokens)
+      : Object.hasOwn(fallback, 'contextWindowTokens') ? capacity(fallback.contextWindowTokens) : DEFAULT_CONTEXT_WINDOW_TOKENS,
+  };
+}
+
+function normalizeProviderProfiles(saved = {}, legacy = saved) {
+  const providerProfiles = [];
+  const seen = new Set();
+  for (const source of Array.isArray(saved.providerProfiles) ? saved.providerProfiles : []) {
+    if (!source || typeof source.id !== 'string' || !source.id || seen.has(source.id)) continue;
+    seen.add(source.id);
+    const models = [], modelIds = new Set();
+    for (const input of Array.isArray(source.models) ? source.models : []) {
+      if (!input || typeof input.id !== 'string') continue;
+      const model = modelConfig(input);
+      if (modelIds.has(model.id)) continue;
+      modelIds.add(model.id); models.push(model);
+    }
+    if (!models.length) models.push(modelConfig());
+    providerProfiles.push({ id: source.id, name: typeof source.name === 'string' && source.name.trim() ? source.name.trim() : null,
+      baseUrl: cleanUrl(source.baseUrl), secretId: typeof source.secretId === 'string' ? source.secretId : '', models,
+      selectedModelId: models.some(model => model.id === source.selectedModelId) ? source.selectedModelId : models[0].id });
+  }
+  if (!providerProfiles.length) {
+    const model = modelConfig({ id: legacy.model ?? '', protocol: legacy.protocol ?? 'responses',
+      contextWindowTokens: Object.hasOwn(legacy, 'contextWindowTokens') ? legacy.contextWindowTokens : DEFAULT_CONTEXT_WINDOW_TOKENS });
+    providerProfiles.push({ id: DEFAULT_PROVIDER_ID, name: null, baseUrl: cleanUrl(legacy.baseUrl), secretId: typeof legacy.secretId === 'string' ? legacy.secretId : '', models: [model], selectedModelId: model.id });
+  }
+  const activeProviderProfileId = providerProfiles.some(profile => profile.id === saved.activeProviderProfileId)
+    ? saved.activeProviderProfileId : providerProfiles[0].id;
+  return { providerProfiles, activeProviderProfileId };
+}
+
+function activeProvider(saved) {
+  const catalog = normalizeProviderProfiles(saved);
+  return catalog.providerProfiles.find(profile => profile.id === catalog.activeProviderProfileId);
+}
+function selectedModel(profile) { return profile.models.find(model => model.id === profile.selectedModelId); }
+function providerValues(catalog) {
+  const profile = activeProvider(catalog), model = selectedModel(profile);
+  return { ...catalog, baseUrl: profile.baseUrl, secretId: profile.secretId, model: model.id,
+    protocol: model.protocol, contextWindowTokens: model.contextWindowTokens };
+}
+
+function applyProviderAction(saved, action) {
+  const catalog = normalizeProviderProfiles(saved);
+  const profiles = catalog.providerProfiles;
+  const profile = profiles.find(item => item.id === action.id);
+  if (action.type === 'add' || action.type === 'rename') {
+    const name = String(action.name ?? '').trim();
+    if (!name || profiles.some(item => item.id !== (action.type === 'rename' ? action.id : null)
+      && (item.name ? [item.name] : ['Default connection', '默认连接']).some(label => label.toLocaleLowerCase() === name.toLocaleLowerCase()))) throw new Error('providers.invalidName');
+    if (action.type === 'add') {
+      if (!action.id || profile) throw new Error('providers.missing');
+      profiles.push({ id: action.id, name, baseUrl: '', secretId: '', models: [modelConfig()], selectedModelId: '' });
+      catalog.activeProviderProfileId = action.id;
+    } else {
+      if (!profile) throw new Error('providers.missing');
+      profile.name = name;
+    }
+  } else {
+    if (!profile) throw new Error('providers.missing');
+    if (action.type === 'select') catalog.activeProviderProfileId = profile.id;
+    else if (action.type === 'delete') {
+      if (profiles.length === 1) throw new Error('providers.lastProfile');
+      profiles.splice(profiles.indexOf(profile), 1);
+      if (catalog.activeProviderProfileId === profile.id) catalog.activeProviderProfileId = profiles[0].id;
+    } else if (action.type === 'connection') {
+      if (Object.hasOwn(action, 'baseUrl')) profile.baseUrl = cleanUrl(action.baseUrl);
+      if (Object.hasOwn(action, 'secretId')) profile.secretId = String(action.secretId ?? '');
+    } else if (action.type === 'model-select') {
+      if (!profile.models.some(model => model.id === action.modelId)) throw new Error('providers.modelMissing');
+      profile.selectedModelId = action.modelId;
+    } else if (action.type === 'model-add') {
+      const id = String(action.modelId ?? '').trim();
+      if (!id) throw new Error('providers.modelMissing');
+      if (!profile.models.some(model => model.id === id)) profile.models.push(modelConfig({ id }, selectedModel(profile)));
+      profile.selectedModelId = id;
+    } else if (action.type === 'model-edit') {
+      const model = profile.models.find(item => item.id === action.modelId);
+      if (!model) throw new Error('providers.modelMissing');
+      Object.assign(model, modelConfig({ ...model, ...action.patch, id: model.id }));
+    } else if (action.type === 'model-delete') {
+      profile.models = profile.models.filter(model => model.id !== action.modelId);
+      if (!profile.models.length) profile.models.push(modelConfig());
+      if (!profile.models.some(model => model.id === profile.selectedModelId)) profile.selectedModelId = profile.models[0].id;
+    } else if (action.type === 'discovered') {
+      // A late response cannot populate a profile whose connection changed.
+      if (profile.baseUrl !== action.baseUrl || profile.secretId !== action.secretId) return providerValues(catalog);
+      for (const model of action.models) {
+        if (!profile.models.some(item => item.id === model.id)) profile.models.push(modelConfig(model));
+      }
+    } else throw new Error('providers.missing');
+  }
+  return providerValues(catalog);
+}
+
+function providerPatch(saved, patch) {
+  if (patch.providerAction) return applyProviderAction(saved, patch.providerAction);
+  if (Object.hasOwn(patch, 'providerProfiles') || Object.hasOwn(patch, 'activeProviderProfileId')) {
+    return providerValues(normalizeProviderProfiles({ ...saved, ...patch }));
+  }
+  let catalog = normalizeProviderProfiles(saved);
+  const profile = activeProvider(catalog);
+  if (Object.hasOwn(patch, 'baseUrl') || Object.hasOwn(patch, 'secretId')) catalog = applyProviderAction(catalog, { type: 'connection', id: profile.id,
+    ...Object.fromEntries(['baseUrl', 'secretId'].filter(key => Object.hasOwn(patch, key)).map(key => [key, saved[key]])) });
+  if (Object.hasOwn(patch, 'model')) {
+    if (saved.model) catalog = applyProviderAction(catalog, { type: 'model-add', id: profile.id, modelId: saved.model });
+    else {
+      const current = catalog.providerProfiles.find(item => item.id === profile.id);
+      if (!current.models.some(model => model.id === '')) current.models.push(modelConfig({ id: '' }, selectedModel(current)));
+      current.selectedModelId = '';
+    }
+  }
+  const modelPatch = Object.fromEntries(['protocol', 'contextWindowTokens'].filter(key => Object.hasOwn(patch, key)).map(key => [key, saved[key]]));
+  if (Object.keys(modelPatch).length) catalog = applyProviderAction(catalog, { type: 'model-edit', id: profile.id, modelId: activeProvider(catalog).selectedModelId, patch: modelPatch });
+  return providerValues(catalog);
+}
+
+module.exports = { DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_PROVIDER_ID, CONNECTION_FIELDS, normalizeProviderProfiles, activeProvider, selectedModel, providerValues, applyProviderAction, providerPatch };
+
+},
+"src/quick-ask/provider-settings": function(module, exports, require) {
+const { activeProvider, selectedModel } = require("src/quick-ask/provider-profiles");
+const { contextWindowControlTokens, validContextWindowControl, quickAskControlValue } = require("src/quick-ask/settings-controls");
+const { baseUrlError, normalizeBaseUrl } = require("src/quick-ask/settings");
+const { t } = require("src/quick-ask/i18n");
+
+function providerSettings(host, SecretComponent) {
+  const manager = host.quickAskIntegration?.providers;
+  const values = () => host.current().quickAsk;
+  const profile = () => activeProvider(values());
+  const tr = (key, args) => t(host.settings, key, args);
+  const name = item => item.name ?? tr('providers.default');
+  let syncing = false;
+  const run = action => syncing ? Promise.resolve(false) : manager?.run(action);
+  function watch(setting, callback) {
+    const refresh = () => {
+      syncing = true;
+      try { callback(); } finally { syncing = false; }
+    };
+    refresh(); manager?.watch(setting.settingEl, refresh);
+  }
+  const connectionItems = [
+    { name: tr('providers.current'), desc: tr('providers.newSessionsOnly'), render: setting => {
+      let dropdown, remove;
+      setting.addDropdown(input => {
+        dropdown = input;
+        input.onChange(id => { void run({ type: 'select', id }); });
+      });
+      setting.addExtraButton(button => {
+        remove = button;
+        button.setIcon('trash-2').setTooltip(tr('providers.delete')).onClick(async () => {
+          const current = profile();
+          if (await host.quickAskIntegration.environment.ui.confirm(tr('providers.deleteConfirm', { name: name(current) }))) await run({ type: 'delete', id: current.id });
+        });
+      });
+      watch(setting, () => {
+        dropdown.selectEl.empty();
+        for (const item of values().providerProfiles) dropdown.addOption(item.id, name(item));
+        dropdown.setValue(profile().id);
+        remove.setDisabled(values().providerProfiles.length < 2);
+      });
+    } },
+    { name: tr('providers.name'), desc: tr('providers.nameHelp'), render: setting => {
+      let input, showing;
+      setting.addText(control => { input = control; });
+      setting.addButton(button => button.setButtonText(tr('profiles.rename')).onClick(() => { void run({ type: 'rename', id: profile().id, name: input.getValue() }); }));
+      setting.addButton(button => button.setButtonText(tr('profiles.add')).onClick(() => { void run({ type: 'add', id: `provider-${globalThis.crypto.randomUUID()}`, name: input.getValue() }); }));
+      watch(setting, () => {
+        const current = profile(), signature = JSON.stringify([current.id, current.name]);
+        if (showing !== signature) input.setValue(name(current));
+        showing = signature;
+      });
+    } },
+    { name: tr('settings.quickAsk.baseUrl.name'), desc: tr('providers.connectionHelp'), render: setting => {
+      let input, showingId;
+      setting.addText(control => {
+        input = control;
+        control.setPlaceholder(tr('settings.quickAsk.baseUrl.example')).onChange(baseUrl => {
+          if (syncing) return;
+          setting.setErrorMessage(baseUrlError(normalizeBaseUrl(baseUrl)) ? tr('settings.quickAsk.validation.baseUrl') : '');
+        });
+        // Commit the address when editing finishes, so a pause while typing a
+        // different hostname cannot send the saved key to a partial hostname.
+        control.inputEl.addEventListener('blur', () => {
+          const baseUrl = normalizeBaseUrl(control.getValue());
+          if (baseUrl !== profile().baseUrl) void run({ type: 'connection', id: profile().id, baseUrl });
+        });
+      });
+      watch(setting, () => {
+        const current = profile();
+        const editing = showingId === current.id && input.inputEl.ownerDocument?.activeElement === input.inputEl;
+        if (!editing && input.getValue() !== current.baseUrl) input.setValue(current.baseUrl);
+        showingId = current.id;
+        setting.setErrorMessage(baseUrlError(normalizeBaseUrl(input.getValue())) ? tr('settings.quickAsk.validation.baseUrl') : '');
+      });
+    } },
+    { name: tr('settings.quickAsk.secret.name'), desc: tr('settings.quickAsk.secret.desc'), render: setting => {
+      const input = new SecretComponent(host.app, setting.controlEl);
+      input.onChange(secretId => { void run({ type: 'connection', id: profile().id, secretId: secretId ?? '' }); });
+      watch(setting, () => {
+        input.setValue(profile().secretId);
+        setting.setErrorMessage(profile().secretId ? '' : tr('settings.quickAsk.validation.required'));
+      });
+    } },
+  ];
+  const modelItems = [
+    { name: tr('providers.models'), desc: tr('providers.discoveryHelp'), render: setting => {
+      let dropdown, refresh;
+      setting.addDropdown(control => {
+        dropdown = control;
+        control.onChange(modelId => { void run({ type: 'model-select', id: profile().id, modelId }); });
+      });
+      setting.addButton(button => {
+        refresh = button;
+        button.setButtonText(tr('providers.refresh')).onClick(() => { void manager?.refresh(); });
+      });
+      watch(setting, () => {
+        const current = profile();
+        dropdown.selectEl.empty();
+        for (const model of current.models) dropdown.addOption(model.id, model.id || tr('providers.chooseModel'));
+        dropdown.setValue(current.selectedModelId);
+        const status = manager?.status(current.id) ?? 'providers.discoveryHelp';
+        setting.setDesc(tr(status));
+        refresh.setDisabled(status === 'providers.discovering');
+      });
+    } },
+    { name: tr('providers.manualModel'), desc: tr('providers.manualHelp'), render: setting => {
+      let input, remove;
+      setting.addText(control => { input = control; });
+      setting.addButton(button => button.setButtonText(tr('providers.useModel')).onClick(() => {
+        void run({ type: 'model-add', id: profile().id, modelId: input.getValue() });
+      }));
+      setting.addExtraButton(button => {
+        remove = button;
+        button.setIcon('trash-2').setTooltip(tr('providers.removeModel')).onClick(() => { void run({ type: 'model-delete', id: profile().id, modelId: profile().selectedModelId }); });
+      });
+      let showing;
+      watch(setting, () => {
+        const current = profile(), signature = JSON.stringify([current.id, current.selectedModelId]);
+        if (showing !== signature) input.setValue(current.selectedModelId);
+        showing = signature;
+        remove.setDisabled(!current.selectedModelId);
+      });
+    } },
+    { name: tr('settings.quickAsk.protocol.name'), desc: tr('providers.modelSettings'), render: setting => {
+      let input;
+      setting.addDropdown(control => {
+        input = control;
+        control.addOption('responses', 'Responses').addOption('chat-completions', 'Chat Completions');
+        control.onChange(protocol => { void run({ type: 'model-edit', id: profile().id, modelId: profile().selectedModelId, patch: { protocol } }); });
+      });
+      watch(setting, () => input.setValue(selectedModel(profile()).protocol));
+    } },
+    { name: tr('settings.quickAsk.contextWindow.name'), desc: `${tr('providers.modelSettings')} ${tr('settings.quickAsk.contextWindow.desc')}`, render: setting => {
+      let input;
+      setting.addText(control => {
+        input = control;
+        control.inputEl.setAttribute('aria-label', `${tr('settings.quickAsk.contextWindow.name')} (K)`);
+        control.onChange(value => {
+          if (syncing) return;
+          const valid = validContextWindowControl(value);
+          setting.setErrorMessage(valid ? '' : tr('settings.quickAsk.validation.contextWindow'));
+          if (valid) void run({ type: 'model-edit', id: profile().id, modelId: profile().selectedModelId, patch: { contextWindowTokens: contextWindowControlTokens(value) } });
+        });
+      });
+      setting.controlEl.createSpan({ text: 'K' });
+      watch(setting, () => {
+        const tokens = selectedModel(profile()).contextWindowTokens;
+        const text = quickAskControlValue({ quickAsk: { contextWindowTokens: tokens } }, 'quickAsk.contextWindowTokens');
+        if (input.getValue() !== text) input.setValue(text);
+        setting.setErrorMessage(validContextWindowControl(text) ? '' : tr('settings.quickAsk.validation.contextWindow'));
+      });
+    } },
+  ];
+  return [
+    { type: 'group', heading: tr('providers.connectionGroup'), items: connectionItems },
+    { type: 'group', heading: tr('providers.modelGroup'), items: modelItems },
+  ];
+}
+
+module.exports = { providerSettings };
 
 },
 "src/quick-ask/reasoning-view": function(module, exports, require) {
@@ -5472,14 +6282,21 @@ function parseDuckDuckGo(html) {
   if (!sources.length && !/no results|result--no-result/i.test(html)) throw new Error('PARSE');
   return sources;
 }
-function requestFor(provider, query, key) {
+function requestFor(provider, query, key, route = {}) {
   const headers = { 'Content-Type': 'application/json' };
+  let url = ENDPOINTS[provider];
   let body;
   if (provider === 'firecrawl') { headers.Authorization = `Bearer ${key}`; body = { query, limit: LIMIT, sources: ['web'] }; }
   if (provider === 'exa') { headers['x-api-key'] = key; body = { query, numResults: LIMIT, contents: { highlights: { maxCharacters: 2000 } } }; }
   if (provider === 'parallel') { headers['x-api-key'] = key; body = { objective: query, search_queries: [query], advanced_settings: { max_results: LIMIT, excerpt_settings: { max_chars_per_result: 2000 } } }; }
   if (provider === 'perplexity') { headers.Authorization = `Bearer ${key}`; body = { query, max_results: LIMIT, max_tokens_per_page: 512 }; }
-  return { url: ENDPOINTS[provider], method: 'POST', headers, body: JSON.stringify(body) };
+  if (provider === 'deepseek') {
+    const base = String(route.baseUrl ?? '').replace(/\/+$/, '');
+    url = base + (base.endsWith('/v1') ? '/tools/search' : '/v1/tools/search');
+    headers.Authorization = `Bearer ${key}`;
+    body = { query, count: LIMIT, need_content: false };
+  }
+  return { url, method: 'POST', headers, body: JSON.stringify(body) };
 }
 function createSearchClient({ network, secrets, scheduler }) {
   async function request(options, signal) {
@@ -5499,14 +6316,18 @@ function createSearchClient({ network, secrets, scheduler }) {
   }
   async function search(query, route, { signal, config, onRoute = () => {} } = {}) {
     if (route?.kind === 'off' || route?.kind === 'server') return { ok: false, code: 'DISABLED', sources: [] };
-    if (typeof query !== 'string' || !query.trim() || query.length > 500) return { ok: false, code: 'QUERY', sources: [] };
+    const deepseek = route?.provider === 'deepseek';
+    if (deepseek) {
+      if (typeof query !== 'string' || !query.trim() || [...query.trim()].length > 128)
+        return { ok: false, code: 'QUERY', message: 'DeepSeek Search requires a non-empty query of at most 128 Unicode characters. Retry with a shorter query.', sources: [] };
+    } else if (typeof query !== 'string' || !query.trim() || query.length > 500) return { ok: false, code: 'QUERY', sources: [] };
     query = query.trim();
     try {
       let response;
-      if (route.kind === 'independent') {
+      if (route.kind === 'independent' || route.kind === 'provider-api') {
         const key = secrets.resolve(route.secretId);
-        if (!key) return { ok: false, code: 'MISSING_SECRET', sources: [] };
-        response = await request(requestFor(route.provider, query, key), signal);
+        if (!key || (deepseek && !key.trim())) return { ok: false, code: 'MISSING_SECRET', sources: [] };
+        response = await request(requestFor(route.provider, query, key, route), signal);
       } else response = await request({ url: `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, method: 'GET' }, signal);
       const status = response.status;
       if (!(status >= 200 && status < 300)) {
@@ -5518,7 +6339,7 @@ function createSearchClient({ network, secrets, scheduler }) {
         const data = response.json && typeof response.json === 'object' ? response.json : JSON.parse(response.text);
         const rows = route.provider === 'firecrawl' ? data.data?.web : data.results;
         if (data.success === false || !Array.isArray(rows)) throw new Error('PARSE');
-        sources = normalizeSources(rows, LIMIT);
+        sources = normalizeSources(deepseek ? rows.map(row => ({ ...row, snippet: row?.summary || row?.snippet })) : rows, LIMIT);
         if (rows.length && !sources.length) throw new Error('PARSE');
       }
       onRoute(route);
@@ -5680,6 +6501,7 @@ class QuickAskSessionStore {
     this.indexPath = join(this.directory, "index.json");
     this.tails = new Map();
     this.index = null;
+    this.indexTail = Promise.resolve();
     this._newId = createIdGenerator({
       now: () => scheduler?.now?.() ?? Date.now(),
       random: () => Math.random(),
@@ -5778,8 +6600,16 @@ class QuickAskSessionStore {
     };
   }
 
-  async writeIndex(index) {
+  writeIndex(index) {
+    this.index = index;
+    const attempt = this.indexTail.then(() => this.persistIndex());
+    this.indexTail = attempt.catch(() => {});
+    return attempt;
+  }
+
+  async persistIndex() {
     await this.ensureDirectories();
+    const index = this.index;
     const payload = {
       kind: INDEX_KIND,
       activeSessionId: index.activeSessionId ?? null,
@@ -5794,7 +6624,6 @@ class QuickAskSessionStore {
       })),
     };
     await this.pluginData.dataAdapter.write(this.indexPath, `${JSON.stringify(payload)}\n`);
-    this.index = index;
   }
 
   // The index is a derived navigation cache. When it is missing or invalid it
@@ -5937,40 +6766,42 @@ class QuickAskSessionStore {
       }
       const record = { seq: parsed.nextSeq, at: timestamp, kind, payload: payload ?? {} };
       await this.pluginData.dataAdapter.append(this.adapterPathFor(id), `${JSON.stringify(record)}\n`);
-      await this.touch(id, { at: timestamp, kind, payload });
-      await this.notifyCommitted(id);
+      // The JSONL remains immediate. Only its derived activity cache waits for
+      // the turn boundary; standalone Context changes still flush immediately.
+      const indexChanged = await this.touch(id, { at: timestamp, kind, payload,
+        deferIndex: parsed.running && kind !== "turn/started" && kind !== "turn/finished" && kind !== "session/renamed" });
+      await this.notifyCommitted(id, { indexChanged });
       return record;
     });
   }
 
   // Best-effort post-commit notification. A mirror failure never fails or rolls
   // back the live session.
-  async notifyCommitted(id) {
+  async notifyCommitted(id, commit = { indexChanged: true }) {
     if (typeof this.onCommitted !== "function") return;
     try {
-      await this.onCommitted(id, this);
+      await this.onCommitted(id, this, commit);
     } catch (error) {
       this.onError(error);
     }
   }
 
-  async touch(id, { at, kind }) {
+  async touch(id, { at, kind, payload, deferIndex = false }) {
     const index = await this.ensureIndex();
     const entry = index.sessions.find((session) => session.id === id);
-    if (!entry) return;
+    if (!entry) return false;
     entry.lastActivity = at;
-    if (kind === "session/renamed") entry.title = normalizeTitle(entry.title);
+    if (kind === "session/renamed") entry.title = normalizeTitle(payload?.title);
+    if (kind === "turn/started") entry.running = true;
+    if (kind === "turn/finished") entry.running = false;
+    if (deferIndex) return false;
     await this.writeIndex(index);
+    return true;
   }
 
   async rename(id, title) {
     const normalized = normalizeTitle(title);
-    const record = await this.append(id, "session/renamed", { title: normalized });
-    const index = await this.ensureIndex();
-    const entry = index.sessions.find((session) => session.id === id);
-    if (entry) entry.title = normalized;
-    await this.writeIndex(index);
-    return record;
+    return await this.append(id, "session/renamed", { title: normalized });
   }
 
   async delete(id) {
@@ -6204,11 +7035,11 @@ module.exports = { quickAskControlValue, quickAskControlPatch, validContextWindo
 
 },
 "src/quick-ask/settings-ui": function(module, exports, require) {
-const { validContextWindowControl } = require("src/quick-ask/settings-controls");
+const { providerSettings } = require("src/quick-ask/provider-settings");
 const { profileSettings } = require("src/quick-ask/profile-settings");
 const { normalizeSearchSettings } = require("src/quick-ask/web-search");
 const { t } = require("src/quick-ask/i18n");
-const { quickAskDisplayPage, baseUrlError, normalizeBaseUrl } = require("src/quick-ask/settings");
+const { quickAskDisplayPage } = require("src/quick-ask/settings");
 
 function quickAskPreservedStatusDescription(host) {
   const preserved = host.quickAskIntegration?.preservedCopy?.() ?? null;
@@ -6306,128 +7137,73 @@ function searchSettingsPage(host, SecretComponent) {
 }
 
 function quickAskPage(host, SecretComponent) {
-  const values = host.current().quickAsk;
-  const quickAsk = host.quickAskIntegration;
-  const storage = quickAsk?.storageSummary?.();
+  const tr = key => t(host.settings, key);
+  const storage = host.quickAskIntegration?.storageSummary?.();
   return {
     type: "page",
-    name: t(host.settings, "settings.page.quickAsk.name"),
-    desc: t(host.settings, "settings.page.quickAsk.desc"),
+    name: tr("settings.page.quickAsk.name"),
+    desc: tr("settings.page.quickAsk.desc"),
     items: [
-      quickAskDisplayPage(host.settings),
-      searchSettingsPage(host, SecretComponent),
       {
-        type: "group",
-        heading: t(host.settings, "settings.group.quickAsk"),
+        type: "group", heading: tr("settings.quickAsk.generalGroup"),
         items: [
           {
-            name: t(host.settings, "settings.quickAsk.enable.name"),
-            desc: t(host.settings, "settings.quickAsk.enable.desc"),
+            name: tr("settings.quickAsk.enable.name"),
+            desc: tr("settings.quickAsk.enable.desc"),
             control: { type: "toggle", key: "quickAsk.enable" },
           },
           {
-            name: t(host.settings, "settings.quickAsk.protocol.name"),
-            desc: t(host.settings, "settings.quickAsk.protocol.desc"),
-            control: { type: "dropdown", key: "quickAsk.protocol", options: { responses: "Responses", "chat-completions": "Chat Completions" } },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.baseUrl.name"),
-            desc: t(host.settings, "settings.quickAsk.baseUrl.desc"),
-            control: {
-              type: "text", key: "quickAsk.baseUrl",
-              placeholder: t(host.settings, "settings.quickAsk.baseUrl.example"),
-              validate: (value) => {
-                const error = baseUrlError(normalizeBaseUrl(value));
-                return error ? t(host.settings, error === "baseUrlMissing" ? "settings.quickAsk.validation.required" : "settings.quickAsk.validation.baseUrl") : undefined;
-              },
-            },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.secret.name"),
-            desc: t(host.settings, "settings.quickAsk.secret.desc"),
-            render: setting => {
-              const validate = id => setting.setErrorMessage(id ? "" : t(host.settings, "settings.quickAsk.validation.required"));
-              new SecretComponent(host.app, setting.controlEl).setValue(values.secretId).onChange(async id => {
-                await host.setControlValue("quickAsk.secretId", id ?? "");
-                validate(id);
-              });
-              validate(values.secretId);
-            },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.model.name"),
-            desc: t(host.settings, "settings.quickAsk.model.desc"),
-            control: { type: "text", key: "quickAsk.model", validate: value => String(value).trim() ? undefined : t(host.settings, "settings.quickAsk.validation.required") },
-          },
-          ...profileSettings(host),
-          {
-            name: t(host.settings, "settings.quickAsk.contextWindow.name"),
-            desc: t(host.settings, "settings.quickAsk.contextWindow.desc"),
-            // SettingTextControl has no suffix API. Use the public Setting
-            // primitives to keep the unit outside the editable value.
-            render: setting => {
-              setting.addText(input => {
-                input.setValue(host.getControlValue("quickAsk.contextWindowTokens"));
-                input.inputEl.setAttribute("aria-label", `${t(host.settings, "settings.quickAsk.contextWindow.name")} (K)`);
-                input.onChange(async value => {
-                  const valid = validContextWindowControl(value);
-                  setting.setErrorMessage(valid ? "" : t(host.settings, "settings.quickAsk.validation.contextWindow"));
-                  if (valid) await host.setControlValue("quickAsk.contextWindowTokens", value);
-                });
-              });
-              setting.controlEl.createSpan({ text: "K" });
-            },
-          },
-          {
-            name: t(host.settings, "images.keepCache"),
-            desc: t(host.settings, "images.keepCacheHelp"),
-            control: { type: "toggle", key: "quickAsk.keepCachedImages" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.callLimit.name"),
-            desc: t(host.settings, "settings.quickAsk.callLimit.desc"),
+            name: tr("settings.quickAsk.callLimit.name"),
+            desc: tr("settings.quickAsk.callLimit.desc"),
             control: {
               type: "number", key: "quickAsk.callLimit", min: 1, max: 10, step: 1,
-              validate: (value) => (Number.isInteger(value) && value >= 1 && value <= 10
-                ? undefined : t(host.settings, "settings.quickAsk.validation.callLimit")),
+              validate: value => Number.isInteger(value) && value >= 1 && value <= 10
+                ? undefined : tr("settings.quickAsk.validation.callLimit"),
             },
           },
         ],
       },
       {
-        type: "group",
-        heading: t(host.settings, "settings.quickAsk.preservedCopy.name"),
-        items: [
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.name"),
-            desc: t(host.settings, "settings.quickAsk.preservedCopy.desc"),
-            control: { type: "toggle", key: "quickAsk.preservedCopy.enabled" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.directory.name"),
-            desc: t(host.settings, "settings.quickAsk.preservedCopy.directory.desc"),
-            control: { type: "text", key: "quickAsk.preservedCopy.directory" },
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.preservedCopy.status.name"),
-            desc: quickAskPreservedStatusDescription(host),
-          },
-          {
-            name: t(host.settings, "settings.quickAsk.data.name"),
-            desc: t(host.settings, "settings.quickAsk.data.desc"),
-            render: (setting) => renderQuickAskDataActions(host, setting),
-          },
-        ],
+        type: "page", name: tr("providers.pageTitle"), desc: tr("providers.pageDescription"),
+        items: providerSettings(host, SecretComponent),
       },
       {
-        type: "group",
-        heading: t(host.settings, "settings.quickAsk.storage.name"),
-        items: [{ name: t(host.settings, "settings.quickAsk.storage.name"), desc: storage?.text ?? "" }],
+        type: "page", name: tr("profiles.pageTitle"), desc: tr("profiles.pageDescription"),
+        items: profileSettings(host),
+      },
+      searchSettingsPage(host, SecretComponent),
+      quickAskDisplayPage(host.settings),
+      {
+        type: "page", name: tr("settings.quickAsk.dataPage"), desc: tr("settings.quickAsk.dataPageDescription"),
+        items: [
+          {
+            type: "group", heading: tr("settings.quickAsk.conversationDataGroup"),
+            items: [
+              { name: tr("settings.quickAsk.data.name"), desc: tr("settings.quickAsk.data.desc"),
+                render: setting => renderQuickAskDataActions(host, setting) },
+              { name: tr("settings.quickAsk.storage.name"), desc: storage?.text ?? "" },
+            ],
+          },
+          {
+            type: "group", heading: tr("settings.quickAsk.preservedCopy.name"),
+            items: [
+              { name: tr("settings.quickAsk.preservedCopy.name"), desc: tr("settings.quickAsk.preservedCopy.desc"),
+                control: { type: "toggle", key: "quickAsk.preservedCopy.enabled" } },
+              { name: tr("settings.quickAsk.preservedCopy.directory.name"), desc: tr("settings.quickAsk.preservedCopy.directory.desc"),
+                control: { type: "text", key: "quickAsk.preservedCopy.directory" } },
+              { name: tr("settings.quickAsk.preservedCopy.status.name"), desc: quickAskPreservedStatusDescription(host) },
+            ],
+          },
+          {
+            type: "group", heading: tr("settings.quickAsk.imageCacheGroup"),
+            items: [{ name: tr("images.keepCache"), desc: tr("images.keepCacheHelp"),
+              control: { type: "toggle", key: "quickAsk.keepCachedImages" } }],
+          },
+        ],
       },
     ],
   };
 }
-
 
 module.exports = { quickAskPage, searchSettingsPage };
 
@@ -6436,6 +7212,7 @@ module.exports = { quickAskPage, searchSettingsPage };
 const { normalizeProfiles, applyProfileAction } = require("src/quick-ask/profiles");
 const { normalizeSearchSettings } = require("src/quick-ask/web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("src/quick-ask/i18n");
+const { DEFAULT_CONTEXT_WINDOW_TOKENS, CONNECTION_FIELDS, normalizeProviderProfiles, providerValues, providerPatch } = require("src/quick-ask/provider-profiles");
 const DISPLAY_FIELDS = {
   fontSize: { default: 14, min: 12, max: 24, step: 1 },
   lineHeight: { default: 1.5, min: 1.2, max: 2, step: 0.1 },
@@ -6495,7 +7272,6 @@ function quickAskDisplayPage(settings) {
 // The fixed answer reserve, in tokens. It follows pi-agent's reserveTokens
 // default and is deliberately not a setting.
 const ANSWER_RESERVE_TOKENS = 16384;
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
 const DEFAULT_CALL_LIMIT = 3;
 const MIN_CALL_LIMIT = 1;
 const MAX_CALL_LIMIT = 10;
@@ -6522,6 +7298,7 @@ function defaultQuickAskSettings() {
     contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     callLimit: DEFAULT_CALL_LIMIT,
     preservedCopy: { enabled: false, directory: DEFAULT_PRESERVED_COPY_DIRECTORY },
+    ...providerValues(normalizeProviderProfiles()),
   };
 }
 
@@ -6568,7 +7345,11 @@ function normalizeQuickAskSettings(saved) {
         : defaults.preservedCopy.directory,
     },
   };
-  return values;
+  const catalog = normalizeProviderProfiles(saved, values);
+  // Preserve explicit legacy-field edits from older clients/imports. Catalog
+  // actions always publish these compatibility fields atomically.
+  const legacyPatch = Object.fromEntries(CONNECTION_FIELDS.filter(key => Object.hasOwn(saved, key)).map(key => [key, values[key]]));
+  return { ...values, ...providerPatch({ ...values, ...catalog }, legacyPatch) };
 }
 
 // Deliberately dependency-free: the plugin bundle runs in a host context that
@@ -6643,6 +7424,7 @@ function redactQuickAskSettings(settings) {
     // usable after an import, and a reference is not a credential. The value it
     // names is what never leaves SecretStorage.
     secretId: values.secretId,
+    ...normalizeProviderProfiles(values),
   };
 }
 
@@ -6674,7 +7456,8 @@ function applyQuickAskPatch(target, patch) {
   const search = { ...target.webSearch, ...patch.webSearch, secretIds: { ...target.webSearch?.secretIds, ...patch.webSearch?.secretIds } };
   if (Object.hasOwn(patch.webSearch ?? {}, "secretId")) search.secretIds[search.provider] = patch.webSearch.secretId;
   if (Object.hasOwn(patch.webSearch ?? {}, "provider") && patch.webSearch.provider !== target.webSearch?.provider) search.secretId = search.secretIds[patch.webSearch.provider] ?? "";
-  const normalized = normalizeQuickAskSettings({ ...target, ...patch, webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
+  const normalized = normalizeQuickAskSettings({ ...target, ...patch, providerProfiles: undefined, activeProviderProfileId: undefined,
+    webSearch: search, display: { ...target.display, ...patch.display }, preservedCopy: { ...target.preservedCopy, ...(patch.preservedCopy ?? {}) } });
   let applied = 0;
   if (patch.profileAction) {
     Object.assign(target, applyProfileAction(target, patch.profileAction, { language: patch.profileAction.language }));
@@ -6719,6 +7502,9 @@ function applyQuickAskPatch(target, patch) {
       }
     }
   }
+  const providers = providerPatch(target, patch);
+  if (JSON.stringify(target.providerProfiles) !== JSON.stringify(providers.providerProfiles) || target.activeProviderProfileId !== providers.activeProviderProfileId || patch.providerAction || Object.hasOwn(patch, 'providerProfiles')) applied++;
+  Object.assign(target, providers);
   return applied;
 }
 
@@ -8717,13 +9503,14 @@ function responsesFunctionTool({ name, description, parameters }) {
 
 // Built-in server-side search tools. Only these providers expose one, and each
 // names it differently on the wire; which endpoint/model may select one is
-// caller policy. The three `web_search` providers share one frozen value, so a
+// caller policy. The `web_search` providers share one frozen value, so a
 // request's tool bytes stay identical wherever it is selected.
 const RESPONSES_WEB_SEARCH_TOOL = Object.freeze({ type: "web_search" });
 const RESPONSES_SERVER_SEARCH_TOOLS = Object.freeze({
   openai: RESPONSES_WEB_SEARCH_TOOL,
   xai: RESPONSES_WEB_SEARCH_TOOL,
   bailian: RESPONSES_WEB_SEARCH_TOOL,
+  deepseek: RESPONSES_WEB_SEARCH_TOOL,
   openrouter: Object.freeze({ type: "openrouter:web_search" }),
 });
 
@@ -8732,14 +9519,14 @@ function responsesServerSearchTool(provider) {
 }
 
 function responsesMessageBlocks(item) {
-  return Array.isArray(item?.content) ? item.content : [];
+  return Array.isArray(item?.content) ? item.content.filter(block => block && typeof block === "object") : [];
 }
 
 // The URL citations carried by one content part, flattening the annotation's
 // `url_citation` wrapper. Caller policy decides what to do with them.
 function responsesCitationAnnotations(block) {
-  return (block?.annotations ?? [])
-    .filter((annotation) => annotation.type === "url_citation")
+  return (Array.isArray(block?.annotations) ? block.annotations : [])
+    .filter((annotation) => annotation?.type === "url_citation")
     .map((annotation) => annotation.url_citation ?? annotation);
 }
 
@@ -8749,6 +9536,8 @@ function responsesCitationRows(output) {
   const rows = [];
   for (const item of output ?? []) {
     rows.push(...(item?.action?.sources ?? []));
+    if (isResponsesWebSearchCall(item) && ['open_page', 'find_in_page'].includes(item.action?.type) && item.action.url)
+      rows.push({ url: item.action.url });
     for (const block of responsesMessageBlocks(item)) rows.push(...responsesCitationAnnotations(block));
   }
   return rows;
@@ -9529,7 +10318,7 @@ async function runStreamAttempt({
   }
 
   const headers = {
-    Authorization: `Bearer ${apiKey}`,
+    ...(protocol.requestHeaders ? protocol.requestHeaders(apiKey) : { Authorization: `Bearer ${apiKey}` }),
     "Content-Type": "application/json",
     Accept: "text/event-stream",
   };
@@ -9702,10 +10491,10 @@ function derivedEventsFromResponse(payload, state, emit) {
 async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal, onEvent, attempts, protocol }) {
   const state = emptyAttemptState();
   state.wire = protocol;
-  const requestBody = { ...body };
+  const requestBody = protocol.requestBody ? protocol.requestBody(body) : { ...body };
   delete requestBody.stream;
   const headers = {
-    Authorization: `Bearer ${apiKey}`,
+    ...(protocol.requestHeaders ? protocol.requestHeaders(apiKey) : { Authorization: `Bearer ${apiKey}` }),
     "Content-Type": "application/json",
     Accept: "application/json",
   };
@@ -9717,6 +10506,7 @@ async function runRequestAttempt({ network, scheduler, url, apiKey, body, signal
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
+      signal,
     });
   } catch (error) {
     if (signal !== null && signal !== undefined && signal.aborted) return abortedAttempt(attempts, true);
@@ -9833,7 +10623,9 @@ async function streamAttempt(options = {}) {
       message: "A request protocol adapter is required",
     }), 0, false);
   }
-  const url = protocol.createUrl(baseUrl);
+  let url;
+  try { url = protocol.createUrl(baseUrl, body); }
+  catch (error) { return failedAttempt(emptyAttemptState(), normalizeError(error), 0, false); }
   // A caller-marked endpoint starts on the non-streaming transport. A pre-event
   // native transport failure switches to it once, and the caller marks the
   // endpoint for the rest of the plugin lifecycle from the result.
@@ -10161,6 +10953,7 @@ class QuickAskView {
         const retry = ui.createEl(bubble, "button", { text: this.t(this.getSettings(), "submission.retry"), attributes: { type: "button" } });
         retry.addEventListener("click", () => { void this.send(entry.retry); });
       }
+      if (entry.role === "assistant") for (const html of entry.searchSuggestions ?? []) this.ui.renderSearchSuggestions?.(bubble, html);
       if (entry.role === "assistant" && entry.sources?.length) this.renderSearchSources(bubble, entry.sources);
       if (entry.role === "assistant" && entry.searchStatuses?.some(status => status.status === "failed"))
         ui.createEl(bubble, "small", { cls: "scholar-quick-ask-search-status", text: this.t(this.getSettings(), "search.failed") });
@@ -10974,7 +11767,7 @@ class QuickAskView {
       this.settlingReasoning = this.liveParts?.reasoning ?? null;
       if (result.text || result.reasoning) this.messages.push({
         role: "assistant", text: result.text ?? "", reasoning: result.reasoning ?? "", settled: true,
-        sources: result.sources ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
+        sources: result.sources ?? [], searchSuggestions: result.searchSuggestions ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
         usage: this.usage ?? null, model: (this.getConfig?.(sessionId) ?? {}).model ?? null,
       });
       this.streaming = null;
@@ -11444,19 +12237,39 @@ function normalizeSearchSettings(value = {}) {
   return { defaultEnabled: value?.defaultEnabled === true, provider, secretIds,
     secretId: secretIds[provider] ?? '' };
 }
+// Route by the selected wire protocol and model family, including relay URLs.
+// No paid capability probe or silent service fallback is performed.
 function serverSearch(config = {}) {
-  if (config.protocol && config.protocol !== "responses") return null;
   const base = String(config.baseUrl ?? '').replace(/\/+$/, '');
   const model = String(config.model ?? '');
-  if (base === 'https://api.openai.com/v1' && /^(gpt-(4\.1|4o|5)(?:[.-]|$)|gpt-6-astra(?:$|-)|o[34](?:-|$))/.test(model))
-    return { provider: 'openai', tool: responsesServerSearchTool('openai') };
-  if (base === 'https://api.x.ai/v1' && /^grok-4(?:[.-]|$)/.test(model))
-    return { provider: 'xai', tool: responsesServerSearchTool('xai') };
-  if (base === 'https://openrouter.ai/api/v1')
+  const protocol = config.protocol ?? 'responses';
+  if (!['responses', 'chat-completions'].includes(protocol)) return null;
+  if (protocol === 'responses' && base === 'https://openrouter.ai/api/v1')
     return { provider: 'openrouter', tool: responsesServerSearchTool('openrouter') };
-  const aliEndpoint = /^https:\/\/[a-z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com\/compatible-mode\/v1$/.test(base);
-  const aliModel = /^(qwen3\.[578](?!.*omni)|qwen3\.6-(?:plus|flash|35b-a3b)(?:-|$)|qwen3-max(?:$|-2026-01-23$)|deepseek-v4-(?:flash(?:-0731)?|pro(?:-0813)?)$|glm-5\.2$|kimi-k3$)/i.test(model);
-  if (aliEndpoint && aliModel) return { provider: 'bailian', tool: responsesServerSearchTool('bailian') };
+  if (protocol === 'responses' && /^(?:google\/)?gemini-/i.test(model)) {
+    // CPA/AGY exposes Google Search through the selected Responses protocol.
+    // Its hosted-search path must not be mixed with local function tools.
+    return { provider: 'google', localTools: false, tool: responsesServerSearchTool('openai'), toolChoice: 'required' };
+  }
+  if (/^(?:deepseek\/)?deepseek[-_]/i.test(model)) {
+    return { kind: 'provider-api', provider: 'deepseek', secretId: config.secretId ?? '', baseUrl: base, queryLimit: 128 };
+  }
+  if (protocol === 'chat-completions' && /^(?:google\/)?gemini-/i.test(model)) {
+    if (/\/endpoints\/openapi$/.test(base)) return { provider: 'google', localTools: false, native: false };
+    // Explicit Gemini API paths retain the native API-key adapter. Standard
+    // OpenAI-compatible bases (including CPA /v1) stay on Chat Completions.
+    const native = /\/v1(?:beta|alpha)(?:\/openai)?$/.test(base)
+      || /^https:\/\/generativelanguage\.googleapis\.com(?:\/|$)/.test(base);
+    return native ? { provider: 'google', localTools: false, native: true }
+      : { provider: 'google', localTools: false, chatSearch: 'google-search' };
+  }
+  if (protocol !== 'responses') return null;
+  if (/^(?:openai\/)?(gpt-(4\.1|4o|5)(?:[.-]|$)|gpt-6-astra(?:$|-)|o[34](?:-|$))/.test(model))
+    return { provider: 'openai', tool: responsesServerSearchTool('openai') };
+  if (/^(?:x-ai\/)?grok-4(?:[.-]|$)/.test(model))
+    return { provider: 'xai', tool: responsesServerSearchTool('xai') };
+  if (/^(qwen3\.[578](?!.*omni)|qwen3\.6-(?:plus|flash|35b-a3b)(?:-|$)|qwen3-max(?:$|-2026-01-23$)|glm-5\.2$|kimi-k3$)/i.test(model))
+    return { provider: 'bailian', tool: responsesServerSearchTool('bailian') };
   return null;
 }
 function searchRoute(enabled, settings = {}, config = {}) {
@@ -11493,17 +12306,78 @@ function normalizeSources(rows, limit = 20) {
   }
   return result;
 }
+function citationBlocks(item) {
+  return item?.role === 'assistant' && typeof item.content === 'string'
+    ? [{ text: item.content, annotations: item.annotations }]
+    : responsesMessageBlocks(item);
+}
 function responseSources(output) {
-  return normalizeSources(responsesCitationRows(output));
+  const chatRows = (output ?? []).flatMap(item => item?.role === 'assistant'
+    ? responsesCitationAnnotations({ annotations: item.annotations }) : []);
+  const googleRows = (output ?? []).flatMap(item => {
+    const chunks = item?.extra_content?.google?.groundingMetadata?.groundingChunks;
+    return Array.isArray(chunks) ? chunks.map(chunk => ({ url: chunk?.web?.uri, title: chunk?.web?.title })) : [];
+  });
+  return normalizeSources([...responsesCitationRows(output), ...chatRows, ...googleRows]);
+}
+function responseSuggestions(output) {
+  return [...new Set((output ?? []).flatMap(item => {
+    const html = item?.extra_content?.google?.groundingMetadata?.searchEntryPoint?.renderedContent;
+    return typeof html === 'string' && html.trim() ? [html] : [];
+  }))];
+}
+
+// Gemini segment offsets are UTF-8 bytes within a native Part, not JS string
+// indices. Validate both byte boundaries and the supplied segment text before
+// adding display-only links; raw model content always remains unchanged.
+function googleCitedAnswer(text, item) {
+  const metadata = item?.extra_content?.google?.groundingMetadata;
+  if (!metadata || item.content !== text) return null;
+  const parts = item.extra_content.google.nativeContent?.parts ?? [{ text }];
+  if (!Array.isArray(parts)) return text;
+  if (!Array.isArray(metadata.groundingSupports) || !Array.isArray(metadata.groundingChunks)) return text;
+  const insertions = new Map();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (const support of metadata.groundingSupports) {
+    const segment = support?.segment;
+    if (!segment || typeof segment !== 'object' || Array.isArray(segment)) continue;
+    const partIndex = segment.partIndex ?? 0;
+    const part = parts[partIndex];
+    if (!part || part.thought || typeof part.text !== 'string' || !Number.isInteger(partIndex)) continue;
+    const start = segment.startIndex ?? 0, end = segment.endIndex;
+    const bytes = new TextEncoder().encode(part.text);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > bytes.length) continue;
+    let matched, prefix;
+    try { matched = decoder.decode(bytes.slice(start, end)); prefix = decoder.decode(bytes.slice(0, end)); } catch { continue; }
+    if (typeof segment.text === 'string' && matched !== segment.text) continue;
+    const position = parts.slice(0, partIndex).reduce((size, previous) => size + (previous && !previous.thought && typeof previous.text === 'string' ? previous.text.length : 0), 0) + prefix.length;
+    if (position > text.length || !Array.isArray(support.groundingChunkIndices)) continue;
+    const links = insertions.get(position) ?? new Map();
+    for (const index of support.groundingChunkIndices) {
+      if (!Number.isInteger(index) || index < 0) continue;
+      const url = safeSourceUrl(metadata.groundingChunks[index]?.web?.uri);
+      if (url) links.set(url, `[${index + 1}](${url.replace(/[()<>]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase())})`);
+    }
+    insertions.set(position, links);
+  }
+  let result = text;
+  for (const [position, links] of [...insertions].sort((a, b) => b[0] - a[0])) {
+    result = result.slice(0, position) + [...links.values()].join(', ') + result.slice(position);
+  }
+  return result;
 }
 module.exports = { SEARCH_PROVIDERS, WEB_SEARCH_TOOL, normalizeSearchSettings, serverSearch, searchRoute,
-  nextSearchState, searchUnsupported, safeSourceUrl, normalizeSources, responseSources };
+  nextSearchState, searchUnsupported, safeSourceUrl, normalizeSources, responseSources, responseSuggestions };
 
 // Annotated citations become Markdown links only for display. Original answer
 // text and canonical provider items remain unchanged for copy/replay.
 function citedAnswer(text, output = []) {
   let result = String(text ?? '');
-  for (const item of output) for (const block of responsesMessageBlocks(item)) {
+  for (const item of output) {
+    const google = googleCitedAnswer(result, item);
+    if (google !== null) return google;
+  }
+  for (const item of output) for (const block of citationBlocks(item)) {
     if (block.text !== result || !Array.isArray(block.annotations)) continue;
     const citations = responsesCitationAnnotations(block)
       .filter(a => Number.isInteger(a.start_index) && Number.isInteger(a.end_index) && a.start_index >= 0 && a.end_index >= a.start_index && a.end_index <= result.length && safeSourceUrl(a.url))

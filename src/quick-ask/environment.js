@@ -1,4 +1,4 @@
-const { AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
+const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("./images");
@@ -150,6 +150,15 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
           throw error;
         }
       },
+      async readPreservedText(path) {
+        const file = fileOf(path);
+        return file ? await vault.read(file) : null;
+      },
+      async appendText(path, text) {
+        const file = fileOf(path);
+        if (!file) throw new Error(`Quick Ask preserved copy is missing: ${path}`);
+        await vault.append(file, text);
+      },
       resolveRole,
       resolveReference,
     },
@@ -262,6 +271,24 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
     },
 
     ui: {
+      renderSearchSuggestions(parent, html) {
+        const doc = parent.ownerDocument;
+        const content = doc.createElement('div');
+        content.appendChild(sanitizeHTMLToDom(html));
+        for (const anchor of content.querySelectorAll('a')) {
+          anchor.setAttribute('target', '_blank');
+          anchor.setAttribute('rel', 'noopener noreferrer');
+        }
+        const frame = doc.createElement('iframe');
+        frame.className = 'scholar-quick-ask-search-suggestions';
+        frame.title = 'Google Search';
+        frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        // Provider HTML/CSS stays isolated from Obsidian, without scripts,
+        // filesystem access or background resource loads. Links require a click.
+        frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"></head><body>${content.innerHTML}</body></html>`;
+        parent.appendChild(frame);
+      },
       clipboardImages(event) {
         return Array.from(event.clipboardData?.items ?? []).filter(item => item.kind === "file")
           .map(item => item.getAsFile()).filter(Boolean);

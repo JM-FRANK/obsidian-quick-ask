@@ -29,7 +29,7 @@ const RESPONSE_PROTOCOL = Object.freeze({
 });
 const CHAT_PROTOCOL = Object.freeze({
   ...chat.chatWire,
-  remoteCompaction: false, inputTokens: false, serverSearch: false,
+  remoteCompaction: false, inputTokens: false, serverSearch: true, // restricted by endpoint/model searchRoute
   storedResponses: false,
   // Every native tool call keeps a matching tool message, so a turn that ends
   // without a usable tool batch still records explicit non-execution results.

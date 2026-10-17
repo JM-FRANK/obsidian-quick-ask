@@ -324,3 +324,114 @@ test('import preserves a Chat Completions version and rejects a protocol/version
   assert.equal((await store.readLog('cc-import')).header.config.protocol, 'chat-completions');
   await assert.rejects(store.importSession({ id: 'bad-import', header: { ...header, schemaVersion: 1 }, records: [], title: 'CC' }), /unsupported/);
 });
+
+test('turn records stay immediate while index writes stay at two per turn', async () => {
+  const { store, adapter, scheduler } = makeStore();
+  const { id } = await store.createSession({});
+  const commits = [];
+  store.onCommitted = async (sessionId, owner, commit) => commits.push(commit.indexChanged);
+  const before = adapter.writes.length;
+  await store.append(id, 'turn/started', { turnId: 't' });
+  for (let i = 0; i < 20; i++) {
+    scheduler.advance(1);
+    await store.append(id, 'item/output', { item: { role: 'assistant', content: String(i) } });
+  }
+  assert.equal(adapter.writes.length - before, 1);
+  assert.equal((await store.readLog(id)).records.length, 21);
+  assert.equal((await store.listSessions())[0].lastActivity, new Date(scheduler.now()).toISOString());
+  scheduler.advance(1);
+  await store.append(id, 'turn/finished', { turnId: 't', state: 'stopped' });
+  assert.equal(adapter.writes.length - before, 2);
+  assert.deepEqual(commits, [true, ...Array(20).fill(false), true]);
+  const disk = JSON.parse(adapter.files.get(store.indexPath));
+  assert.equal(disk.sessions[0].lastActivity, new Date(scheduler.now()).toISOString());
+  assert.equal(disk.sessions[0].running, false);
+  await store.append(id, 'context/file-removed', { path: 'a.md' });
+  assert.equal(adapter.writes.length - before, 3, 'outside a turn, Context still flushes immediately');
+});
+
+test('renaming flushes one index with the new title even during a turn', async () => {
+  const { store, adapter } = makeStore();
+  const { id } = await store.createSession({ title: 'Old' });
+  await store.append(id, 'turn/started', { turnId: 't' });
+  const before = adapter.writes.length;
+  await store.rename(id, ' New   title ');
+  assert.equal(adapter.writes.length - before, 1);
+  assert.equal(JSON.parse(adapter.files.get(store.indexPath)).sessions[0].title, 'New title');
+  assert.equal((await store.readLog(id)).title, 'New title');
+});
+
+test('a crash between turn boundaries preserves all facts, torn-tail repair and recovery flush', async () => {
+  const { store, pluginData, adapter, scheduler } = makeStore();
+  const { id } = await store.createSession({});
+  await store.append(id, 'turn/started', { turnId: 't' });
+  await store.append(id, 'turn/response-created', { turnId: 't', responseId: 'r', stored: false });
+  await store.append(id, 'turn/accepted', { turnId: 't' });
+  const path = store.adapterPathFor(id);
+  adapter.files.set(path, adapter.files.get(path) + '{"seq":3');
+  const reloaded = new QuickAskSessionStore({ pluginData, scheduler });
+  const log = await reloaded.readLog(id);
+  assert.equal(log.running, true);
+  assert.equal(log.tornTail, true);
+  assert.deepEqual(log.records.map(r => r.kind), ['turn/started', 'turn/response-created', 'turn/accepted']);
+  await reloaded.append(id, 'turn/finished', { turnId: 't', state: 'interrupted' });
+  assert.equal((await reloaded.readLog(id)).tornTail, false);
+  assert.equal((await reloaded.readLog(id)).records.at(-1).seq, 3);
+  assert.equal(JSON.parse(adapter.files.get(store.indexPath)).sessions[0].running, false);
+});
+
+test('index writes across sessions serialize and recover after an index failure', async () => {
+  const { store, adapter } = makeStore();
+  const a = await store.createSession({});
+  const b = await store.createSession({});
+  const write = adapter.write;
+  let active = 0;
+  let peak = 0;
+  let fail = true;
+  adapter.write = async (path, text) => {
+    if (path !== store.indexPath) return write(path, text);
+    active++; peak = Math.max(peak, active);
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      if (fail) { fail = false; throw new Error('index disk full'); }
+      await write(path, text);
+    } finally { active--; }
+  };
+  const results = await Promise.allSettled([store.rename(a.id, 'Alpha'), store.rename(b.id, 'Beta')]);
+  assert.equal(results.filter(r => r.status === 'rejected').length, 1);
+  assert.equal(peak, 1);
+  const disk = JSON.parse(adapter.files.get(store.indexPath));
+  assert.deepEqual(disk.sessions.map(s => s.title), ['Alpha', 'Beta']);
+  assert.equal((await store.readLog(a.id)).title, 'Alpha', 'cache failure never erases the durable fact');
+});
+
+test('a mirrored turn writes each new log suffix and only two copies of the index', async () => {
+  const { createPreservedCopy, serializeLog } = require('../src/quick-ask/portability');
+  const { store, adapter } = makeStore();
+  const files = new Map();
+  const writes = [];
+  const suffixes = [];
+  const vault = {
+    readText: async path => files.get(path) ?? null,
+    writeText: async (path, text) => { files.set(path, text); writes.push(path); },
+    appendText: async (path, text) => { files.set(path, files.get(path) + text); suffixes.push(text); },
+  };
+  const copy = createPreservedCopy({ vault, getSettings: () => ({ preservedCopy: { enabled: true, directory: 'backup' } }) });
+  store.onCommitted = async (id, owner, { indexChanged }) => {
+    const log = await owner.readLog(id);
+    await copy.syncSession({ id, header: log.header, records: log.records, index: indexChanged ? await owner.loadIndex() : undefined });
+  };
+  const { id } = await store.createSession({});
+  const before = adapter.writes.length;
+  writes.length = 0;
+  await store.append(id, 'turn/started', { turnId: 't' });
+  for (let i = 0; i < 20; i++) await store.append(id, 'item/output', { item: { role: 'assistant', content: 'x'.repeat(100) } });
+  await store.append(id, 'turn/finished', { turnId: 't', state: 'complete' });
+  const log = await store.readLog(id);
+  const paths = copy.backupPaths();
+  assert.equal(adapter.writes.length - before, 2);
+  assert.deepEqual(writes, [paths.index, paths.index], 'no session rewrites within the turn');
+  assert.equal(suffixes.length, 22);
+  assert.ok(suffixes.every(text => text.split('\n').length === 2));
+  assert.equal(files.get(`${paths.sessions}/${id}.jsonl`), serializeLog(log.header, log.records));
+});
