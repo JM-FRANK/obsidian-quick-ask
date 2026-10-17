@@ -3,7 +3,7 @@
 // This module is pure CommonJS with no Obsidian, DOM, or global access. It
 // receives the `vault` capability slice (readText / exists / normalizePath /
 // resolveRole) and plain Vault Path strings, and it builds its unified diffs
-// from the pinned `diff@8.0.2` package.
+// from the pinned `diff@8.0.3` package.
 //
 // Context Diff Filtering is used only while producing proactive diffs for an
 // already-sent tracked file. It never touches the original text sent for a first

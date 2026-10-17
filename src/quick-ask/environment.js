@@ -1,7 +1,8 @@
-const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip, editorInfoField, editorLivePreviewField } = require("obsidian");
+const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
 const { createSelectionHover } = require("./selection-hover");
+const { observeStatusBarInset } = require("./status-bar-layout");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("./images");
 const { droppedFilePaths } = require("./file-input");
 const { pickerOptions, isCompositionEvent } = require("./file-picker");
@@ -56,6 +57,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
   const selectionHover = createSelectionHover();
   const selectionCleanups = new WeakMap();
   plugin.register(() => selectionHover.dispose());
+  const layoutObservers = new Set();
+  plugin.register(() => { for (const stop of [...layoutObservers]) stop(); });
   let fuzzyQuery = null;
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
@@ -347,6 +350,15 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         let cleanups = selectionCleanups.get(owner);
         if (!cleanups) { cleanups = new Set(); selectionCleanups.set(owner, cleanups); }
         cleanups.add(selectionHover.bind(element, selection));
+      },
+      observeStatusBarInset(element) {
+        const dispose = observeStatusBarInset(element, listener => {
+          const refs = ['layout-change', 'resize', 'css-change', 'window-open', 'window-close'].map(name => workspace.on(name, listener));
+          return () => { for (const ref of refs) workspace.offref(ref); };
+        });
+        const stop = () => { dispose(); layoutObservers.delete(stop); };
+        layoutObservers.add(stop);
+        return stop;
       },
       setIcon(element, icon) {
         setIcon(element, icon);

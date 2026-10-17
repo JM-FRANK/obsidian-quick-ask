@@ -23,7 +23,7 @@ const {
   createTurnUsage, createSessionUsage,
 } = require("./tokens");
 const {
-  CompactionTransaction, chooseRetainedTail, selectCompactionRange, isStructurallyBalanced,
+  CompactionTransaction, chooseRetainedTail, selectCompactionRange,
   buildSummaryInstruction, frameSummary, truncateToolResult, requestOfficialCompaction,
   requestInputTokens, measureItems, measureText, replayCompactionSurface,
 } = require("./compaction");

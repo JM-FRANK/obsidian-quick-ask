@@ -3,7 +3,9 @@ const esbuild = require("esbuild");
 module.exports = function quickAskRuntime(root) {
 const bundledPackageDirectories = new Set();
 function bundle(options) {
-  const result = esbuild.buildSync({ ...options, absWorkingDir: root, metafile: true });
+  // Compact generated dependency code without renaming functions/classes or
+  // changing syntax. Owned source factories remain readable in both hosts.
+  const result = esbuild.buildSync({ ...options, minifyWhitespace: true, absWorkingDir: root, metafile: true });
   for (const input of Object.keys(result.metafile.inputs)) {
     const normalized = input.replaceAll("\\", "/");
     const marker = normalized.lastIndexOf("node_modules/");
@@ -16,9 +18,21 @@ function bundle(options) {
 }
 // Quick Ask's pinned third-party packages are bundled into the artifact, so the
 // installable plugin stays self-contained with no runtime npm resolution.
-const quickAskDependencies = ["eventsource-parser", "diff", "zustand/vanilla", "tokenx"].map((name) => {
+// An ESM facade exposes only the functions used by the feature, allowing the
+// bundler to discard unrelated package APIs before converting to CommonJS.
+const dependencyExports = [
+  ["eventsource-parser", ["createParser"]],
+  ["diff", ["createTwoFilesPatch"]],
+  ["zustand/vanilla", ["createStore"]],
+  ["tokenx", ["estimateTokenCount"]],
+];
+const quickAskDependencies = dependencyExports.map(([name, exports]) => {
   const source = bundle({
-    entryPoints: [require.resolve(name, { paths: [root] })],
+    stdin: {
+      contents: `import { ${exports.join(", ")} } from ${JSON.stringify(name)}; module.exports = { ${exports.join(", ")} };`,
+      resolveDir: root,
+      sourcefile: `quick-ask-dependency-${name.replaceAll("/", "-")}.js`,
+    },
     bundle: true,
     write: false,
     format: "cjs",

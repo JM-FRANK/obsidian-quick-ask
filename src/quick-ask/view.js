@@ -14,8 +14,8 @@ const { conversationFromRecords, questionFromInput } = require("./conversation-m
 const { selectionSnapshots } = require("./history-selections");
 const { MIN_INPUT_HEIGHT, inputHeight, draggedInputHeight, availableInputHeight } = require("./composer-layout");
 const {
-  createPendingContext, addFile, addSelection, removeFile, removeSelection, clearSelections,
-  derivePendingView, showsExpandBar,
+  createPendingContext, addFile, addSelection, removeFile, removeSelection,
+  derivePendingView,
 } = require("./pending-context");
 const { supportedReferences, canReferencePath } = require("./file-input");
 const { validateDrop, isAcceptedDropTarget } = require("./drag-source");
@@ -102,6 +102,7 @@ class QuickAskView {
     if (this.followFrame !== null) this.followWindow.cancelAnimationFrame(this.followFrame);
     this.followFrame = null;
     this.scrollObserver?.disconnect();
+    this.stopStatusBarInset?.();
     this.stopResizing?.();
     this.resizeObserver?.disconnect();
     if (this.roots.pending) this.ui.clear(this.roots.pending);
@@ -117,6 +118,7 @@ class QuickAskView {
   // content element.
   async render(container) {
     const ui = this.ui;
+    this.stopStatusBarInset?.();
     this.mounted = true;
     this.renderedMessages = null;
     openViews.add(this);
@@ -135,6 +137,7 @@ class QuickAskView {
     this.renderHeader();
     this.renderPending();
     this.mountComposer();
+    this.stopStatusBarInset = ui.observeStatusBarInset(container);
     this.applyAppearance();
     try {
       const { reset } = await this.sessionStore.init();
@@ -1430,31 +1433,6 @@ class QuickAskView {
       this.renderSendButton();
       return true;
     });
-  }
-
-  // The next question's staged input: the composer's own text, its staged file
-  // references, and the dragged selections. Sending is ticket 02's concern.
-  pendingQuestion() {
-    return {
-      question: this.composer?.text ?? "",
-      references: this.composer?.paths ?? [],
-      selections: this.pending.selections.map((selection) => ({ ...selection })),
-      files: this.pending.files.map((file) => file.path),
-    };
-  }
-
-  addFileReference(path) {
-    this.pending = addFile(this.pending, path);
-    this.renderPending();
-  }
-
-  clearSelections() {
-    this.pending = clearSelections(this.pending);
-    this.renderPending();
-  }
-
-  hasExpandBar() {
-    return showsExpandBar(this.pending);
   }
 
   saveDraft() {

@@ -1,4 +1,4 @@
-const { normalizeSources, safeSourceUrl } = require('./web-search');
+const { normalizeSources } = require('./web-search');
 const { createAbortController } = require('./transport');
 const LIMIT = 5;
 const ENDPOINTS = { firecrawl: 'https://api.firecrawl.dev/v2/search', exa: 'https://api.exa.ai/search',

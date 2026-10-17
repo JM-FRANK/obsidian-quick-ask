@@ -10,7 +10,7 @@
 }
 .view-content.scholar-quick-ask-view {
   padding: 0;
-  padding-bottom: 0;
+  padding-bottom: var(--scholar-status-bar-inset, 0px);
   min-height: 0;
   box-sizing: border-box;
   overflow: hidden;
@@ -406,6 +406,9 @@
   background: transparent;
   flex-shrink: 0;
   min-width: 0;
+}
+.scholar-quick-ask-view.has-status-bar-overlap .scholar-quick-ask-composer {
+  padding-bottom: 2px;
 }
 
 .scholar-quick-ask-composer-shell {
