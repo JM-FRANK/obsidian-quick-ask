@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.5 — Model connections, provider search and selection history
+
+### Added
+
+- Save multiple model connections with their own Base URL and named API secret. Each connection remembers its selected model, and each model can use its own protocol and context window. Discover models after editing connection details or with an explicit refresh; model discovery sends no note content. Manual model IDs remain available.
+- Show submitted text selections above their user message, including replayed history. Previews use a single fading line and the user's bubble tint; hovering for 0.75 seconds shows a source filename and the full original quote in a readable, scrollable card. Selection references have no click or navigation action.
+- Add an initial study-quiz system profile with three questions, including upgrade seeding with a unique name that preserves existing profiles.
+
+### Changed
+
+- Organize settings into General, Model connections, System roles, Web search, Appearance, and Data and backups. Existing single-connection settings migrate to a default connection; connection/model changes apply to new sessions, while existing sessions retain their saved configuration.
+- Support DeepSeek's independent Search API across DeepSeek models and both request protocols, native Gemini API-key search, and compatible relay endpoints, including CPA/Antigravity Gemini Responses and Chat Completions search. Search remains manually selected, with DuckDuckGo as the default. Google search turns retain explicit Context without local file tools.
+- Reduce session-index write amplification while keeping canonical session records append-only and immediately persisted.
+
+### Fixed
+
+- Resolve file-reference aliases and heading/block suffixes to Vault paths while respecting code and other literal syntax. Preserve Composer code whitespace.
+- Preserve full native Gemini search history and grounding metadata for native replay, and project the ordinary fields for plain Chat Completions history.
+- Keep release attachments limited to the three Obsidian installation files, with license notices embedded in the bundle and checksums in release notes.
+
+### Validation and upgrade notes
+
+- The latest upstream change passed 36 core test files and 8 distribution checks; the standalone snapshot passed 549 tests and build/source consistency checks. Historical selection display and UI refinements were accepted by the user. Remaining unrelated acceptance items stay tracked separately.
+- Version 1.0.5 requires Obsidian 1.13.7 or later on desktop. API access is supplied by your chosen provider; discovering a model does not verify its generation or search compatibility. Existing session logs and accepted model inputs are not rewritten.
+
 ## 1.0.4 — Image attachments and context-window improvements
 
 ### Added
