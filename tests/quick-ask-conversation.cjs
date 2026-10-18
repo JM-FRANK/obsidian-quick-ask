@@ -909,10 +909,10 @@ test('Stop during a CC search retains reasoning and paired tool history', async 
   assert.ok(items.some(m => m.role === 'tool' && m.tool_call_id === 'a'));
 });
 
-test('recovered retries preserve their renderer while genuinely new questions use the current version', async () => {
-  const { renderTurn, buildInstructions, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
+test('recovered retries and fresh questions adopt the current renderer and tool descriptions', async () => {
+  const { renderTurn, buildInstructions, getFullFileTool, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
   for (const protocol of ['responses', 'chat-completions']) {
-    for (const version of [1, 2, 3]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7]) {
       const script = protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => ({
         ok: true, status: 200, headers: { get: () => null },
         body: (async function* () { yield new TextEncoder().encode('data: {"id":"cc","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'); })(),
@@ -928,18 +928,20 @@ test('recovered retries preserve their renderer while genuinely new questions us
       assert.equal(result.status, 'complete');
       const started = sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1);
       assert.notEqual(started.payload.turnId, 'old');
-      assert.equal(started.payload.rendererVersion, version);
+      assert.equal(started.payload.rendererVersion, RENDERER_VERSION);
       const native = require('../src/quick-ask/protocol').protocolFor({ protocol });
-      const expected = renderTurn({ mutations: additions, question: 'retry me', rendererVersion: version, userMessage: native.userMessage });
+      const expected = renderTurn({ mutations: additions, question: 'retry me', rendererVersion: RENDERER_VERSION, userMessage: native.userMessage });
       const body = JSON.parse(network.requests.at(-1).options.body);
       const input = protocol === 'responses' ? body.input : body.messages.slice(1);
-      assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content, buildInstructions({ rendererVersion: version, customSystemPrompt: 'Saved custom role.' }));
+      assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content, buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: 'Saved custom role.' }));
+      assert.deepEqual(body.tools[0], native.functionTool(getFullFileTool()));
       assert.deepEqual(input, expected);
       assert.deepEqual(conversation.snapshot(id).items.slice(0, 2), expected);
       await conversation.send(id, 'new question', { additions });
       assert.equal(sessionStore.records.get(id).filter(r => r.kind === 'turn/started').at(-1).payload.rendererVersion, RENDERER_VERSION);
       assert.match(network.requests.at(-1).options.body, /1 \| alpha/);
       const fresh = JSON.parse(network.requests.at(-1).options.body);
+      assert.deepEqual(fresh.tools[0], native.functionTool(getFullFileTool()));
       assert.equal(protocol === 'responses' ? fresh.instructions : fresh.messages[0].content, buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: 'Saved custom role.' }));
     }
   }
@@ -959,7 +961,41 @@ test('legacy turns recover renderer 1 and unknown retry renderers fail before wr
   assert.equal(JSON.stringify(sessionStore.records.get(id)), before);
 });
 
-test('a pinned retry prices its own format and retains it through a full-file tool continuation', async () => {
+for (const protocol of ['responses', 'chat-completions']) {
+  test(`${protocol}: historical replay and retried Context never send internal selection offsets`, async () => {
+    const { renderTurn, RENDERER_VERSION } = require('../src/quick-ask/prompt-renderer');
+    const native = require('../src/quick-ask/protocol').protocolFor({ protocol });
+    const f = makeConversation({ settings: { protocol },
+      script: protocol === 'responses' ? () => sseResponse(streamedTurn()) : () => chatResponse() });
+    const id = await newSession(f.sessionStore, f.conversation, f.settings);
+    const source = '你好 hello world', from = source.indexOf('world');
+    const additions = [{ kind: 'file', path: 'a.md', text: source },
+      { kind: 'selection', path: 'a.md', from, to: source.length, text: 'world', startLine: 1, startColumn: from }];
+    const old = renderTurn({ mutations: additions, question: 'old question', rendererVersion: 6, userMessage: native.userMessage });
+    await f.sessionStore.append(id, 'turn/started', { turnId: 'old', question: 'old question', additions, rendererVersion: 6 });
+    await f.sessionStore.append(id, 'item/input', { items: old });
+    await f.sessionStore.append(id, 'turn/finished', { turnId: 'old', state: 'complete', text: 'old answer' });
+    const saved = JSON.stringify(f.sessionStore.records.get(id));
+    await f.conversation.recover(id);
+    const price = f.conversation.snapshot(id).price;
+    assert.equal(typeof price.total, 'number');
+    const result = await f.conversation.send(id, 'retry question', { additions, rendererVersion: 6 });
+    assert.equal(result.status, 'complete');
+    const body = JSON.parse(f.network.requests.at(-1).options.body);
+    assert.equal(JSON.stringify(body).includes('start_column'), false);
+    assert.equal(JSON.stringify(body).includes('startColumn'), false);
+    const input = body.input ?? body.messages.slice(1);
+    const envelopes = input.filter(item => require('../src/quick-ask/protocol').messageText(item).startsWith('<quick_ask_context>'));
+    assert.equal(envelopes.length, 2);
+    for (const item of envelopes) assert.match(require('../src/quick-ask/protocol').messageText(item), /start_unit="4"/);
+    assert.equal(JSON.stringify(f.sessionStore.records.get(id).slice(0, 3)), saved);
+    const latest = f.sessionStore.records.get(id).filter(record => record.kind === 'turn/started').at(-1);
+    assert.equal(latest.payload.rendererVersion, RENDERER_VERSION);
+    assert.equal(latest.payload.additions[1].from, from, 'the internal offset still exists only in local records');
+  });
+}
+
+test('old retry hints use current pricing and current numbering through a full-file tool continuation', async () => {
   const store = makeStore();
   const tracker = makeTracker();
   tracker.allowlist = () => ['a.md'];
@@ -975,11 +1011,11 @@ test('a pinned retry prices its own format and retains it through a full-file to
   const state = conversation.stateFor(id);
   const oldPrice = await conversation.pricePendingRequest(state, { question: 'q', additions, rendererVersion: 1 });
   const newPrice = await conversation.pricePendingRequest(state, { question: 'q', additions, rendererVersion: 2 });
-  assert.ok(newPrice.price.total > oldPrice.price.total);
+  assert.equal(newPrice.price.total, oldPrice.price.total, 'pricing uses the current renderer even for an old retry hint');
   const result = await conversation.send(id, 'q', { additions, rendererVersion: 1 });
   assert.equal(result.status, 'complete');
   const body = JSON.parse(environment.network.requests.at(-1).options.body);
-  assert.equal(body.messages.find(m => m.role === 'tool').content, 'alpha\nbeta');
+  assert.equal(body.messages.find(m => m.role === 'tool').content, '1 | alpha\n2 | beta');
 });
 
 test('CC Stop before the first frame leaves canonical history untouched', async () => {

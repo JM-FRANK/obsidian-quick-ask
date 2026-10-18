@@ -3,7 +3,8 @@ const { t } = require('./i18n');
 
 const DEFAULT_PROFILE_ID = 'default';
 const STUDY_PROFILE_ID = 'study-quiz';
-const STUDY_ROLE_INSTRUCTIONS = '你是 Obsidian Quick Ask 中的学习出题助手。根据用户提供的学习笔记，结合你的知识出题，检验知识掌握、理解和应用能力。以笔记为主要依据，超出笔记范围的题目标注为拓展题；发现明显错误时指出，不将其作为标准答案。\n\n遵循用户指定的题量、题型和难度；未指定时出 3 道由浅入深的题，先不给答案。用户作答后，准确评判并简要解释，针对薄弱点继续练习。\n\n除非用户明确要求，不显示行号相关信息。';
+const LEGACY_STUDY_ROLE_INSTRUCTIONS = '你是 Obsidian Quick Ask 中的学习出题助手。根据用户提供的学习笔记，结合你的知识出题，检验知识掌握、理解和应用能力。以笔记为主要依据，超出笔记范围的题目标注为拓展题；发现明显错误时指出，不将其作为标准答案。\n\n遵循用户指定的题量、题型和难度；未指定时出 3 道由浅入深的题，先不给答案。用户作答后，准确评判并简要解释，针对薄弱点继续练习。\n\n除非用户明确要求，不显示行号相关信息。';
+const STUDY_ROLE_INSTRUCTIONS = 'You are a study-quiz assistant in Obsidian Quick Ask. Use the user\'s study notes and your knowledge to test recall, understanding, and application. Base questions primarily on the notes; label questions beyond their scope as extension questions. Point out clear errors rather than treating them as correct answers.\n\nFollow the requested number, format, and difficulty of questions. By default, ask 3 progressively harder questions without answers. After the user responds, assess their answers accurately, explain briefly, and continue practicing weak areas.\n\nDo not include line-number information unless explicitly requested.';
 
 // The legacy systemPrompt remains the active request value. Profiles are a
 // settings catalog only; session snapshots and renderer semantics stay intact.
@@ -57,7 +58,13 @@ function normalizeProfiles(saved = {}) {
     current.prompt = saved.systemPrompt;
     current.showDefaultRole = false;
   }
-  return { systemProfiles: profiles, activeSystemProfileId, initialProfilesVersion: Math.max(1, initialProfilesVersion) };
+  // Translate only an untouched built-in preset. Keep edited text, names,
+  // deleted presets, copied custom roles and existing session snapshots intact.
+  const study = profiles.find(profile => profile.id === STUDY_PROFILE_ID);
+  const translated = study?.prompt === LEGACY_STUDY_ROLE_INSTRUCTIONS;
+  if (translated) study.prompt = STUDY_ROLE_INSTRUCTIONS;
+  return { systemProfiles: profiles, activeSystemProfileId, initialProfilesVersion: Math.max(1, initialProfilesVersion),
+    ...(translated && current === study ? { systemPrompt: study.prompt } : {}) };
 }
 
 function activeProfile(settings) {

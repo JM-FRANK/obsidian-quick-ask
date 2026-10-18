@@ -7,6 +7,48 @@ const { DEFAULT_ROLE_INSTRUCTIONS, buildInstructions } = require('../src/quick-a
 
 function act(settings, action) { applyQuickAskPatch(settings, { profileAction: action }); }
 
+const oldStudyPrompt = '你是 Obsidian Quick Ask 中的学习出题助手。根据用户提供的学习笔记，结合你的知识出题，检验知识掌握、理解和应用能力。以笔记为主要依据，超出笔记范围的题目标注为拓展题；发现明显错误时指出，不将其作为标准答案。\n\n遵循用户指定的题量、题型和难度；未指定时出 3 道由浅入深的题，先不给答案。用户作答后，准确评判并简要解释，针对薄弱点继续练习。\n\n除非用户明确要求，不显示行号相关信息。';
+
+test('untouched Chinese study presets migrate to English with active mirrors reconciled', () => {
+  for (const activeSystemProfileId of ['default', 'study-quiz']) {
+    const saved = { initialProfilesVersion: 1, activeSystemProfileId,
+      systemPrompt: activeSystemProfileId === 'study-quiz' ? oldStudyPrompt : 'Read role',
+      systemProfiles: [
+        { id: 'default', name: null, prompt: 'Read role' },
+        { id: 'study-quiz', name: 'My quiz', prompt: oldStudyPrompt },
+      ] };
+    const before = JSON.stringify(saved);
+    const next = normalizeQuickAskSettings(saved);
+    assert.equal(next.systemProfiles.find(profile => profile.id === 'study-quiz').prompt, STUDY_ROLE_INSTRUCTIONS);
+    assert.equal(next.systemProfiles.find(profile => profile.id === 'study-quiz').name, 'My quiz');
+    assert.equal(next.activeSystemProfileId, activeSystemProfileId);
+    assert.equal(next.systemPrompt, activeSystemProfileId === 'study-quiz' ? STUDY_ROLE_INSTRUCTIONS : 'Read role');
+    assert.equal(JSON.stringify(saved), before);
+    assert.deepEqual(normalizeQuickAskSettings(next), next);
+    const imported = normalizeQuickAskSettings();
+    applyQuickAskPatch(imported, saved);
+    assert.deepEqual(imported.systemProfiles, next.systemProfiles);
+    assert.equal(imported.systemPrompt, next.systemPrompt);
+  }
+});
+
+test('study migration preserves edited prompts, legacy overrides, copied roles and deletion', () => {
+  for (const prompt of ['', `${oldStudyPrompt}\nMy edit`, 'Custom quiz']) {
+    const saved = { initialProfilesVersion: 1, activeSystemProfileId: 'study-quiz', systemPrompt: prompt,
+      systemProfiles: [{ id: 'default', prompt: '' }, { id: 'study-quiz', prompt }] };
+    assert.equal(normalizeQuickAskSettings(saved).systemPrompt, prompt);
+    assert.equal(activeProfile(normalizeQuickAskSettings(saved)).prompt, prompt);
+  }
+  const overridden = normalizeQuickAskSettings({ initialProfilesVersion: 1, activeSystemProfileId: 'study-quiz',
+    systemPrompt: 'Legacy field edit', systemProfiles: [{ id: 'study-quiz', prompt: oldStudyPrompt }] });
+  assert.equal(overridden.systemPrompt, 'Legacy field edit');
+  const copied = normalizeQuickAskSettings({ systemPrompt: oldStudyPrompt });
+  assert.equal(copied.systemPrompt, oldStudyPrompt, 'a custom default-role copy is not a built-in study preset');
+  const deleted = normalizeQuickAskSettings({ initialProfilesVersion: 1,
+    systemProfiles: [{ id: 'default', prompt: '' }], activeSystemProfileId: 'default', systemPrompt: '' });
+  assert.equal(deleted.systemProfiles.some(profile => profile.id === 'study-quiz'), false);
+});
+
 test('fresh profiles have localized names and study uses three questions in new sessions', () => {
   const settings = normalizeQuickAskSettings();
   assert.deepEqual(settings.systemProfiles.map(profile => profileName(profile, 'zh-CN')), ['文献阅读', '学习出题']);
@@ -14,7 +56,8 @@ test('fresh profiles have localized names and study uses three questions in new 
   const readingSession = sessionConfigSnapshot(settings);
   act(settings, { type: 'select', id: 'study-quiz' });
   assert.equal(settings.systemPrompt, STUDY_ROLE_INSTRUCTIONS);
-  assert.match(sessionConfigSnapshot(settings).systemPrompt, /未指定时出 3 道/);
+  assert.match(sessionConfigSnapshot(settings).systemPrompt, /By default, ask 3 progressively harder questions without answers/);
+  assert.equal(/[\u3400-\u9fff]/u.test(STUDY_ROLE_INSTRUCTIONS), false);
   const instructions = buildInstructions({ rendererVersion: 4, customSystemPrompt: settings.systemPrompt });
   assert.ok(instructions.endsWith(STUDY_ROLE_INSTRUCTIONS));
   assert.ok(instructions.includes('Quick Ask is read-only'));

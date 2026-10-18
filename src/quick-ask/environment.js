@@ -1,6 +1,7 @@
 const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
+const { createMarkdownVisuals } = require("./markdown-visuals");
 const { createSelectionHover } = require("./selection-hover");
 const { observeStatusBarInset } = require("./status-bar-layout");
 const { imageMime, imagePaths, imageError, prepareImages, validateImageBatch, createImageCache, initializeImageCache } = require("./images");
@@ -63,6 +64,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
   const markdownComponents = new WeakMap();
+  const markdownVisuals = new WeakMap();
+  let markdownProcessorRegistered = false;
   const imageDirectory = `${pluginDirectory}/quick-ask/image-cache`;
   const imageCache = createImageCache({ adapter: vault.adapter, directory: imageDirectory });
   // The renderer/application realm outlives a plugin reload; it disappears on
@@ -103,7 +106,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
     return plugin.app?.workspace?.activeLeaf?.view?.containerEl?.ownerDocument?.defaultView ?? null;
   }
 
-  return {
+  const environment = {
     vault: {
       listFiles() {
         return vault.getFiles().filter(file => !isInsideConfigDirectory(file.path, configDirectory)).map((file) => ({ path: file.path, mtime: file.stat?.mtime ?? 0 }));
@@ -324,6 +327,25 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         if (!doc) return;
         imageViewer.open({ document: doc, resource, label: alias || path.split("/").at(-1) });
       },
+      previewDiagram(svg, origin) {
+        const doc = origin.ownerDocument;
+        const copy = svg.cloneNode(true);
+        const box = svg.viewBox?.baseVal;
+        if (box?.width > 0 && box?.height > 0) {
+          copy.setAttribute('width', String(box.width));
+          copy.setAttribute('height', String(box.height));
+        }
+        copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        copy.style.maxWidth = 'none';
+        const style = doc.defaultView.getComputedStyle(svg);
+        copy.style.color = style.color;
+        copy.style.backgroundColor = style.getPropertyValue('--background-primary');
+        const serialized = new doc.defaultView.XMLSerializer().serializeToString(copy);
+        // An image resource isolates SVG IDs and disables diagram interactions,
+        // while using exactly the same window-local viewer as image attachments.
+        imageViewer.open({ document: doc, resource: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(serialized)}`,
+          label: t(language, 'rendering.diagram') });
+      },
       createEl(parent, tag, options = {}) {
         const element = parent.createEl(tag, { cls: options.cls, text: options.text });
         for (const [name, value] of Object.entries(options.attributes ?? {})) {
@@ -363,14 +385,29 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       setIcon(element, icon) {
         setIcon(element, icon);
       },
-      renderMarkdown(element, markdown, sourcePath) {
+      async renderMarkdown(element, markdown, sourcePath) {
         const owner = element.closest(".scholar-quick-ask-history") ?? element;
         let components = markdownComponents.get(owner);
         if (!components) { components = new Set(); markdownComponents.set(owner, components); }
         const component = new Component();
         components.add(component);
         component.load();
-        return MarkdownRenderer.render(plugin.app, markdown, element, sourcePath ?? "", component);
+        if (!markdownProcessorRegistered) {
+          plugin.registerMarkdownPostProcessor(section => {
+            // Only the exact root passed to our MarkdownRenderer.render call.
+            // Nested embeds have their own source and must not borrow this
+            // answer's table/source mapping.
+            markdownVisuals.get(section)?.prepare(section);
+          }, -1000);
+          markdownProcessorRegistered = true;
+        }
+        const visuals = createMarkdownVisuals({ ui: environment.ui, translate: key => t(language, key),
+          tableSources: () => require('./composer-view').tableSources(markdown),
+          onLayout: () => element.dispatchEvent(new element.ownerDocument.defaultView.Event('quick-ask-render-layout', { bubbles: true })) });
+        markdownVisuals.set(element, visuals);
+        component.register(() => { visuals.dispose(); markdownVisuals.delete(element); });
+        await MarkdownRenderer.render(plugin.app, markdown, element, sourcePath ?? "", component);
+        visuals.settled(element);
       },
       // The host's own fuzzy matcher and highlight helper; the picker does not
       // reinvent Obsidian's ranking.
@@ -655,6 +692,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       },
     },
   };
+  return environment;
 }
 
 module.exports = { createQuickAskEnvironment, createRoleResolver, MARKDOWN_EXTENSIONS };

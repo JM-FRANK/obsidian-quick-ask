@@ -106,6 +106,39 @@ async function start(fixture, config = {}) {
   return id;
 }
 
+for (const mode of ['official', 'fallback', 'chat-completions']) {
+  test(`${mode}: compaction receives upgraded selection units without leaking historical columns`, async () => {
+    const { renderTurn } = require('../src/quick-ask/prompt-renderer');
+    const { protocolFor, messageText } = require('../src/quick-ask/protocol');
+    const protocol = mode === 'chat-completions' ? mode : 'responses';
+    const native = protocolFor({ protocol });
+    const fixture = makeFixture({ settings: { protocol, contextWindowTokens: 24000 },
+      official: mode === 'official' ? null : 'unsupported' });
+    const id = await start(fixture);
+    const source = `${'older material '.repeat(6000)}\n你好 hello target`;
+    const from = source.indexOf('target');
+    const additions = [{ kind: 'file', path: 'a.md', text: source },
+      { kind: 'selection', path: 'a.md', from, to: source.length, text: 'target', startLine: 2, startColumn: 9 }];
+    await fixture.sessionStore.append(id, 'turn/started', { turnId: 'old', question: 'old q', additions, rendererVersion: 6 });
+    await fixture.sessionStore.append(id, 'item/input', { items: renderTurn({ mutations: additions, question: 'old q', rendererVersion: 6, userMessage: native.userMessage }) });
+    await fixture.sessionStore.append(id, 'item/output', { item: native.assistantMessage('old answer') });
+    await fixture.sessionStore.append(id, 'turn/finished', { turnId: 'old', state: 'complete' });
+    await fixture.sessionStore.append(id, 'turn/started', { turnId: 'last', question: 'recent q', additions: [], rendererVersion: 6 });
+    await fixture.sessionStore.append(id, 'item/input', { items: [native.userMessage('recent q')] });
+    await fixture.sessionStore.append(id, 'item/output', { item: native.assistantMessage('recent answer') });
+    await fixture.sessionStore.append(id, 'turn/finished', { turnId: 'last', state: 'complete' });
+    const saved = JSON.stringify(fixture.sessionStore.records.get(id));
+    await fixture.conversation.load(id);
+    assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+    const body = mode === 'official' ? JSON.parse(fixture.compactRequests.at(-1).body)
+      : fixture.requests.map(request => JSON.parse(request.options.body)).find(request => request.tool_choice === 'none');
+    assert.ok(body);
+    assert.equal(JSON.stringify(body).includes('start_column'), false);
+    assert.ok((body.input ?? body.messages).some(item => messageText(item).includes('start_unit="4"')));
+    assert.equal(JSON.stringify(fixture.sessionStore.records.get(id).slice(0, 9)), saved);
+  });
+}
+
 test('a configured capacity is validated against the whole prospective request', async () => {
   const fixture = makeFixture();
   const id = await start(fixture);

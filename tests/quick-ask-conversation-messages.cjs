@@ -43,7 +43,7 @@ test('selection snapshots replay in both protocols and all renderers without par
     { kind: 'selection', path: 'a.md', text: quote, startLine: 7, startColumn: 2, from: 15, to: 90 },
     { kind: 'selection', path: 'b.md', text: 'second quote' },
   ];
-  for (const rendererVersion of [1, 2, 3, 4]) for (const userMessage of [responsesUserMessage, protocolFor({ protocol: 'chat-completions' }).userMessage]) {
+  for (const rendererVersion of [1, 2, 3, 4, 5, 6, 7]) for (const userMessage of [responsesUserMessage, protocolFor({ protocol: 'chat-completions' }).userMessage]) {
     const items = renderTurn({ mutations: additions, question: 'Explain', rendererVersion, userMessage });
     for (const inputs of [[{ kind: 'item/input', payload: { items, images: ['image.png'] } }],
       items.map(item => ({ kind: 'item/input', payload: { item } }))]) {

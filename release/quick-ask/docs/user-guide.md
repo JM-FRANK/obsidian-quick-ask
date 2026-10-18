@@ -38,15 +38,21 @@ Settings are organized into **General**, **Model connections**, **System roles**
 3. Type your question and submit it. Added Markdown files become tracked context after the request is accepted. The model may use the read-only full-file tool for files already included in that conversation.
 4. Return to a conversation to see its answers and submitted selections. Selection previews keep the original text; hovering shows the full quote. They do not open or navigate to the source file.
 
-Newly sent text context includes source line metadata without modifying your notes. The default role omits line-number details from answers unless you ask for them. PDF input is not supported. English and Simplified Chinese interfaces are available, with some remaining English text.
+Newly sent text context includes source lines and selection word/character positions without modifying your notes. Editor offsets stay local. Retried questions use the current fixed instructions. The default role omits line-number details from answers unless you ask for them. PDF input is not supported. English and Simplified Chinese interfaces are available, with some remaining English text.
 
 ### Appearance and workspace
 
 Adjust user/assistant bubble colors, text size and paragraph spacing in **Appearance**. Drag the top edge of the input to resize it. Quick Ask reserves bottom space when a status bar overlaps its pane, and does not add that space when the theme already leaves room.
 
+### Formulas, diagrams and code
+
+After an answer finishes, formulas and Mermaid code blocks use Obsidian's renderer. Formulas keep their text size; a thin local horizontal scrollbar overlays the formula bottom only when needed, without changing the formula height, and disappears when the pane is wide enough. Inline formulas have no toolbar. Hover or focus a display formula and use **View source** (`</>`) to select and copy its LaTeX; use the same button to restore that formula.
+
+Mermaid diagrams have **Preview image**, **View source** and source-copy controls at the upper right. Preview uses the image viewer; Escape closes it. Source view changes only that diagram. Supported diagram syntax follows your Obsidian version; a diagram that cannot render shows its source and a local message. Code blocks (including text and unlabelled blocks), Mermaid diagrams and Markdown tables share upper-right copy buttons, visible on hover or keyboard focus. Successful copying shows a green check for one second. Tables copy their full original Markdown; code blocks copy their contents without fences. The controls stay visible while the content scrolls horizontally.
+
 ### Roles, reasoning and compaction
 
-In **System roles**, choose, create, rename or edit a role profile. Literature Reading and Study Quiz are supplied initially; Study Quiz starts with three questions. Custom prompts replace the built-in reading role while preserving fixed tool and read-only rules. The selected role applies to new sessions; existing conversations keep their saved role.
+In **System roles**, choose, create, rename or edit a role profile. Literature Reading and Study Quiz are supplied initially with English prompt text; Study Quiz starts with three questions. Unedited legacy Study Quiz presets upgrade to English, while edited prompts and existing conversations keep their saved text. Custom prompts replace the built-in reading role while preserving fixed tool, read-only and math/diagram formatting rules. The selected role applies to new sessions; existing conversations keep their saved role.
 
 Click the effort label to cycle **Off / Low / High / XHigh / Max**, or use the reasoning-effort command. The default is **High**. This changes the next question; actual support depends on the provider. Readable reasoning is shown when the API returns it.
 

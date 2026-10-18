@@ -132,6 +132,7 @@ class QuickAskView {
       composer: ui.createEl(container, "div", { cls: "scholar-quick-ask-composer" }),
     };
     this.roots.history = ui.createEl(this.roots.conversation, "div", { cls: "scholar-quick-ask-history" });
+    this.roots.history.addEventListener('quick-ask-render-layout', () => this.scheduleFollow());
     this.roots.live = ui.createEl(this.roots.conversation, "div", { cls: "scholar-quick-ask-live" });
     this.mountScrollFollow();
     this.renderHeader();
@@ -1005,7 +1006,7 @@ class QuickAskView {
       images: this.pendingImagePaths(),
     };
     if (!submission.question && !submission.images?.length) return null;
-    submission.rendererVersion ??= RENDERER_VERSION;
+    submission.rendererVersion = RENDERER_VERSION;
     const validation = this.runtime.validateForSend?.(this.runtime.stateFor(sessionId));
     if (validation && !validation.valid) { this.showValidationError(validation.errors); return { status: "invalid" }; }
     const searchValidation = this.runtime.validateSearchForSend(sessionId, webSearch);

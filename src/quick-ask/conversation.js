@@ -13,7 +13,9 @@ const {
   isResponsesWebSearchCall, responsesBuiltInTools,
   parseToolArguments, isResponsesStateUnsupported, responsesUsageInputTokens,
 } = require("./transport");
-const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, GET_FULL_FILE_TOOL } = require("./prompt-renderer");
+const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, getFullFileTool } = require("./prompt-renderer");
+const { createContextProjection } = require('./context-projection');
+const { withSelectionUnits } = require('./selection-position');
 const { validateQuickAskSettings, normalizeQuickAskSettings, ANSWER_RESERVE_TOKENS } = require("./settings");
 const { createToolLoop, TOOL_NAMES } = require("./tool-loop");
 const { createToolExecutor } = require("./tool");
@@ -59,10 +61,10 @@ function createConversation(options) {
   } = options;
 
   const searchClient = createSearchClient(environment);
-  function toolsFor(state) {
+  function toolsFor(state, rendererVersion = RENDERER_VERSION) {
     const route = state.requestSearch;
     const protocol = protocolFor(state.config);
-    const tools = route?.kind === "server" && route.localTools === false ? [] : [protocol.functionTool(GET_FULL_FILE_TOOL)];
+    const tools = route?.kind === "server" && route.localTools === false ? [] : [protocol.functionTool(getFullFileTool(rendererVersion))];
     if (route?.kind === "server") {
       if (route.tool) tools.push(route.tool);
     } else if (route && route.kind !== "off") {
@@ -126,6 +128,7 @@ function createConversation(options) {
         occupancyAnchor: null,
         compactedSurface: null,
         config: null,
+        contextProjection: createContextProjection(),
         items: [],
         lastResponseId: null,
         storedState: false,
@@ -163,6 +166,7 @@ function createConversation(options) {
     state.sessionUsage = createSessionUsage();
     state.searchEnabled = undefined;
     state.items = [];
+    state.contextProjection = createContextProjection();
     state.compactedSurface = null;
     state.compactedItems = [];
     state.pendingCheckpoint = null;
@@ -184,6 +188,7 @@ function createConversation(options) {
   }
 
   function applyRecord(state, record) {
+    state.contextProjection.sourceRecord(record);
     const payload = record.payload ?? {};
     switch (record.kind) {
       case "session/search-state":
@@ -194,7 +199,7 @@ function createConversation(options) {
         for (const [position, item] of (payload.items ?? (payload.item ? [payload.item] : [])).entries()) {
           // Images belong to the final question, never the Context envelope.
           const isQuestion = !payload.items || position === payload.items.length - 1;
-          if (!(isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item);
+          if (!(isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item, !isQuestion);
         }
         break;
       case "compaction/checkpoint":
@@ -216,6 +221,7 @@ function createConversation(options) {
         recordUsage(state, [payload]);
         break;
       case "turn/started":
+        state.contextProjection.beginTurn(payload.additions ?? [], payload.rendererVersion ?? 1);
         if (typeof payload.nextSearchEnabled === "boolean") state.searchEnabled = payload.nextSearchEnabled;
         if (payload.reasoningEffort) state.reasoningEffort = normalizeReasoningEffort(payload.reasoningEffort);
         state.usage = createTurnUsage();
@@ -273,7 +279,7 @@ function createConversation(options) {
     const surface = state.compactedSurface ? activeSurface(state) : state.items;
     // Tool continuation items have already been appended to the canonical
     // surface by runToolContinuation. Replaying them again duplicates calls.
-    return { input: staged.continuation ? [...surface] : [...surface, ...turn], previousResponseId: null };
+    return { input: state.contextProjection.items(staged.continuation ? [...surface] : [...surface, ...turn]), previousResponseId: null };
   }
 
   // The compacted surface, in the confirmed order: references to still-tracked
@@ -297,7 +303,8 @@ function createConversation(options) {
     ];
   }
 
-  function appendCanonicalItem(state, item) {
+  function appendCanonicalItem(state, item, contextInput = false) {
+    state.contextProjection.add(item, contextInput);
     state.items.push(item);
     if (state.compactedSurface) state.compactedItems.push(item);
   }
@@ -315,6 +322,7 @@ function createConversation(options) {
   }
 
   function buildBody(state, staged) {
+    staged = { ...staged, rendererVersion: RENDERER_VERSION };
     const config = state.config ?? {};
     const settings = normalizeQuickAskSettings(getSettings()?.quickAsk ?? config);
     const { input, previousResponseId } = requestInput(state, staged);
@@ -322,7 +330,7 @@ function createConversation(options) {
       reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
       instructions: buildInstructions({ rendererVersion: staged.rendererVersion ?? RENDERER_VERSION, customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
       input,
-      tools: toolsFor(state),
+      tools: toolsFor(state, staged.rendererVersion ?? RENDERER_VERSION),
       toolChoice: state.requestSearch?.kind === "server" ? (state.requestSearch.toolChoice ?? "auto") : "auto",
       parallelToolCalls: true,
       serverSearch: state.requestSearch?.kind === "server" ? state.requestSearch : undefined,
@@ -361,13 +369,14 @@ function createConversation(options) {
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
   function priceLocalRequest(state, { question, additions, rendererVersion = RENDERER_VERSION }) {
+    rendererVersion = RENDERER_VERSION;
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
     const items = state.compactedSurface ? activeSurface(state) : state.items;
     const price = priceProspectiveRequest({
       instructions: buildInstructions({ rendererVersion, customSystemPrompt: state.config?.systemPrompt ?? "" }),
-      tools: toolsFor(state),
-      items,
+      tools: toolsFor(state, rendererVersion),
+      items: state.contextProjection.items(items),
       additions: additions.length ? renderTurn({ mutations: additions, question: "", userMessage: protocolFor(state.config).userMessage, rendererVersion }).slice(0, -1) : [],
       question,
       reserveTokens: budget.configured ? RESERVE : 0,
@@ -493,7 +502,7 @@ function createConversation(options) {
       return { status: "skipped", reason: "range" };
     }
     const transaction = new CompactionTransaction({ sessionStore, sessionId: state.sessionId });
-    const estimatedBefore = measureItems(range.items);
+    const estimatedBefore = measureItems(state.contextProjection.items(range.items));
     const mode = officialSupported(state) ? "official" : "fallback";
     await transaction.start({
       range,
@@ -511,7 +520,7 @@ function createConversation(options) {
         network: environment.network,
         baseUrl: state.config?.baseUrl,
         apiKey: resolveApiKey(state),
-        body: { model: state.config?.model, input: range.items },
+        body: { model: state.config?.model, input: state.contextProjection.items(range.items) },
         signal: state.activeController?.signal ?? state.turn?.controller?.signal,
       });
       if (result.supported === false) {
@@ -582,7 +591,7 @@ function createConversation(options) {
     const hasEarlierCheckpoint = range.items.some((item) => messageText(item).includes("<compacted-summary>"));
     const instruction = buildSummaryInstruction({ hasEarlierCheckpoint });
     const input = [
-      ...range.items.map((item) => isToolOutput(item)
+      ...state.contextProjection.items(range.items).map((item) => isToolOutput(item)
         ? truncateOutput(item, truncateToolResult)
         : item),
       protocolFor(state.config).userMessage(instruction),
@@ -596,7 +605,7 @@ function createConversation(options) {
         reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
         instructions: buildInstructions({ rendererVersion: RENDERER_VERSION, customSystemPrompt: state.config?.systemPrompt ?? "" }),
         input,
-        tools: [protocolFor(state.config).functionTool(GET_FULL_FILE_TOOL)],
+        tools: [protocolFor(state.config).functionTool(getFullFileTool())],
         toolChoice: "none",
         parallelToolCalls: false,
         previousResponseId: null,
@@ -662,10 +671,12 @@ function createConversation(options) {
     if (runningTurns() >= MAX_CONCURRENT_TURNS) {
       return { status: "busy", error: normalizeError({ kind: "protocol", message: "Three Quick Ask turns are already running" }) };
     }
-    // An explicit retry carries the original submission's renderer. Unknown
-    // versions remain readable in history but must never silently re-render.
-    if (![1, 2, 3, 4].includes(rendererVersion)) return { status: "failed", accepted: false,
+    // Known historical versions remain readable; actual sends (including
+    // retries) use the current renderer as explicitly requested by the user.
+    if (![1, 2, 3, 4, 5, 6, 7].includes(rendererVersion)) return { status: "failed", accepted: false,
       error: { code: "RENDERER", message: `Unsupported Quick Ask renderer version: ${rendererVersion}. Update the plugin or submit a new question.` } };
+    // Explicit user decision: retries also adopt current rules/position units.
+    rendererVersion = RENDERER_VERSION;
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };
 
@@ -697,8 +708,15 @@ function createConversation(options) {
       } catch (error) {
         return { status: "failed", accepted: false, error: { code: error.code ?? "IMAGE_MISSING", path: error.path, message: error.message } };
       }
-      const stagedAdditions = additions ?? (typeof trackerFor(sessionId).mutationsForSend === "function"
+      const capturedAdditions = additions ?? (typeof trackerFor(sessionId).mutationsForSend === "function"
         ? await trackerFor(sessionId).mutationsForSend() : []);
+      const selectionSources = new Map();
+      for (const mutation of capturedAdditions) {
+        if (mutation.kind !== 'selection' || Number.isInteger(mutation.startUnit) || selectionSources.has(mutation.path)) continue;
+        try { selectionSources.set(mutation.path, await environment.vault?.readText?.(mutation.path)); }
+        catch { selectionSources.set(mutation.path, null); }
+      }
+      const stagedAdditions = withSelectionUnits(capturedAdditions, path => selectionSources.get(path));
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
       const preflight = await pricePendingRequest(state, { question, additions: stagedAdditions, rendererVersion, images: preparedImages });
       if (controller.signal.aborted || !isEnabled()) return { status: "disabled" };
@@ -709,6 +727,7 @@ function createConversation(options) {
       state.pendingMutations = stagedAdditions;
       const turn = { turnId, question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
+      state.contextProjection.beginTurn(stagedAdditions, rendererVersion);
       await sessionStore.append(sessionId, "turn/started", { turnId, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
       // Read the current toggle here so a manual change made during preflight
       // cannot be overwritten by consuming this question's one-shot permission.

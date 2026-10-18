@@ -10,6 +10,7 @@
 // inclusion, a fifth-change refresh, or a `get-full-file` result.
 
 const { createTwoFilesPatch } = require("diff");
+const { selectionUnitPosition } = require('./selection-position');
 
 // The fifth effective change refreshes the complete original text.
 const RENDERER_MAX_EFFECTIVE_CHANGES = 5;
@@ -792,6 +793,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
         to: selection.to,
         text: selection.text,
         ...(selection.startLine != null ? { startLine: selection.startLine, startColumn: selection.startColumn } : {}),
+        ...(selection.startUnit != null ? { startUnit: selection.startUnit } : {}),
       });
     }
     return pending;
@@ -831,7 +833,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
   // Stage one dragged Context Selection. The containing file's complete content
   // travels with the next question, so a selection from a file that is not
   // tracked yet also stages that file.
-  function stageSelection({ path, from, to, text, startLine = null, startColumn = null } = {}) {
+  function stageSelection({ path, from, to, text, startLine = null, startColumn = null, startUnit = null } = {}) {
     const normalized = normalizePath(path);
     if (normalized === null) return { path, staged: false, reason: "path" };
     if (!isMarkdown(normalized)) return { path: normalized, staged: false, reason: "role" };
@@ -840,7 +842,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
     ensureRecord(normalized, "stage");
     const id = `selection-${nextSelectionId}`;
     nextSelectionId += 1;
-    selections.push({ id, path: normalized, from, to, text: selected, startLine, startColumn });
+    selections.push({ id, path: normalized, from, to, text: selected, startLine, startColumn, startUnit });
     return { path: normalized, staged: true, id };
   }
 
@@ -1077,6 +1079,7 @@ function createContextTracker({ vault, scheduler, onEvent } = {}) {
         text: selection.text,
         startLine: before ? before.length : selection.startLine,
         startColumn: before ? before.at(-1).length : selection.startColumn,
+        startUnit: current ? selectionUnitPosition(raw, selection.from, selection.to)?.startUnit ?? null : selection.startUnit,
         lineOrigin: current ? "current" : "capture",
       });
     }

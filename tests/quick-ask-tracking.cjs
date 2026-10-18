@@ -363,8 +363,8 @@ test('multiple Context Selections accumulate in drag order and carry the contain
   const mutations = await tracker.mutationsForSend();
   assert.deepEqual(mutations, [
     { kind: 'file', path: 'notes/a.md', text: raw },
-    { kind: 'selection', id: first.id, path: 'notes/a.md', from: 0, to: 3, text: 'one', startLine: 1, startColumn: 0, lineOrigin: 'current' },
-    { kind: 'selection', id: second.id, path: 'notes/a.md', from: 4, to: 7, text: 'two', startLine: 1, startColumn: 4, lineOrigin: 'current' },
+    { kind: 'selection', id: first.id, path: 'notes/a.md', from: 0, to: 3, text: 'one', startLine: 1, startColumn: 0, startUnit: 1, lineOrigin: 'current' },
+    { kind: 'selection', id: second.id, path: 'notes/a.md', from: 4, to: 7, text: 'two', startLine: 1, startColumn: 4, startUnit: 2, lineOrigin: 'current' },
   ]);
 
   tracker.acceptTurn();
@@ -641,7 +641,7 @@ test('an unsent Context File rename keeps its pending selections on the new path
   assert.deepEqual(events, [], 'an unsent file has no model-visible rename event');
   assert.deepEqual(await tracker.mutationsForSend(), [
     { kind: 'file', path: 'notes/new.md', text: 'one two\n' },
-    { kind: 'selection', id: selection.id, path: 'notes/new.md', from: 0, to: 3, text: 'one', startLine: 1, startColumn: 0, lineOrigin: 'current' },
+    { kind: 'selection', id: selection.id, path: 'notes/new.md', from: 0, to: 3, text: 'one', startLine: 1, startColumn: 0, startUnit: 1, lineOrigin: 'current' },
   ]);
 });
 
@@ -661,7 +661,7 @@ test('a deleted tracked file stops tracking, keeps its history and selections, a
   const mutations = await tracker.mutationsForSend();
   assert.deepEqual(mutations, [
     { kind: 'deleted', path: 'notes/a.md' },
-    { kind: 'selection', id: selection.id, path: 'notes/a.md', from: 0, to: 4, text: 'body', startLine: null, startColumn: null, lineOrigin: 'capture' },
+    { kind: 'selection', id: selection.id, path: 'notes/a.md', from: 0, to: 4, text: 'body', startLine: null, startColumn: null, startUnit: null, lineOrigin: 'capture' },
   ]);
   tracker.acceptTurn();
   assert.deepEqual(await tracker.mutationsForSend(), [], 'the deletion event belongs to one question');

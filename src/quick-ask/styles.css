@@ -105,6 +105,136 @@
 }
 .scholar-quick-ask-view button.scholar-quick-ask-copy:hover { background: var(--background-modifier-hover); }
 
+/* Scoped block styles avoid changing the entire message's Markdown cascade. */
+.scholar-quick-ask-message-assistant .scholar-quick-ask-message-body pre {
+  position: relative;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  padding: 30px 12px 12px;
+  border-radius: var(--radius-s);
+  background: var(--code-background);
+  white-space: pre;
+}
+.scholar-quick-ask-message-body pre > code { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.scholar-quick-ask-view button.scholar-quick-ask-visual-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-width: 0;
+  padding: 4px;
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.scholar-quick-ask-view button.scholar-quick-ask-visual-action:is(:hover, :focus-visible) {
+  opacity: 1;
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* Only controls fade; content retains full opacity. Formula, code and Mermaid
+   controls overlay content; tables retain their separate toolbar spacing. */
+.scholar-quick-ask-visual {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+.scholar-quick-ask-visual.is-block { display: block; padding: 28px 0 0; margin-block: .5em; }
+.scholar-quick-ask-visual.is-inline {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr);
+  vertical-align: middle;
+}
+.scholar-quick-ask-visual-toolbar {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  inset-inline-end: 0;
+  display: flex;
+}
+.scholar-quick-ask-visual-toolbar { opacity: 0; pointer-events: none; }
+.scholar-quick-ask-visual:is(:hover, :focus-within, .has-copy-feedback) > .scholar-quick-ask-visual-toolbar {
+  opacity: .75;
+  pointer-events: auto;
+}
+.scholar-quick-ask-visual-toolbar:is(:hover, :focus-within) { opacity: 1; }
+/* Overlay controls without reserving a header row, including on hover/focus. */
+.scholar-quick-ask-visual.is-block:is(.is-math, .is-code, .is-mermaid) { padding-top: 0; }
+.scholar-quick-ask-visual:is(.is-math, .is-code, .is-mermaid):is(:hover, :focus-within, .has-copy-feedback) > .scholar-quick-ask-visual-toolbar { opacity: .6; }
+.scholar-quick-ask-view button.scholar-quick-ask-visual-action.is-copied { color: var(--text-success); }
+.scholar-quick-ask-visual-rendered { display: block; min-width: 0; max-width: 100%; overflow-x: auto; }
+.scholar-quick-ask-visual.is-math > .scholar-quick-ask-visual-rendered {
+  overflow-x: hidden;
+  /* Setting only overflow-x makes overflow-y compute to auto. Even a tiny
+     MathJax height rounding difference then creates vertical scrollbar arrows. */
+  overflow-y: hidden;
+  padding-block: 2px;
+  box-sizing: border-box;
+  scrollbar-gutter: auto;
+  /* Only the separate overlay rail shows a bar. Formula height is independent
+     of the platform's native scrollbar thickness. */
+  scrollbar-width: none;
+}
+.scholar-quick-ask-visual.is-math > .scholar-quick-ask-visual-rendered.has-horizontal-overflow { overflow-x: auto; }
+.scholar-quick-ask-visual.is-math > .scholar-quick-ask-visual-rendered::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.scholar-quick-ask-math-scrollbar {
+  display: block;
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 1;
+  height: 4px;
+  overflow-x: scroll;
+  overflow-y: hidden;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+  background: transparent;
+}
+.scholar-quick-ask-visual.is-source > .scholar-quick-ask-math-scrollbar { display: none; }
+.scholar-quick-ask-math-scrollbar-extent { display: block; height: 1px; pointer-events: none; }
+.scholar-quick-ask-math-scrollbar::-webkit-scrollbar { width: 0; height: 4px; }
+.scholar-quick-ask-math-scrollbar::-webkit-scrollbar-track,
+.scholar-quick-ask-math-scrollbar::-webkit-scrollbar-corner { background: transparent; }
+.scholar-quick-ask-math-scrollbar::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.scholar-quick-ask-math-scrollbar::-webkit-scrollbar-thumb { background: transparent; border: 0; border-radius: 2px; }
+.scholar-quick-ask-visual.is-math:is(:hover, :focus-within) > .scholar-quick-ask-math-scrollbar::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-muted) 28%, transparent); }
+.scholar-quick-ask-visual.is-math .math { display: block; width: max-content; min-width: 100%; overflow: visible; }
+.scholar-quick-ask-visual.is-math mjx-container { overflow: visible; }
+.scholar-quick-ask-visual.is-math mjx-container[display="true"] { margin: 0; }
+.scholar-quick-ask-visual.is-math:not(.is-source) { padding-bottom: 0; }
+.scholar-quick-ask-visual.is-math:not(.is-source) > .scholar-quick-ask-visual-toolbar > .scholar-quick-ask-visual-copy { display: none; }
+.scholar-quick-ask-visual pre > .copy-code-button { display: none !important; }
+.scholar-quick-ask-visual.is-code { border-radius: var(--radius-s); background: var(--code-background); }
+.scholar-quick-ask-message-body .scholar-quick-ask-visual-rendered > pre { margin: 0; padding: 12px; }
+.scholar-quick-ask-visual.is-table table { border-collapse: collapse; min-width: 100%; width: max-content; margin: 0; }
+.scholar-quick-ask-visual.is-table :is(th, td) { border: 1px solid var(--table-border-color); padding: 6px 10px; }
+.scholar-quick-ask-visual.is-table th { background: var(--background-secondary); font-weight: var(--font-semibold); }
+.scholar-quick-ask-visual.is-mermaid .mermaid { margin: 0; }
+.scholar-quick-ask-visual.is-mermaid svg { display: block; max-width: 100%; height: auto; margin-inline: auto; }
+.scholar-quick-ask-visual-source {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  padding: 4px;
+  background: var(--code-background);
+  color: var(--code-normal);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.scholar-quick-ask-visual-error { display: block; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.scholar-quick-ask-visual [hidden] { display: none !important; }
+
 .scholar-quick-ask-message-user {
   --scholar-bubble-surface: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 16%, var(--scholar-bubble-base));
   align-self: flex-end;

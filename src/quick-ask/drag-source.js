@@ -7,6 +7,7 @@
 // registers the returned extension through `registerEditorExtension()`.
 
 const DRAG_MIME = "application/x-scholar-quick-ask-selection";
+const { selectionUnitPosition } = require('./selection-position');
 
 // A drag capture is host-independent data: Vault Path, the captured range, the
 // exact text, and the file text at drag time.
@@ -95,6 +96,7 @@ async function validateDrop({ capture, vault, normalizePath }) {
       text: capture.text,
       startLine: current.slice(0, at).split(/\r\n|\n|\r/).length,
       startColumn: current.slice(0, at).split(/\r\n|\n|\r/).at(-1).length,
+      ...selectionUnitPosition(current, at, capture.to),
     },
   };
 }

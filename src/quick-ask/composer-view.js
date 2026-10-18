@@ -9,6 +9,9 @@ const {
   editingReferenceField, openReferenceEffect, closeReferenceEffect, slashQuery, isLiteralRange,
 } = require("./composer-state");
 const { activePickerQuery } = require("./file-picker");
+const { parser, Table } = require('@lezer/markdown');
+const { markdownTableSources } = require('./markdown-tables');
+const tableParser = parser.configure(Table);
 
 // The composer's DOM view: a real, owned CodeMirror 6 editor whose chip
 // decorations, `[[` picker, and key handling are registered on this instance
@@ -260,4 +263,5 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   };
 }
 
-module.exports = { createComposerEditor, FileReferenceWidget, chipDecorations, createChipPlugin, VISIBLE_ROWS };
+module.exports = { createComposerEditor, FileReferenceWidget, chipDecorations, createChipPlugin, VISIBLE_ROWS,
+  tableSources: markdown => markdownTableSources(markdown, tableParser) };
