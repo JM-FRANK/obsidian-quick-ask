@@ -133,6 +133,61 @@ async function newSession(sessionStore, conversation, config = {}) {
   return id;
 }
 
+test('history preview precedes replay while the next request retains the complete canonical context', async () => {
+  const { conversation, sessionStore, network, settings } = makeConversation({ settings: { baseUrl: 'https://gateway.example/v1' } });
+  const { id } = await sessionStore.createSession({ config: settings });
+  for (let turn = 0; turn < 20; turn++) {
+    await sessionStore.append(id, 'turn/started', { turnId: `t${turn}`, question: `Question ${turn}`, additions: [] });
+    await sessionStore.append(id, 'item/input', { item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `Question ${turn}` }] } });
+    await sessionStore.append(id, 'item/output', { item: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `Answer ${turn}` }] } });
+    await sessionStore.append(id, 'turn/finished', { turnId: `t${turn}`, state: 'complete', text: `Answer ${turn}` });
+  }
+  let release;
+  let previewReady;
+  const ready = new Promise(resolve => { previewReady = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const loading = conversation.load(id, { onParsed: async parsed => {
+    assert.equal(parsed.records.length, 80);
+    assert.equal(conversation.stateFor(id).items.length, 0, 'preview runs before protocol replay');
+    const { conversationFromRecords } = require('../src/quick-ask/conversation-messages');
+    const { historyPageStart } = require('../src/quick-ask/history-window');
+    const messages = conversationFromRecords(parsed.records);
+    assert.equal(messages[historyPageStart(messages)].text, 'Question 12');
+    previewReady();
+    await gate;
+  } });
+  await ready;
+  assert.equal(network.requests.length, 0, 'local preview makes no provider request');
+  release();
+  await loading;
+  assert.equal(conversation.stateFor(id).items.length, 40);
+  await conversation.send(id, 'Continue', { additions: [] });
+  const input = JSON.stringify(JSON.parse(network.requests.at(-1).options.body).input);
+  for (const text of ['Question 0', 'Answer 0', 'Question 19', 'Answer 19', 'Continue']) assert.ok(input.includes(text), text);
+});
+
+test('unavailable logs never reach the recent-history preview', async () => {
+  const { conversation, sessionStore } = makeConversation();
+  const { id } = await sessionStore.createSession({ config: { protocol: 'unsupported' } });
+  let previews = 0;
+  await assert.rejects(conversation.load(id, { onParsed: () => { previews++; } }), /unavailable/);
+  assert.equal(previews, 0);
+});
+
+test('a run started during the preview paint is not overwritten by replay', async () => {
+  const { conversation, sessionStore } = makeConversation();
+  const { id } = await sessionStore.createSession({});
+  const liveItems = [{ type: 'message', role: 'user', content: 'New live question' }];
+  const controller = new AbortController();
+  const loaded = await conversation.load(id, { onParsed: async () => {
+    const state = conversation.stateFor(id);
+    state.activeController = controller;
+    state.items = liveItems;
+  } });
+  assert.equal(loaded.state.items, liveItems);
+  assert.equal(loaded.state.activeController, controller);
+});
+
 test('custom endpoints receive full canonical context on consecutive turns and after reload', async () => {
   const { conversation, sessionStore, network, settings } = makeConversation({ settings: { baseUrl: 'https://gateway.example/v1' } });
   const id = await newSession(sessionStore, conversation, settings);

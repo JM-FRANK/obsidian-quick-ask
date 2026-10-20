@@ -371,6 +371,8 @@
   gap: var(--scholar-chat-message-spacing, 12px);
 }
 .scholar-quick-ask-live { flex: none; }
+/* Explicit anchoring includes late Markdown/image layout in prepended pages. */
+.scholar-quick-ask-conversation.is-history-anchored { overflow-anchor: none; }
 .scholar-quick-ask-live[hidden] { display: none; }
 .scholar-quick-ask-error[hidden],
 .scholar-quick-ask-tool-status[hidden],

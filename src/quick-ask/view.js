@@ -11,6 +11,7 @@ const { createScrollFollow } = require("./stream-presentation");
 const { createReasoningView } = require("./reasoning-view");
 const { normalizeDisplaySettings } = require("./settings");
 const { conversationFromRecords, questionFromInput } = require("./conversation-messages");
+const { historyPageStart } = require("./history-window");
 const { selectionSnapshots } = require("./history-selections");
 const { MIN_INPUT_HEIGHT, inputHeight, draggedInputHeight, availableInputHeight } = require("./composer-layout");
 const {
@@ -75,6 +76,12 @@ class QuickAskView {
     this.scrollFollow = createScrollFollow();
     this.paintFrame = null;
     this.followFrame = null;
+    this.historyGeneration = 0;
+    this.historyFrame = null;
+    this.historyStart = 0;
+    this.historyLoading = false;
+    this.historyAnchor = null;
+    this.finishHistoryPaint = null;
   }
 
   getViewType() {
@@ -98,6 +105,7 @@ class QuickAskView {
   async onClose() {
     this.saveDraft();
     this.activationGeneration += 1;
+    this.resetHistoryWindow();
     this.cancelConversationPaint();
     if (this.followFrame !== null) this.followWindow.cancelAnimationFrame(this.followFrame);
     this.followFrame = null;
@@ -132,7 +140,7 @@ class QuickAskView {
       composer: ui.createEl(container, "div", { cls: "scholar-quick-ask-composer" }),
     };
     this.roots.history = ui.createEl(this.roots.conversation, "div", { cls: "scholar-quick-ask-history" });
-    this.roots.history.addEventListener('quick-ask-render-layout', () => this.scheduleFollow());
+    this.roots.history.addEventListener('quick-ask-render-layout', () => this.historyLayoutChanged());
     this.roots.live = ui.createEl(this.roots.conversation, "div", { cls: "scholar-quick-ask-live" });
     this.mountScrollFollow();
     this.renderHeader();
@@ -207,8 +215,22 @@ class QuickAskView {
     const area = this.roots.history;
     const rendered = this.renderedMessages ?? [];
     const appendOnly = rendered.length <= this.messages.length && rendered.every((entry, index) => entry === this.messages[index]);
-    if (!appendOnly) ui.clear(area);
-    for (const entry of this.messages.slice(appendOnly ? rendered.length : 0)) {
+    if (!appendOnly || rendered.length === 0) {
+      this.resetHistoryWindow();
+      ui.clear(area);
+      this.historyStart = historyPageStart(this.messages);
+    }
+    this.renderHistoryEntries(area, this.messages.slice(appendOnly && rendered.length ? rendered.length : this.historyStart));
+    this.renderedMessages = [...this.messages];
+    this.renderLive();
+    if (this.scrollFollow.following) this.scrollToBottom();
+  }
+
+  renderHistoryEntries(area, entries) {
+    const ui = this.ui;
+    const generation = this.historyGeneration;
+    const paints = [];
+    for (const entry of entries) {
       if (entry.kind === "compaction") { this.renderCompactionDivider(area, entry); continue; }
       let parent = area;
       if (entry.role === "user" && entry.selections?.length) {
@@ -225,9 +247,12 @@ class QuickAskView {
       }
       const body = ui.createEl(bubble, "div", { cls: "scholar-quick-ask-message-body" });
       if (entry.role === "assistant" && entry.settled !== false) {
-        void ui.renderMarkdown(body, entry.displayText ?? entry.text, entry.sourcePath ?? "").then(() => this.scheduleFollow()).catch(() => {
-          body.style.whiteSpace = "pre-wrap"; ui.setText(body, entry.text); this.scheduleFollow();
-        });
+        paints.push(ui.renderMarkdown(body, entry.displayText ?? entry.text, entry.sourcePath ?? "").catch(() => {
+          if (generation !== this.historyGeneration) return;
+          body.style.whiteSpace = "pre-wrap"; ui.setText(body, entry.text);
+        }).then(() => {
+          if (generation === this.historyGeneration) this.historyLayoutChanged();
+        }));
         if (entry.text) this.renderCopyButton(bubble, entry.text);
       } else ui.setText(body, entry.text);
       if (entry.images?.length) renderImages({ parent: body, paths: entry.images, environment: this.environment,
@@ -242,9 +267,73 @@ class QuickAskView {
         ui.createEl(bubble, "small", { cls: "scholar-quick-ask-search-status", text: this.t(this.getSettings(), "search.failed") });
       if (entry.role === "assistant" && entry.usage?.total) this.renderUsagePill(area, entry);
     }
-    this.renderedMessages = [...this.messages];
-    this.renderLive();
-    if (this.scrollFollow.following) this.scrollToBottom();
+    return paints;
+  }
+
+  resetHistoryWindow() {
+    this.historyGeneration += 1;
+    this.finishHistoryPaint?.();
+    if (this.historyFrame !== null) this.historyWindow.cancelAnimationFrame(this.historyFrame);
+    this.historyFrame = null;
+    this.historyLoading = false;
+    this.historyStart = 0;
+    this.historyAnchor = null;
+    this.roots.conversation?.classList.remove("is-history-anchored");
+  }
+
+  captureHistoryAnchor() {
+    const area = this.roots.conversation;
+    const top = area.getBoundingClientRect().top;
+    const element = Array.from(this.roots.history.children).find(child => child.getBoundingClientRect().bottom > top);
+    this.historyAnchor = element ? { element, offset: element.getBoundingClientRect().top - top } : null;
+    area.classList.toggle("is-history-anchored", Boolean(this.historyAnchor));
+  }
+
+  historyLayoutChanged() {
+    const area = this.roots.conversation;
+    const anchor = this.historyAnchor;
+    if (anchor && !this.scrollFollow.following && this.roots.history.contains(anchor.element)) {
+      const offset = anchor.element.getBoundingClientRect().top - area.getBoundingClientRect().top;
+      area.scrollTop += offset - anchor.offset;
+      this.scrollFollow.positioned(area.scrollTop);
+    }
+    this.scheduleFollow();
+  }
+
+  scheduleEarlierHistory() {
+    if (!this.mounted || this.loadingSessions || this.historyStart === 0 || this.historyLoading || this.historyFrame !== null
+      || this.roots.conversation.scrollTop > 160 || this.scrollFollow.following) return;
+    this.historyWindow = this.roots.container.ownerDocument.defaultView;
+    this.historyFrame = this.historyWindow.requestAnimationFrame(() => {
+      this.historyFrame = null;
+      void this.loadEarlierHistory();
+    });
+  }
+
+  async loadEarlierHistory() {
+    if (!this.mounted || this.loadingSessions || this.historyLoading || this.historyStart === 0
+      || this.scrollFollow.following || this.roots.conversation.scrollTop > 160) return;
+    const generation = this.historyGeneration;
+    this.historyLoading = true;
+    this.scrollFollow.pause();
+    this.captureHistoryAnchor();
+    const area = this.roots.history;
+    const first = area.firstChild;
+    const previousLast = area.lastChild;
+    const start = historyPageStart(this.messages, this.historyStart);
+    const paints = this.renderHistoryEntries(area, this.messages.slice(start, this.historyStart));
+    // The host createEl adapter owns resource lifecycles. Move only the newly
+    // created nodes before the existing history; keep every old node intact.
+    const added = [];
+    for (let node = previousLast ? previousLast.nextSibling : area.firstChild; node; node = node.nextSibling) added.push(node);
+    for (const node of added) area.insertBefore(node, first);
+    this.historyStart = start;
+    this.historyLayoutChanged();
+    await Promise.allSettled(paints);
+    if (generation !== this.historyGeneration) return;
+    this.historyLoading = false;
+    this.historyLayoutChanged();
+    this.scheduleEarlierHistory();
   }
 
   renderHistorySelections(parent, selections) {
@@ -291,7 +380,7 @@ class QuickAskView {
   makeReasoning(parent) {
     const tr = key => this.t(this.getSettings(), key);
     return createReasoningView(parent, {
-      ui: this.ui, label: tr("composer.reasoning"), onLayout: () => this.scheduleFollow(),
+      ui: this.ui, label: tr("composer.reasoning"), onLayout: () => this.historyLayoutChanged(),
       labels: { previous: tr("reasoning.previous"), next: tr("reasoning.next"), latest: tr("reasoning.latest"), copy: tr("reasoning.copy"), copyFailed: tr("composer.copyFailed") },
     });
   }
@@ -383,13 +472,17 @@ class QuickAskView {
   mountScrollFollow() {
     const area = this.roots.conversation;
     this.scrollFollow.submit();
-    area.addEventListener("scroll", () => this.scrollFollow.scroll({ top: area.scrollTop, height: area.scrollHeight, viewport: area.clientHeight }), { passive: true });
+    area.addEventListener("scroll", () => {
+      this.scrollFollow.scroll({ top: area.scrollTop, height: area.scrollHeight, viewport: area.clientHeight });
+      if (this.historyAnchor && !this.scrollFollow.following) this.captureHistoryAnchor();
+      this.scheduleEarlierHistory();
+    }, { passive: true });
     area.addEventListener("wheel", event => {
-      if (event.deltaY < 0) this.scrollFollow.pause();
+      if (event.deltaY < 0) { this.scrollFollow.pause(); this.scheduleEarlierHistory(); }
       else if (event.deltaY > 0 && this.isNearBottom()) { this.scrollFollow.submit(); this.scheduleFollow(); }
     }, { passive: true });
     const owner = area.ownerDocument.defaultView;
-    this.scrollObserver = new owner.ResizeObserver(() => this.scheduleFollow());
+    this.scrollObserver = new owner.ResizeObserver(() => this.historyLayoutChanged());
     this.scrollObserver.observe(area);
     this.scrollObserver.observe(this.roots.history);
     this.scrollObserver.observe(this.roots.live);
@@ -510,6 +603,8 @@ class QuickAskView {
   scrollToBottom() {
     const area = this.roots.conversation;
     if (area && typeof area.scrollHeight === "number") {
+      this.historyAnchor = null;
+      area.classList.remove("is-history-anchored");
       area.scrollTop = area.scrollHeight;
       this.scrollFollow.positioned(area.scrollTop);
     }
@@ -1272,14 +1367,23 @@ class QuickAskView {
     if (!id || !this.runtime?.load) return null;
     let loaded = null;
     try {
-      loaded = await this.runtime.load(id);
+      let previewed = false;
+      loaded = await this.runtime.load(id, { onParsed: async parsed => {
+        if (generation !== this.activationGeneration || !this.mounted) return;
+        this.messages = conversationFromRecords(parsed.records ?? []);
+        previewed = true;
+        this.renderConversation();
+        if (this.messages.length) await this.yieldHistoryPaint();
+      } });
+      if (!previewed && generation === this.activationGeneration)
+        this.messages = conversationFromRecords(loaded?.parsed?.records ?? []);
     } catch (error) {
+      if (generation !== this.activationGeneration || !this.mounted) return null;
       this.sessionUnavailable = true;
       this.environment.ui.notice(this.t(settings0(this), "sidebar.sessionUnavailable"));
       return null;
     }
     if (generation !== this.activationGeneration) return null;
-    this.messages = conversationFromRecords(loaded?.parsed?.records ?? []);
     this.hasSessionHistory = (loaded?.parsed?.records ?? []).some(record => ["turn/started", "item/input", "item/output"].includes(record.kind));
     if (recover && this.runtime.recover) {
       // A pending turn with a recoverable stored Response is retrieved; the
@@ -1300,6 +1404,25 @@ class QuickAskView {
       this.streaming = { status: snapshot.status, text: snapshot.text ?? "", reasoning: snapshot.reasoning ?? "", error: snapshot.error };
     }
     return loaded;
+  }
+
+  async yieldHistoryPaint() {
+    this.finishHistoryPaint?.();
+    const owner = this.roots.container.ownerDocument.defaultView;
+    await new Promise(resolve => {
+      let frame = null;
+      let task = null;
+      const finish = () => {
+        owner.clearTimeout(fallback);
+        if (task !== null) owner.clearTimeout(task);
+        if (frame !== null) owner.cancelAnimationFrame(frame);
+        this.finishHistoryPaint = null;
+        resolve();
+      };
+      this.finishHistoryPaint = finish;
+      const fallback = owner.setTimeout(finish, 50);
+      frame = owner.requestAnimationFrame(() => { task = owner.setTimeout(finish, 0); });
+    });
   }
 
   // Restore reconciliation: one cached read per still-tracked file, compared

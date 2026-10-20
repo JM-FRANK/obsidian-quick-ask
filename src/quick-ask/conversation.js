@@ -150,12 +150,20 @@ function createConversation(options) {
   }
 
   // Rebuild in-memory state by replaying the durable log.
-  async function load(sessionId) {
+  async function load(sessionId, { onParsed = null } = {}) {
     const parsed = await sessionStore.readLog(sessionId);
     const state = stateFor(sessionId);
     if (parsed.missing) throw new Error(`Quick Ask session ${sessionId} does not exist`);
-    if (state.activeController || state.turn?.controller) return { state, parsed };
+    if (state.activeController || state.turn?.controller) {
+      if (onParsed) await onParsed(parsed);
+      return { state, parsed };
+    }
     if (!parsed.header || !isSupportedSession(parsed)) throw new Error("Quick Ask session is unavailable");
+    // Let the view paint a recent-history window before full model replay,
+    // pricing and tracked-file reconciliation. This never truncates context.
+    if (onParsed) await onParsed(parsed);
+    // A background run may have started while the preview yielded to paint.
+    if (state.activeController || state.turn?.controller) return { state, parsed };
     state.config = { ...parsed.header?.config, protocol: parsed.header?.config?.protocol ?? "responses" };
     protocolFor(state.config);
     const draftSearch = state.searchDirty ? state.searchEnabled : undefined;

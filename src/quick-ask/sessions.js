@@ -298,7 +298,7 @@ class QuickAskSessionStore {
   async ensureActiveSession(config) {
     return this.enqueue("active-session", async () => {
       const index = await this.ensureIndex();
-      const active = index.sessions.find(session => session.id === index.activeSessionId) ?? index.sessions[0];
+      const active = index.sessions.find(session => session.id === index.activeSessionId) ?? orderSessions(index.sessions)[0];
       if (active) {
         if (index.activeSessionId !== active.id) await this.setActive(active.id);
         return active.id;
@@ -405,7 +405,7 @@ class QuickAskSessionStore {
       const current = await this.ensureIndex();
       await this.pluginData.dataAdapter.remove(this.adapterPathFor(id));
       const index = { ...current, sessions: current.sessions.filter(session => session.id !== id) };
-      if (index.activeSessionId === id) index.activeSessionId = index.sessions[0]?.id ?? null;
+      if (index.activeSessionId === id) index.activeSessionId = orderSessions(index.sessions)[0]?.id ?? null;
       await this.writeIndex(index);
       await this.notifyCommitted(id);
     });
@@ -451,7 +451,7 @@ class QuickAskSessionStore {
 }
 
 // Ordering for the session list, stated branch by branch so the sign of each
-// rule is visible: most recent durable activity first, then the earlier
+// rule is visible: most recent durable activity first, then the newer
 // creation time, then session ID.
 function compareSessions(a, b) {
   const aActivity = String(a.lastActivity ?? "");
@@ -460,8 +460,8 @@ function compareSessions(a, b) {
   if (aActivity !== bActivity) return aActivity > bActivity ? -1 : 1;
   const aCreated = String(a.created ?? "");
   const bCreated = String(b.created ?? "");
-  // Ascending creation: the earlier session comes first.
-  if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
+  // Descending creation: the newer session comes first.
+  if (aCreated !== bCreated) return aCreated > bCreated ? -1 : 1;
   const aId = String(a.id);
   const bId = String(b.id);
   if (aId === bId) return 0;

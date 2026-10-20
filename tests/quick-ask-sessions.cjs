@@ -222,9 +222,9 @@ test('a lost index is rebuilt from the sessions directory, sorted by recent acti
   });
   const { index, reset } = await store.init();
   assert.equal(reset, true);
-  // b and c share the most recent activity, and b was created earlier.
-  assert.deepEqual(index.sessions.map((session) => session.id), ['b', 'c', 'a']);
-  assert.equal(index.activeSessionId, 'b', 'the first rebuilt session becomes active');
+  // b and c share the most recent activity, so the newer c comes first.
+  assert.deepEqual(index.sessions.map((session) => session.id), ['c', 'b', 'a']);
+  assert.equal(index.activeSessionId, 'c', 'the first rebuilt session becomes active');
   assert.equal(adapter.files.has(`${DIR}index.json`), true);
 });
 
@@ -291,8 +291,8 @@ test('session ordering is deterministic for equal activity and creation times', 
     { id: 'a', created: '2026-09-01T00:00:00.000Z', lastActivity: '2026-09-02T00:00:00.000Z' },
     { id: 'b', created: '2026-09-01T00:00:00.000Z', lastActivity: '2026-09-02T00:00:00.000Z' },
   ];
-  // Equal activity falls back to creation time ascending, then session ID.
-  assert.deepEqual(orderSessions(sessions).map((session) => session.id), ['a', 'b', 'c']);
+  // Equal activity falls back to creation time descending, then session ID.
+  assert.deepEqual(orderSessions(sessions).map((session) => session.id), ['c', 'a', 'b']);
   // A tie on both activity and creation falls back to the session ID.
   const tied = [
     { id: 'z', created: '2026-09-01T00:00:00.000Z', lastActivity: '2026-09-02T00:00:00.000Z' },
@@ -434,4 +434,40 @@ test('a mirrored turn writes each new log suffix and only two copies of the inde
   assert.equal(suffixes.length, 22);
   assert.ok(suffixes.every(text => text.split('\n').length === 2));
   assert.equal(files.get(`${paths.sessions}/${id}.jsonl`), serializeLog(log.header, log.records));
+});
+
+
+test('deleting the active session picks recent durable activity, not raw index insertion order', async () => {
+  const { store, scheduler } = makeStore();
+  const old = await store.createSession({});
+  scheduler.advance(1000);
+  const recent = await store.createSession({});
+  scheduler.advance(1000);
+  const current = await store.createSession({});
+  // New creation counts as activity; passive selection does not.
+  await store.setActive(old.id);
+  await store.setActive(current.id);
+  await store.delete(current.id);
+  assert.equal((await store.loadIndex()).activeSessionId, recent.id);
+  const another = await store.createSession({});
+  scheduler.advance(1000);
+  await store.rename(old.id, 'Recently changed');
+  await store.delete(another.id);
+  assert.equal((await store.loadIndex()).activeSessionId, old.id);
+});
+
+test('delete and invalid-active fallback share the visible activity/creation ordering', async () => {
+  const { store, scheduler } = makeStore();
+  const old = await store.createSession({});
+  scheduler.advance(1000);
+  const newer = await store.createSession({});
+  const active = await store.createSession({});
+  const at = new Date(scheduler.now() + 1000).toISOString();
+  await store.append(old.id, 'session/renamed', { title: 'Older' }, { at });
+  await store.append(newer.id, 'session/renamed', { title: 'Newer' }, { at });
+  await store.delete(active.id);
+  assert.equal((await store.loadIndex()).activeSessionId, newer.id);
+  assert.equal((await store.listSessions())[0].id, newer.id);
+  await store.setActive(null);
+  assert.equal(await store.ensureActiveSession({}), newer.id);
 });
