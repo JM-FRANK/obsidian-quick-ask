@@ -1,2 +1,14 @@
 node_modules/
+.npm-cache/
 dist/
+/main.js
+/styles.css
+/THIRD_PARTY_NOTICES.md
+/temp/
+/coverage/
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+/credentials.txt
+/temp_key.txt

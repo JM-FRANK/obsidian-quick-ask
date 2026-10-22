@@ -38,7 +38,7 @@ function validateRelease(root) {
 if (require.main === module) {
   const root = path.resolve(__dirname, '..');
   const { manifest, provenance, notes } = validateRelease(root);
-  if (execFileSync('git', ['status', '--porcelain'], { cwd: root }).toString().trim()) throw new Error('Commit the synchronized snapshot and build before creating a release');
+  if (execFileSync('git', ['status', '--porcelain'], { cwd: root }).toString().trim()) throw new Error('Commit the synchronized source snapshot before creating a release');
   execFileSync('npm', ['run', 'check'], { cwd: root, stdio: 'inherit' });
   if (process.argv.includes('--check')) process.exit(0);
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();

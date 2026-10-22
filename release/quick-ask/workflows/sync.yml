@@ -53,6 +53,7 @@ jobs:
           cd downstream
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm --cached --ignore-unmatch -- main.js styles.css THIRD_PARTY_NOTICES.md
           git add .
           git diff --cached --quiet && exit 0
           branch="sync/quick-ask-$UPSTREAM_COMMIT"

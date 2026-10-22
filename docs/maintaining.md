@@ -22,13 +22,13 @@ npm test
 npm run check
 ```
 
-Review, commit and push the synchronized source plus build outputs, including `THIRD_PARTY_NOTICES.md`. Managed-file drift is rejected; removed managed files are removed during synchronization. `upstream.json` records the source SHA and checksums. No application session data is exported by the source synchronizer.
+Review, commit and push the synchronized source, metadata and provenance. Generated `main.js`, `styles.css` and `THIRD_PARTY_NOTICES.md` remain ignored local outputs; retain root `manifest.json` as release metadata. Managed-file drift is rejected; removed managed files are removed during synchronization. `upstream.json` records the source SHA and checksums. No application session data is exported by the source synchronizer.
 
 For GitHub-based synchronization, configure `UPSTREAM_REPOSITORY` and read credentials if the upstream is private. Run **Pull Quick Ask from upstream** with a full commit SHA; it verifies the generated tree before creating a PR. Until the upstream has a remote repository, use local synchronization. A PR generated with GITHUB_TOKEN may not trigger another workflow, so the sync job performs its own tests.
 
 ## Prepare a release
 
-Commit the synchronized outputs, then run `npm run release:check`. Use the **Prepare Quick Ask release** workflow to rebuild, test and attest the exact installation files before uploading them to a draft Release. A local `npm run release:draft` is useful for preparation, but it does not generate a GitHub attestation and its draft is explicitly marked accordingly.
+Build locally, commit the synchronized source snapshot, then run `npm run release:check`. Use the **Prepare Quick Ask release** workflow to rebuild, test and attest the exact installation files before uploading them to a draft Release. A local `npm run release:draft` is useful for preparation, but it does not generate a GitHub attestation and its draft is explicitly marked accordingly.
 
 Private repository runs also create preparation drafts without attestations on ordinary GitHub plans. After making the repository public, rerun the workflow to generate attestations and refresh the same unpublished draft. Published releases are never overwritten by this tool. `upstream.json` and the SHA-256 values embedded in release notes support traceability, but do not replace GitHub's signed artifact attestation.
 
@@ -38,7 +38,7 @@ See [Community submission](community-submission.md) for the final manual accepta
 ## Obsidian review recommendations
 
 Release uploads contain only `main.js`, `manifest.json` and `styles.css`. Keep
-`LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` in the repository/build outputs;
+`LICENSE` and `NOTICE` in the repository and generate `THIRD_PARTY_NOTICES.md` locally;
 the builder includes their text in `main.js`. Checksums are included in release
 notes instead of a separate `SHA256SUMS` attachment. This preserves notices for
 Obsidian installations while avoiding unsupported download files.

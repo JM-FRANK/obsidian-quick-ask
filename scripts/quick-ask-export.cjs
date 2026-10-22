@@ -71,7 +71,7 @@ function exportQuickAsk({ source, ref, out, worktree = false }) {
     managed.set('LICENSE', read('release/quick-ask/LICENSE'));
   }
   if (available.has('release/quick-ask/NOTICE')) managed.set('NOTICE', read('release/quick-ask/NOTICE'));
-  managed.set('.gitignore', Buffer.from('node_modules/\ndist/\n'));
+  managed.set('.gitignore', Buffer.from('node_modules/\n.npm-cache/\ndist/\n/main.js\n/styles.css\n/THIRD_PARTY_NOTICES.md\n/temp/\n/coverage/\n/.env\n/.env.*\n!/.env.example\n!/.env.sample\n/credentials.txt\n/temp_key.txt\n'));
   const sourceHashes = Object.fromEntries([...managed].map(([name, bytes]) => [name, hash(bytes)]));
   const provenance = {
     schemaVersion: 1,
