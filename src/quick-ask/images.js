@@ -87,6 +87,12 @@ async function prepareImages(paths, source) {
     const data = validateImage(bytes, file.path);
     actualTotal += data.byteLength;
     if (actualTotal > IMAGE_TOTAL_BYTES) throw imageError('IMAGE_TOTAL');
+    // A signature alone does not prove the image body is decodable. Hosts can
+    // validate with their native decoder before we encode or transmit bytes.
+    if (source.validate) {
+      try { await source.validate(data, file.path); }
+      catch { throw imageError('IMAGE_FORMAT', file.path); }
+    }
     images.push({ path: file.path, size: data.byteLength, url: `data:${imageMime(file.path)};base64,${source.encodeBase64 ? source.encodeBase64(data) : base64(data)}` });
   }
   // Recheck actual bytes in case a source changed between stat and read.

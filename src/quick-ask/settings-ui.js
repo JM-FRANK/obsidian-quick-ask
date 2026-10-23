@@ -116,12 +116,12 @@ function quickAskPage(host, SecretComponent) {
             control: { type: "toggle", key: "quickAsk.enable" },
           },
           {
-            name: tr("settings.quickAsk.callLimit.name"),
-            desc: tr("settings.quickAsk.callLimit.desc"),
+            name: tr("settings.quickAsk.toolConcurrency.name"),
+            desc: tr("settings.quickAsk.toolConcurrency.desc"),
             control: {
-              type: "number", key: "quickAsk.callLimit", min: 1, max: 10, step: 1,
+              type: "number", key: "quickAsk.toolConcurrency", min: 1, max: 10, step: 1,
               validate: value => Number.isInteger(value) && value >= 1 && value <= 10
-                ? undefined : tr("settings.quickAsk.validation.callLimit"),
+                ? undefined : tr("settings.quickAsk.validation.toolConcurrency"),
             },
           },
         ],

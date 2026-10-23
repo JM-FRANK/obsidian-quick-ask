@@ -319,6 +319,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     // The settings page calls this after the enable setting changes, so the
     // setting applies immediately without reloading the plugin.
     syncEnabled: sync,
+    refreshToolConcurrency: () => conversation.refreshToolConcurrency(),
     refreshAppearance: () => {
       const { openViews } = require("./view");
       for (const view of openViews) view.applyAppearance();

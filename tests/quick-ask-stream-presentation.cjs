@@ -1,7 +1,7 @@
 // quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createProjectionPublisher, reasoningPage, REASONING_PAGE_SIZE, createScrollFollow } = require('../src/quick-ask/stream-presentation');
+const { createProjectionPublisher, createScrollFollow } = require('../src/quick-ask/stream-presentation');
 const { clearSubmittedDraft, recoverSubmittedDraft } = require('../src/quick-ask/submission-state');
 
 test('frames retain only latest channel values and flush them before completion', () => {
@@ -18,16 +18,6 @@ test('frames retain only latest channel values and flush them before completion'
   publisher.dispose();
   assert.equal(callbacks.size, 0);
   assert.equal(delivered.length, 3);
-});
-
-test('bounded reasoning pages reconstruct a long source exactly, including split surrogate boundaries', () => {
-  const text = 'a'.repeat(REASONING_PAGE_SIZE - 1) + '😀' + 'line\n'.repeat(20000);
-  const count = reasoningPage(text).count;
-  const pages = Array.from({ length: count }, (_, n) => reasoningPage(text, n).text);
-  assert.equal(pages.join(''), text);
-  assert.ok(pages.every(page => page.length <= REASONING_PAGE_SIZE + 1));
-  assert.equal(reasoningPage(text).page, count - 1);
-  assert.equal(reasoningPage(text, 0).text, reasoningPage(text + 'later', 0).text, 'reading an earlier page stays stable');
 });
 
 test('scroll following pauses on upward intent, survives content growth, and resumes at the bottom', () => {

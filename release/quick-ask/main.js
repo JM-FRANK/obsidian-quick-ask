@@ -18,6 +18,7 @@ class QuickAskSettingsTab extends PluginSettingTab {
     const patch = key === 'language' ? { language: value } : { quickAsk: quickAskControlPatch(key, value) };
     await this.settings.update(patch);
     if (key === 'quickAsk.enable') this.quickAskIntegration.syncEnabled();
+    if (key === 'quickAsk.toolConcurrency') this.quickAskIntegration.refreshToolConcurrency();
     if (key.startsWith('quickAsk.display.') || key.startsWith('quickAsk.webSearch.') || key === 'language') this.quickAskIntegration.refreshAppearance();
     // Keep the custom capacity input mounted while the user types.
     if (key !== 'quickAsk.contextWindowTokens') this.update();

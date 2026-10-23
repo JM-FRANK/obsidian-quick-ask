@@ -4,10 +4,10 @@ const assert = require('node:assert/strict');
 const {
   ANSWER_RESERVE_TOKENS,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
-  DEFAULT_CALL_LIMIT,
+  DEFAULT_TOOL_CONCURRENCY,
   defaultQuickAskSettings,
   normalizeQuickAskSettings,
-  normalizeCallLimit,
+  normalizeToolConcurrency,
   normalizeBaseUrl,
   baseUrlError,
   validateQuickAskSettings,
@@ -61,7 +61,7 @@ test('network sends stay off until the user asks a question, so the feature defa
   assert.equal(defaults.secretId, '');
   assert.equal(defaults.model, '');
   assert.equal(defaults.systemPrompt, '');
-  assert.equal(defaults.callLimit, DEFAULT_CALL_LIMIT);
+  assert.equal(defaults.toolConcurrency, DEFAULT_TOOL_CONCURRENCY);
   assert.equal(defaults.preservedCopy.enabled, false);
 });
 
@@ -92,13 +92,13 @@ test('only http and https roots are accepted, and the /responses suffix is refus
 });
 
 test('the full-file call limit normalizes stored integers from 1 to 10 and falls back to 3', () => {
-  assert.equal(normalizeCallLimit(1), 1);
-  assert.equal(normalizeCallLimit(10), 10);
-  assert.equal(normalizeCallLimit(0), 3);
-  assert.equal(normalizeCallLimit(11), 3);
-  assert.equal(normalizeCallLimit(2.5), 3);
-  assert.equal(normalizeCallLimit('4'), 3);
-  assert.equal(normalizeCallLimit(undefined), 3);
+  assert.equal(normalizeToolConcurrency(1), 1);
+  assert.equal(normalizeToolConcurrency(10), 10);
+  assert.equal(normalizeToolConcurrency(0), 3);
+  assert.equal(normalizeToolConcurrency(11), 3);
+  assert.equal(normalizeToolConcurrency(2.5), 3);
+  assert.equal(normalizeToolConcurrency('4'), 3);
+  assert.equal(normalizeToolConcurrency(undefined), 3);
 });
 
 test('clearing the context capacity disables proactive compaction instead of restoring the default', () => {
@@ -139,17 +139,19 @@ test('a session snapshots endpoint, model, credential reference, prompt, and cap
   };
   const snapshot = sessionConfigSnapshot(settings, { createdAt: '2026-09-12T00:00:00.000Z' });
   assert.deepEqual(snapshot, {
+    providerProfileId: 'default',
+    providerSearchMode: 'mixed',
     protocol: 'responses',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-chat',
     secretId: 'deepseek-key',
     systemPrompt: 'Be terse.',
     contextWindowTokens: 131072,
-    callLimit: 5,
     language: 'zh-CN',
     createdAt: '2026-09-12T00:00:00.000Z',
   });
-  assert.equal(sessionConfigSnapshot({}).callLimit, DEFAULT_CALL_LIMIT);
+  assert.equal(sessionConfigSnapshot({}).callLimit, undefined);
+  assert.equal(sessionConfigSnapshot({toolConcurrency: 8}).toolConcurrency, undefined);
   assert.equal(sessionConfigSnapshot({}).language, 'en');
 });
 
@@ -166,7 +168,7 @@ test('settings that leave the machine carry the secret reference only, never a v
   }
   assert.equal(JSON.stringify(redacted).includes('sk-live-secret-value'), false);
   assert.deepEqual(Object.keys(redacted).sort(), [
-    'activeProviderProfileId', 'activeSystemProfileId', 'baseUrl', 'callLimit', 'contextWindowTokens', 'display', 'enable', 'initialProfilesVersion', 'keepCachedImages', 'model', 'preservedCopy', 'protocol', 'providerProfiles', 'secretId', 'systemProfiles', 'systemPrompt', 'webSearch',
+    'activeProviderProfileId', 'activeSystemProfileId', 'baseUrl', 'contextWindowTokens', 'display', 'enable', 'initialProfilesVersion', 'keepCachedImages', 'model', 'preservedCopy', 'protocol', 'providerProfiles', 'secretId', 'systemProfiles', 'systemPrompt', 'toolConcurrency', 'webSearch',
   ]);
 });
 

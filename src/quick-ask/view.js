@@ -8,7 +8,10 @@ const { safeSourceUrl } = require("./web-search");
 const { sessionNavigation, createSessionActionQueue, adoptUnassignedDraft } = require("./session-navigation");
 const { prepareSubmission, recoverSubmittedDraft } = require("./submission-state");
 const { createScrollFollow } = require("./stream-presentation");
+const { processParts } = require("./turn-process");
+const { createProcessView } = require("./process-view");
 const { createReasoningView } = require("./reasoning-view");
+const { createToolHistoryView } = require('./tool-history-view');
 const { normalizeDisplaySettings } = require("./settings");
 const { conversationFromRecords, questionFromInput } = require("./conversation-messages");
 const { historyPageStart } = require("./history-window");
@@ -58,6 +61,9 @@ class QuickAskView {
     // changes what is displayed, never what keeps running.
     this.trackedSessionId = null;
     this.messages = [];
+    this.toolHistoryViews = new Map();
+    this.processViews = new Map();
+    this.reasoningViews = new Set();
     this.createComposer = createComposer;
     this.runtime = conversation;
     this.trackerFor = trackerFor;
@@ -106,6 +112,7 @@ class QuickAskView {
     this.saveDraft();
     this.activationGeneration += 1;
     this.resetHistoryWindow();
+    this.resetLive();
     this.cancelConversationPaint();
     if (this.followFrame !== null) this.followWindow.cancelAnimationFrame(this.followFrame);
     this.followFrame = null;
@@ -231,7 +238,20 @@ class QuickAskView {
     const generation = this.historyGeneration;
     const paints = [];
     for (const entry of entries) {
+      if (entry.kind === 'process') {
+        const view = createProcessView(area, { ui, translate: (key, values) => this.t(this.getSettings(), key, values),
+          onLayout: () => this.historyLayoutChanged(), onToggle: () => { this.scrollFollow.pause(); this.captureHistoryAnchor(); } });
+        this.processViews.set(entry.id, view); view.update(entry); continue;
+      }
       if (entry.kind === "compaction") { this.renderCompactionDivider(area, entry); continue; }
+      if (entry.kind === 'tools') {
+        const view = createToolHistoryView(area, { ui, translate: (key, values) => this.t(this.getSettings(), key, values),
+          onLayout: () => this.historyLayoutChanged(),
+          onToggle: () => { this.scrollFollow.pause(); this.captureHistoryAnchor(); } });
+        this.toolHistoryViews.set(entry.id, view);
+        view.update(entry);
+        continue;
+      }
       let parent = area;
       if (entry.role === "user" && entry.selections?.length) {
         parent = ui.createEl(area, "div", { cls: "scholar-quick-ask-user-turn" });
@@ -271,6 +291,11 @@ class QuickAskView {
   }
 
   resetHistoryWindow() {
+    for (const view of this.processViews.values()) view.destroy();
+    this.processViews.clear();
+    for (const view of this.reasoningViews) view.destroy();
+    this.reasoningViews.clear();
+    this.toolHistoryViews.clear();
     this.historyGeneration += 1;
     this.finishHistoryPaint?.();
     if (this.historyFrame !== null) this.historyWindow.cancelAnimationFrame(this.historyFrame);
@@ -379,10 +404,13 @@ class QuickAskView {
 
   makeReasoning(parent) {
     const tr = key => this.t(this.getSettings(), key);
-    return createReasoningView(parent, {
+    const view = createReasoningView(parent, {
       ui: this.ui, label: tr("composer.reasoning"), onLayout: () => this.historyLayoutChanged(),
-      labels: { previous: tr("reasoning.previous"), next: tr("reasoning.next"), latest: tr("reasoning.latest"), copy: tr("reasoning.copy"), copyFailed: tr("composer.copyFailed") },
+      labels: { copy: tr("reasoning.copy"), copyFailed: tr("composer.copyFailed") },
+      onToggle: () => { this.scrollFollow.pause(); this.captureHistoryAnchor(); },
     });
+    this.reasoningViews.add(view);
+    return view;
   }
 
   labelMessageRole(parent, role) {
@@ -401,6 +429,10 @@ class QuickAskView {
   }
 
   resetLive() {
+    const reasoning = this.liveParts?.reasoning;
+    if (reasoning && this.roots.live.contains(reasoning.element)) {
+      reasoning.destroy(); this.reasoningViews.delete(reasoning);
+    }
     this.ui.clear(this.roots.live);
     this.liveParts = null;
   }
@@ -420,7 +452,6 @@ class QuickAskView {
       const bubble = ui.createEl(live, "div", { cls: "scholar-quick-ask-message scholar-quick-ask-message-assistant is-streaming" });
       this.labelMessageRole(bubble, "assistant");
       const reasoning = this.makeReasoning(bubble);
-      const tools = ui.createEl(bubble, "div", { cls: "scholar-quick-ask-tool-status" });
       const answer = ui.createEl(bubble, "div", { cls: "scholar-quick-ask-stream-text" });
       const textNode = answer.ownerDocument.createTextNode("");
       answer.appendChild(textNode);
@@ -429,29 +460,30 @@ class QuickAskView {
       const errorText = ui.createEl(error, "span");
       const retry = ui.createEl(error, "button", { text: this.t(this.getSettings(), "common.retry"), attributes: { type: "button" } });
       retry.addEventListener("click", () => { void this.retryFailedSubmission(); });
-      this.liveParts = { bubble, reasoning, tools, textNode, thinking, error, errorText, retry, length: 0, toolLabel: null, errorLabel: null };
+      this.liveParts = { bubble, reasoning, textNode, thinking, error, errorText, retry, length: 0, errorLabel: null };
     }
     const parts = this.liveParts;
-    parts.reasoning.update(stream.reasoning ?? "", stream.status === "running" && !stream.text);
+    const ordered = stream.processVersion === 1;
+    const visibleProcess = ordered && processParts(stream.process).steps.some(step => step.kind !== "reasoning" || !this.roots.container.classList.contains("hide-reasoning"));
+    parts.reasoning.update(ordered ? "" : stream.reasoning ?? "", stream.status === "running" && !stream.text);
     const text = stream.text ?? "";
     // Stream deltas are append-only within a turn. Only the new suffix touches
     // the Text node, so old text and its selection stay in place.
-    if (text.length < parts.length) parts.textNode.data = text;
+    const textId = ordered ? stream.process?.at(-1)?.id : null;
+    if (parts.textId !== textId || text.length < parts.length) parts.textNode.data = text;
     else if (text.length > parts.length) parts.textNode.appendData(text.slice(parts.length));
-    parts.length = text.length;
-    const toolLabel = this.toolStatus ? toolStatusLabel(this.t, this.getSettings(), this.toolStatus) : "";
-    parts.tools.hidden = !toolLabel;
-    if (parts.toolLabel !== toolLabel) { ui.setText(parts.tools, toolLabel); parts.toolLabel = toolLabel; }
-    parts.thinking.hidden = Boolean(text || (stream.reasoning && !this.roots.container.classList.contains("hide-reasoning")) || stream.status !== "running");
+    parts.length = text.length; parts.textId = textId;
+    parts.thinking.hidden = Boolean(visibleProcess || text || (stream.reasoning && !this.roots.container.classList.contains("hide-reasoning")) || stream.status !== "running");
     parts.bubble.classList.toggle("is-streaming", stream.status === "running");
-    parts.bubble.hidden = stream.status !== "running" && !text && !stream.reasoning && !toolLabel;
+    parts.bubble.hidden = !text && (ordered ? visibleProcess || stream.status !== "running" : stream.status !== "running" && !stream.reasoning);
     parts.retry.hidden = this.messages.some(entry => entry.retry && entry.retry === this.lastSubmission);
     parts.error.hidden = !["failed", "interrupted"].includes(stream.status);
     if (!parts.error.hidden) {
       const message = stream.error?.code === "CAPACITY" ? this.t(this.getSettings(), "composer.capacityFailed")
         : stream.error?.code === "COMPACTION" ? this.t(this.getSettings(), "compaction.failed")
           : stream.error?.message ?? this.t(this.getSettings(), "composer.failed");
-      if (parts.errorLabel !== message) { ui.setText(parts.errorText, message); parts.errorLabel = message; }
+      const display = stream.error?.hint === 'search.switchIndependent' ? `${message} ${this.t(this.getSettings(), 'search.switchIndependent')}` : message;
+      if (parts.errorLabel !== display) { ui.setText(parts.errorText, display); parts.errorLabel = display; }
     }
   }
 
@@ -614,8 +646,14 @@ class QuickAskView {
   // is not rewritten per token.
   applyProjection(projection) {
     if (!projection) return;
+    if (projection.processVersion === 1) {
+      if (projection.group) this.updateProcessTools(projection.group);
+      this.updateProcess(projection.turnId, projection.process, projection.kind === 'turn' ? projection.status : 'running', projection.answerText);
+      this.streaming = { ...(this.streaming ?? { status: 'running', text: '', reasoning: '', error: null }),
+        processVersion: 1, process: projection.process, text: processParts(projection.process).answer };
+    }
     if (projection.kind === "text") {
-      this.streaming = { ...(this.streaming ?? { status: "running", reasoning: "", text: "", error: null }) , text: projection.text, status: "running" };
+      this.streaming = { ...(this.streaming ?? { status: "running", reasoning: "", text: "", error: null }) , text: projection.processVersion === 1 ? processParts(projection.process).answer : projection.text, status: "running" };
       this.scheduleConversationPaint();
       return;
     }
@@ -635,10 +673,10 @@ class QuickAskView {
       return;
     }
     if (projection.kind === "search-state" || projection.kind === "reasoning-effort") { this.renderSendButton(); return; }
-    if (projection.kind === "search-route" || projection.kind === "search-status") {
+    if (projection.kind === 'search-status') return;
+    if (projection.kind === "search-route") {
       if (!this.roots.searchStatus) this.roots.searchStatus = this.ui.createEl(this.roots.composer, "div", { cls: "scholar-quick-ask-search-status", attributes: { role: "status" } });
-      const label = projection.kind === "search-route" ? (projection.route === "off" ? "search.off" : "search.route")
-        : projection.status === "running" ? "search.running" : projection.status === "failed" ? "search.failed" : "search.complete";
+      const label = projection.route === 'off' ? 'search.off' : 'search.route';
       this.ui.setText(this.roots.searchStatus, `${this.t(this.getSettings(), label)}${projection.provider && projection.provider !== "off" ? ` · ${projection.provider}` : ""}${projection.code ? ` (${projection.code})` : ""}`);
       return;
     }
@@ -674,17 +712,20 @@ class QuickAskView {
       this.renderSendButton();
       return;
     }
-    if (projection.kind === "tool-status" && projection.status?.kind === "search") return;
-    if (projection.kind === "tool-status") {
-      this.toolStatus = projection.status;
-      this.renderConversation();
+    if (projection.kind === 'tool-activity') {
+      if (projection.processVersion === 1) {
+        this.streaming.text = processParts(projection.process).answer;
+        this.scheduleConversationPaint(); return;
+      }
+      this.updateToolHistory(projection.group);
       return;
     }
+    if (projection.kind === 'tool-status') return;
     if (projection.kind === "turn") {
-      if (projection.status !== "running") this.toolStatus = null;
       this.streaming = {
         ...(this.streaming ?? { reasoning: "", text: "" }),
         status: projection.status,
+        error: Object.hasOwn(projection, 'error') ? projection.error : this.streaming?.error ?? null,
       };
       this.renderSendButton();
       this.renderConversation();
@@ -693,6 +734,40 @@ class QuickAskView {
 
   pendingImagePaths() {
     return [...new Set([...(this.pending.images ?? []), ...(this.composer?.paths ?? []).filter(imageMime)])];
+  }
+
+  updateProcessTools(group) {
+    if (!this.processToolGroups) this.processToolGroups = new Map();
+    this.processToolGroups.set(group.id, group);
+  }
+
+  updateProcess(turnId, steps = [], status = 'running', answerText = undefined) {
+    if (!turnId) return;
+    const parts = processParts(steps, answerText);
+    const displaySteps = parts.steps.map(step => step.kind !== 'tool' ? { ...step } : {
+      ...step, call: this.processToolGroups?.get(step.groupId)?.calls.find(call => call.callId === step.callId),
+    });
+    let entry = this.messages.find(item => item.kind === 'process' && item.id === turnId);
+    if (!entry && !displaySteps.length) return;
+    if (!entry) {
+      entry = { kind: 'process', id: turnId, turnId };
+      this.messages.push(entry);
+    }
+    Object.assign(entry, { steps: displaySteps, status,
+      activeStepId: status === 'running' && steps.at(-1)?.kind === 'reasoning' ? steps.at(-1).id : null });
+    this.processViews.get(turnId)?.update(entry);
+  }
+
+  updateToolHistory(group) {
+    const previous = this.messages.find(entry => entry.kind === 'tools' && entry.id === group.id);
+    if (previous) {
+      previous.calls = group.calls;
+      this.toolHistoryViews.get(group.id)?.update(previous);
+      this.historyLayoutChanged();
+    } else {
+      this.messages.push({ ...group });
+      this.renderConversation();
+    }
   }
 
   imageError(error) {
@@ -1162,9 +1237,10 @@ class QuickAskView {
     if (!visible) return result;
     this.sending = false;
     if (result?.status === "complete" || result?.status === "incomplete" || (result?.status === "stopped" && accepted)) {
-      this.settlingReasoning = this.liveParts?.reasoning ?? null;
-      if (result.text || result.reasoning) this.messages.push({
-        role: "assistant", text: result.text ?? "", reasoning: result.reasoning ?? "", settled: true,
+      this.settlingReasoning = result.processVersion === 1 ? null : this.liveParts?.reasoning ?? null;
+      if (result.processVersion === 1) this.updateProcess(result.turnId, result.process, result.status, result.text);
+      if (result.text || (result.processVersion !== 1 && result.reasoning)) this.messages.push({
+        role: "assistant", text: result.text ?? "", reasoning: result.processVersion === 1 ? "" : result.reasoning ?? "", settled: true, turnId: result.turnId,
         sources: result.sources ?? [], searchSuggestions: result.searchSuggestions ?? [], searchStatuses: result.searchStatuses ?? [], displayText: result.displayText,
         usage: this.usage ?? null, model: (this.getConfig?.(sessionId) ?? {}).model ?? null,
       });
@@ -1350,7 +1426,6 @@ class QuickAskView {
     this.hasSessionHistory = false;
     this.sessionUnavailable = false;
     this.streaming = null;
-    this.toolStatus = null;
     this.usage = null;
     this.occupancy = null;
     this.sessionUsage = 0;
@@ -1399,9 +1474,18 @@ class QuickAskView {
     this.refreshPendingFiles();
     this.refreshTokenFacts();
     const snapshot = this.runtime.snapshot?.(id);
+    this.processToolGroups = new Map((snapshot?.toolGroups ?? []).map(group => [group.id, group]));
+    const modernTurnIds = new Set(this.messages.filter(entry => entry.kind === 'process').map(entry => entry.turnId));
+    for (const group of snapshot?.toolGroups ?? []) if (!modernTurnIds.has(group.turnId) && group.turnId !== (snapshot?.processVersion === 1 ? snapshot.turnId : null)) this.updateToolHistory(group);
+    if (snapshot?.processVersion === 1 && (snapshot.status === 'running' || !this.messages.some(entry => entry.kind === 'process' && entry.id === snapshot.turnId)))
+      this.updateProcess(snapshot.turnId, snapshot.process, snapshot.status);
     this.compacting = snapshot?.compaction?.running === true;
     if (!this.compacting && snapshot && ["running", "failed", "interrupted"].includes(snapshot.status)) {
-      this.streaming = { status: snapshot.status, text: snapshot.text ?? "", reasoning: snapshot.reasoning ?? "", error: snapshot.error };
+      const hasAnswer = this.messages.some(entry => entry.role === 'assistant' && entry.turnId === snapshot.turnId);
+      this.streaming = { status: snapshot.status,
+        text: snapshot.processVersion === 1 ? (hasAnswer ? '' : processParts(snapshot.process).answer) : snapshot.text ?? '',
+        reasoning: snapshot.processVersion === 1 ? '' : snapshot.reasoning ?? '', error: snapshot.error,
+        processVersion: snapshot.processVersion, process: snapshot.process };
     }
     return loaded;
   }
@@ -1598,15 +1682,6 @@ function createQuickAskViewClass(ItemView, { viewType = QUICK_ASK_VIEW_TYPE, get
     async onOpen() { await this.controller.onOpen(); }
     async onClose() { await this.controller.onClose(); }
   };
-}
-
-// Tool status text for the in-progress turn. A spent budget and a full context
-// window say so instead of looking like a missing file.
-function toolStatusLabel(translate, settings, status) {
-  if (status.kind === "read") return translate(settings, "tool.read", { path: status.path });
-  if (status.reason === "limit") return translate(settings, "tool.limitReached");
-  if (status.reason === "context") return translate(settings, "tool.contextFull", { path: status.path ?? "" });
-  return translate(settings, "tool.error", { path: status.path ?? "", message: status.output ?? "" });
 }
 
 // The view's own translation helper reads the whole settings object.

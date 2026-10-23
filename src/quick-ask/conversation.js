@@ -1,7 +1,12 @@
+const { providerSearchMode } = require("./provider-profiles");
+const { runProviderSearch, mixedSearchErrorHint } = require("./provider-search");
+const { PROCESS_VERSION, createTurnProcess, restoreProcess } = require("./turn-process");
 const { geminiSearchWire, buildGeminiSearchBody } = require("./gemini-search");
 const { imagePaths: normalizeImagePaths } = require("./images");
 const { normalizeReasoningEffort } = require("./reasoning");
-const { protocolFor, messageText, isToolOutput, truncateOutput, callsFromItem } = require("./protocol");
+const { protocolFor, messageText, isToolOutput, toolOutputId, truncateOutput, callsFromItem } = require("./protocol");
+const { createImageToolResults } = require('./image-tool-results');
+const { toolHistory, toolSummary, parameters: toolParameters, updateToolGroups, sourceSummary } = require('./tool-history');
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, responseSuggestions, normalizeSources, citedAnswer } = require("./web-search");
 const { createSearchClient } = require("./search-client");
 const { createStore } = require("zustand/vanilla");
@@ -10,7 +15,7 @@ const { deriveTitle, isSupportedSession } = require("./sessions");
 const {
   streamAttempt, createRetryPolicy, normalizeError,
   isResponsesFunctionCall,
-  isResponsesWebSearchCall, responsesBuiltInTools,
+  isResponsesWebSearchCall,
   parseToolArguments, isResponsesStateUnsupported, responsesUsageInputTokens,
 } = require("./transport");
 const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, getFullFileTool } = require("./prompt-renderer");
@@ -18,7 +23,7 @@ const { createContextProjection } = require('./context-projection');
 const { withSelectionUnits } = require('./selection-position');
 const { validateQuickAskSettings, normalizeQuickAskSettings, ANSWER_RESERVE_TOKENS } = require("./settings");
 const { createToolLoop, TOOL_NAMES } = require("./tool-loop");
-const { createToolExecutor } = require("./tool");
+const { createToolExecutor, GET_IMAGE_TOOL } = require("./tool");
 const { createAbortController } = require("./transport");
 const {
   priceProspectiveRequest, capacityBudget, contextOccupancy, shouldCompact,
@@ -37,7 +42,6 @@ const { ANSWER_RESERVE_TOKENS: RESERVE } = require("./settings");
 // when the endpoint supports server-side state.
 
 const MAX_CONCURRENT_TURNS = 3;
-const CALL_LIMIT_DEFAULT = 3;
 const STREAM_EVENT_KINDS = Object.freeze([
   "created", "text-delta", "reasoning-summary-delta", "reasoning-text-delta",
   "function-call-delta", "function-call", "usage", "terminal",
@@ -56,7 +60,8 @@ function createConversation(options) {
     idleTimeoutMs,
     // The read-only tool surface. A caller without a vault still gets a valid
     // executor that answers every call with the normalized missing-file text.
-    toolExecutor = createToolExecutor({ vault: options.environment?.vault ?? { readText: async () => null } }),
+    toolExecutor = createToolExecutor({ vault: options.environment?.vault ?? { readText: async () => null }, images: options.environment?.images,
+      getMaxConcurrent: () => normalizeQuickAskSettings(getSettings()?.quickAsk).toolConcurrency }),
     getContextBudget = () => null,
   } = options;
 
@@ -64,7 +69,7 @@ function createConversation(options) {
   function toolsFor(state, rendererVersion = RENDERER_VERSION) {
     const route = state.requestSearch;
     const protocol = protocolFor(state.config);
-    const tools = route?.kind === "server" && route.localTools === false ? [] : [protocol.functionTool(getFullFileTool(rendererVersion))];
+    const tools = [protocol.functionTool(getFullFileTool(rendererVersion)), protocol.functionTool(GET_IMAGE_TOOL)];
     if (route?.kind === "server") {
       if (route.tool) tools.push(route.tool);
     } else if (route && route.kind !== "off") {
@@ -103,12 +108,12 @@ function createConversation(options) {
   }
   function nextSearchRoute(sessionId) {
     const state = stateFor(sessionId);
-    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), state.config);
+    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
   }
   function validateSearchForSend(sessionId, enabled = searchEnabled(sessionId)) {
     const state = stateFor(sessionId);
     const settings = normalizeSearchSettings(getSettings()?.quickAsk?.webSearch);
-    const route = searchRoute(enabled, settings, state.config);
+    const route = searchRoute(enabled, settings, { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
     const errors = {};
     if (route.kind === "invalid") errors[route.error] = true;
     if (["independent", "provider-api"].includes(route.kind) && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
@@ -130,6 +135,9 @@ function createConversation(options) {
         config: null,
         contextProjection: createContextProjection(),
         items: [],
+        authorizedImagePaths: new Set(),
+        imageToolResults: createImageToolResults(),
+        toolGroups: [],
         lastResponseId: null,
         storedState: false,
         nonStreaming: false,
@@ -174,6 +182,8 @@ function createConversation(options) {
     state.sessionUsage = createSessionUsage();
     state.searchEnabled = undefined;
     state.items = [];
+    state.authorizedImagePaths = new Set();
+    state.imageToolResults = createImageToolResults();
     state.contextProjection = createContextProjection();
     state.compactedSurface = null;
     state.compactedItems = [];
@@ -186,6 +196,11 @@ function createConversation(options) {
     for (const record of parsed.records ?? []) {
       applyRecord(state, record);
     }
+    if (state.turn?.processVersion === PROCESS_VERSION) {
+      const records = (parsed.records ?? []).filter(record => record.payload?.turnId === state.turn.turnId);
+      state.turn.process = createTurnProcess(restoreProcess(records));
+    }
+    state.toolGroups = toolHistory(parsed.records ?? []);
     if (draftSearch !== undefined) state.searchEnabled = draftSearch;
     if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
@@ -204,10 +219,15 @@ function createConversation(options) {
         break;
       case "item/input":
       case "item/output":
+        if (record.kind === 'item/input') rememberImages(state, payload.images);
         for (const [position, item] of (payload.items ?? (payload.item ? [payload.item] : [])).entries()) {
+          if (record.kind === 'item/output' && payload.tool === true && isToolOutput(item)) {
+            state.imageToolResults.remember(item, payload.imagePaths ?? payload.images);
+            rememberImages(state, payload.imagePaths ?? payload.images);
+          }
           // Images belong to the final question, never the Context envelope.
           const isQuestion = !payload.items || position === payload.items.length - 1;
-          if (!(isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item, !isQuestion);
+          if (!(record.kind === 'item/input' && isQuestion && payload.images?.length && !messageText(item))) appendCanonicalItem(state, item, !isQuestion);
         }
         break;
       case "compaction/checkpoint":
@@ -236,6 +256,7 @@ function createConversation(options) {
         state.usageSamples = [];
         state.turn = {
           turnId: payload.turnId,
+          processVersion: payload.processVersion,
           question: payload.question ?? "",
           additions: payload.additions ?? [],
           imagePaths: payload.images ?? [],
@@ -278,7 +299,7 @@ function createConversation(options) {
     }
     if (state.storedState && state.lastResponseId) {
       // Server state is preferred: send only the new input.
-      return { input: turn, previousResponseId: state.lastResponseId };
+      return { input: Array.isArray(turn) ? turn : staged.toolContinuation ?? [], previousResponseId: state.lastResponseId };
     }
     // Local replay rebuilds the whole request from canonical items. A
     // compaction is an explicit prefix discontinuity: the compacted surface
@@ -288,6 +309,13 @@ function createConversation(options) {
     // Tool continuation items have already been appended to the canonical
     // surface by runToolContinuation. Replaying them again duplicates calls.
     return { input: state.contextProjection.items(staged.continuation ? [...surface] : [...surface, ...turn]), previousResponseId: null };
+  }
+
+  function rememberImages(state, paths = []) {
+    if (!Array.isArray(paths)) return;
+    for (const path of paths) {
+      try { for (const valid of normalizeImagePaths([path])) state.authorizedImagePaths.add(valid); } catch { /* Invalid legacy metadata grants no access. */ }
+    }
   }
 
   // The compacted surface, in the confirmed order: references to still-tracked
@@ -329,11 +357,11 @@ function createConversation(options) {
 
   }
 
-  function buildBody(state, staged) {
+  function buildBody(state, staged, projectedRequest = null) {
     staged = { ...staged, rendererVersion: RENDERER_VERSION };
     const config = state.config ?? {};
     const settings = normalizeQuickAskSettings(getSettings()?.quickAsk ?? config);
-    const { input, previousResponseId } = requestInput(state, staged);
+    const { input, previousResponseId } = projectedRequest ?? requestInput(state, staged);
     const body = protocolFor(state.config).buildRequestBody({
       reasoningEffort: state.requestEffort ?? reasoningEffort(state.sessionId),
       instructions: buildInstructions({ rendererVersion: staged.rendererVersion ?? RENDERER_VERSION, customSystemPrompt: config.systemPrompt ?? settings.systemPrompt }),
@@ -347,6 +375,19 @@ function createConversation(options) {
       model: config.model ?? settings.model,
     });
     return state.requestSearch?.native ? buildGeminiSearchBody(body) : body;
+  }
+
+  function materializeToolImages(state, items, { pendingImages = [], signal = null } = {}) {
+    return state.imageToolResults.materialize(items, { source: environment.images,
+      allowlist: state.authorizedImagePaths, protocol: protocolFor(state.config), pendingImages, signal });
+  }
+
+  async function buildModelBody(state, staged, signal = null) {
+    const request = requestInput(state, staged);
+    const projected = await materializeToolImages(state, request.input, {
+      pendingImages: !staged.continuation && !staged.accepted ? staged.images ?? [] : [], signal,
+    });
+    return { body: buildBody(state, staged, { ...request, input: projected.items }), hasImages: projected.hasImages };
   }
 
   function resolveApiKey(state) {
@@ -415,7 +456,7 @@ function createConversation(options) {
         network: environment.network,
         baseUrl: state.config?.baseUrl ?? settings.baseUrl,
         apiKey: resolveApiKey(state),
-        body: buildBody(state, { question, additions, rendererVersion, images }),
+        body: (await buildModelBody(state, { question, additions, rendererVersion, images }, state.activeController?.signal)).body,
         signal: state.activeController?.signal,
       });
       if (exact.supported === true) {
@@ -528,7 +569,8 @@ function createConversation(options) {
         network: environment.network,
         baseUrl: state.config?.baseUrl,
         apiKey: resolveApiKey(state),
-        body: { model: state.config?.model, input: state.contextProjection.items(range.items) },
+        body: { model: state.config?.model, input: (await materializeToolImages(state,
+          state.contextProjection.items(range.items), { signal: state.activeController?.signal ?? state.turn?.controller?.signal })).items },
         signal: state.activeController?.signal ?? state.turn?.controller?.signal,
       });
       if (result.supported === false) {
@@ -598,12 +640,17 @@ function createConversation(options) {
     // An earlier fallback checkpoint in the selected range is consolidated.
     const hasEarlierCheckpoint = range.items.some((item) => messageText(item).includes("<compacted-summary>"));
     const instruction = buildSummaryInstruction({ hasEarlierCheckpoint });
-    const input = [
-      ...state.contextProjection.items(range.items).map((item) => isToolOutput(item)
-        ? truncateOutput(item, truncateToolResult)
-        : item),
+    const summaryItems = [
+      ...state.contextProjection.items(range.items).map(item => {
+        if (!isToolOutput(item)) return item;
+        const truncated = truncateOutput(item, truncateToolResult);
+        state.imageToolResults.copy(item, truncated);
+        return truncated;
+      }),
       protocolFor(state.config).userMessage(instruction),
     ];
+    const { items: input } = await materializeToolImages(state, summaryItems,
+      { signal: state.activeController?.signal ?? state.turn?.controller?.signal });
     const result = await streamAttempt({
       protocol: protocolFor(state.config),
       network: environment.network,
@@ -655,13 +702,13 @@ function createConversation(options) {
     for (const sample of samples) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
-      (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId });
+      (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId, ...(sample.scope ? { scope: sample.scope } : {}) });
       const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
-      if (sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length) {
+      if (sample.scope !== 'search' && sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length && !state.turn?.hadToolImages) {
         state.occupancyAnchor = { inputTokens };
       }
     }
-    if (state.turn?.imagePaths?.length) state.occupancyAnchor = null;
+    if (state.turn?.imagePaths?.length || state.turn?.hadToolImages) state.occupancyAnchor = null;
   }
 
   function pushProjection(state, projection) {
@@ -681,7 +728,7 @@ function createConversation(options) {
     }
     // Known historical versions remain readable; actual sends (including
     // retries) use the current renderer as explicitly requested by the user.
-    if (![1, 2, 3, 4, 5, 6, 7].includes(rendererVersion)) return { status: "failed", accepted: false,
+    if (!Number.isInteger(rendererVersion) || rendererVersion < 1 || rendererVersion > RENDERER_VERSION) return { status: "failed", accepted: false,
       error: { code: "RENDERER", message: `Unsupported Quick Ask renderer version: ${rendererVersion}. Update the plugin or submit a new question.` } };
     // Explicit user decision: retries also adopt current rules/position units.
     rendererVersion = RENDERER_VERSION;
@@ -733,10 +780,10 @@ function createConversation(options) {
       state.usage = createTurnUsage();
       state.usageSamples = [];
       state.pendingMutations = stagedAdditions;
-      const turn = { turnId, question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
+      const turn = { turnId, processVersion: PROCESS_VERSION, process: createTurnProcess(), question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
       state.contextProjection.beginTurn(stagedAdditions, rendererVersion);
-      await sessionStore.append(sessionId, "turn/started", { turnId, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
+      await sessionStore.append(sessionId, "turn/started", { turnId, processVersion: PROCESS_VERSION, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, searchExecution: selectedSearch.kind === 'provider-search' ? 'independent' : 'mixed', nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
       // Read the current toggle here so a manual change made during preflight
       // cannot be overwritten by consuming this question's one-shot permission.
       if ((state.searchRevision ?? 0) === searchRevision) {
@@ -778,6 +825,7 @@ function createConversation(options) {
         state.turn.controller = null;
         if (state.turn.status === "running") state.turn.status = "interrupted";
       }
+      if (state.turn?.status === 'interrupted') await settleToolActivities(state, state.turn, 'interrupted');
     }
   }
 
@@ -787,14 +835,13 @@ function createConversation(options) {
     for (;;) {
       if (!isEnabled() || signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
       let body;
-      try { body = buildBody(state, turn); }
-      catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
-      if (turn.toolQuestion && turn.toolQuestion.state.callsUsed >= turn.toolQuestion.state.callLimit) {
-        body.tools = responsesBuiltInTools(body.tools);
-        if (protocolFor(state.config).emptyToolsAreInvalid && body.tools.length === 0) {
-          delete body.tools; delete body.tool_choice; delete body.parallel_tool_calls;
-        }
+      try {
+        const projected = await buildModelBody(state, turn, signal);
+        body = projected.body;
+        if (projected.hasImages) turn.hadToolImages = true;
       }
+      catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
+      if (signal?.aborted || !isEnabled()) return await finishTurn(state, turn, 'stopped', { text: turn.text });
       const result = await streamAttempt({
         protocol: state.requestSearch?.native ? geminiSearchWire : protocolFor(state.config),
         network: environment.network,
@@ -809,9 +856,22 @@ function createConversation(options) {
         onEvent: (event) => handleStreamEvent(state, turn, event),
       });
 
+      // Some non-streaming adapters expose readable content only on completion.
+      if (turn.process && !turn.attemptHadReasoning && result.reasoning) {
+        turn.process.append("reasoning", result.reasoning); turn.reasoning += result.reasoning;
+      }
+      if (turn.process && !turn.attemptHadText && result.text) {
+        turn.process.append("text", result.text); turn.text += result.text;
+      }
+      turn.process?.boundary();
+      saveProcess(state, turn, true);
+      turn.attemptHadReasoning = false; turn.attemptHadText = false;
+
       if (result.output) {
         turn.searchSources = normalizeSources([...turn.searchSources, ...responseSources(result.output)]);
         turn.searchSuggestions = [...new Set([...(turn.searchSuggestions ?? []), ...responseSuggestions(result.output)])];
+        const queries = result.output.filter(isResponsesWebSearchCall).flatMap(item => item.action?.queries ?? (item.action?.query ? [item.action.query] : []));
+        turn.serverSearchQueries = [...new Set([...(turn.serverSearchQueries ?? []), ...queries].filter(query => typeof query === 'string'))];
       }
 
       // The endpoint demonstrably needed the non-streaming transport; remember
@@ -835,11 +895,6 @@ function createConversation(options) {
       }
       if (result.status === "completed" || result.status === "incomplete") {
         if (result.status === "completed" && Array.isArray(result.functionCalls) && result.functionCalls.length > 0) {
-          if (state.requestSearch?.kind === "server" && state.requestSearch.localTools === false) {
-            return await finishTurn(state, turn, "failed", { text: result.text, reasoning: result.reasoning,
-              output: result.output, usage: result.usageSamples,
-              error: { code: "TOOLS_UNSUPPORTED", message: "This provider's web-search turn does not support local function tools." } });
-          }
           const continued = await runToolContinuation(state, turn, result, signal, retryAfterNonStreaming);
           if (continued) return continued;
         }
@@ -897,7 +952,7 @@ function createConversation(options) {
     const ownToolLoop = createToolLoop({ executor: toolExecutor, tracker: trackerFor(state.sessionId), config: { ...state.config, rendererVersion: turn.rendererVersion ?? RENDERER_VERSION } });
     const question = turn.toolQuestion ?? (turn.toolQuestion = ownToolLoop.beginQuestion({
       allowlist: typeof trackerFor(state.sessionId).allowlist === "function" ? trackerFor(state.sessionId).allowlist() : [],
-      callLimit: state.config?.callLimit ?? state.config?.fullFileCallLimit ?? 3,
+      imageAllowlist: [...state.authorizedImagePaths],
     }));
     // The transport reports completed calls on the attempt result; each one
     // carries its raw argument JSON so the canonical item stays byte-faithful.
@@ -911,29 +966,51 @@ function createConversation(options) {
         rawArguments: typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments ?? {}),
       }));
     if (calls.length === 0) return null;
+    const batchId = `local-${turn.toolRounds ?? 0}`;
+    const activity = (call, index) => ({ turnId: turn.turnId, batchId,
+      callId: call.callId ?? `${batchId}-${index}`, name: call.name, arguments: toolParameters(call.arguments),
+      ...(call.name === 'web_search' ? { provider: state.requestSearch?.provider } : {}) });
     const { items, results } = await ownToolLoop.runBatch(calls, question, {
+      onCallQueued: (call, index) => TOOL_NAMES.includes(call.name) ? recordToolActivity(state, { ...activity(call, index), status: 'queued' }) : undefined,
+      onCallStart: (call, index) => TOOL_NAMES.includes(call.name) ? recordToolActivity(state, { ...activity(call, index), status: 'running' }) : undefined,
+      onCallEnd: (call, index, value) => TOOL_NAMES.includes(call.name) ? recordToolActivity(state, { ...activity(call, index),
+        status: value.ok ? 'complete' : signal?.aborted ? 'cancelled' : 'failed', summary: toolSummary(call.name, value) }) : undefined,
       normalizePath: (path) => environment.vault.normalizePath(path),
       fitsInContext: (path) => getContextBudget(path, state.sessionId) !== false,
       signal,
       search: turn.searchEnabled && state.requestSearch?.kind !== "off" ? async query => {
         let route = state.requestSearch;
         pushProjection(state, { kind: "search-status", status: "running", provider: route.provider });
-        let result = await searchClient.search(query, route, { signal, config: state.config });
+        let result;
+        if (route.kind === 'provider-search') {
+          const child = await runProviderSearch(query, { environment, config: state.config, route, apiKey: resolveApiKey(state),
+            signal, policy, idleTimeoutMs });
+          const { usageSamples = [], ...evidence } = child;
+          result = evidence;
+          const samples = usageSamples.map(sample => ({ ...sample, scope: 'search' }));
+          recordUsage(state, samples);
+          for (const sample of samples) await sessionStore.append(state.sessionId, 'turn/usage', sample);
+        } else result = await searchClient.search(query, route, { signal, config: state.config });
         turn.searchSources = normalizeSources([...turn.searchSources, ...(result.sources ?? [])]);
         const status = { status: result.ok ? "complete" : "failed", provider: route.provider, code: result.code ?? null };
         turn.searchStatuses.push(status);
-        if (!result.ok && result.code !== "QUERY") turn.searchFailure = { code: "SEARCH_FAILED", message: `Search failed (${route.provider}: ${result.code}${result.status ? ` HTTP ${result.status}` : ""}). Check the selected search method and its API key; no other service was used.` };
         await sessionStore.append(state.sessionId, "search/result", { turnId: turn.turnId, query, ...status, sources: result.sources ?? [] });
         pushProjection(state, { kind: "search-status", ...status });
         return result;
       } : null,
     });
     const providerOutput = Array.isArray(result.output) ? result.output : [];
+    const imageReferences = new Map(calls.map((call, index) => [call.callId, results[index]?.imagePaths]));
     const providerCallIds = new Set(providerOutput.filter(isResponsesFunctionCall).map(item => item.call_id));
     const canonical = [...providerOutput, ...items.filter(item => !isResponsesFunctionCall(item) || !providerCallIds.has(item.call_id))];
     for (const item of canonical) {
+      const images = isToolOutput(item) ? imageReferences.get(toolOutputId(item)) : null;
+      if (images?.length) {
+        state.imageToolResults.remember(item, images);
+        rememberImages(state, images);
+      }
       appendCanonicalItem(state, item);
-      await sessionStore.append(state.sessionId, "item/output", { item, tool: true });
+      await sessionStore.append(state.sessionId, "item/output", { item, tool: true, ...(images?.length ? { imagePaths: images } : {}) });
       pushProjection(state, { kind: "tool", item, turnId: turn.turnId });
     }
     recordUsage(state, result.usageSamples);
@@ -941,22 +1018,63 @@ function createConversation(options) {
       pushProjection(state, { kind: "tool-status", turnId: turn.turnId, status });
     }
     if (signal?.aborted) return await finishTurn(state, turn, "stopped", { text: turn.text });
-    if (turn.searchFailure) return await finishTurn(state, turn, "failed", { text: turn.text, error: turn.searchFailure });
     // The continuation request carries only the new tool items while server
     // state is supported, and the rebuilt history otherwise.
     turn.toolContinuation = items;
     turn.toolRounds = (turn.toolRounds ?? 0) + 1;
-    if (turn.toolRounds > (state.config?.callLimit ?? 3) + 1)
-      return await finishTurn(state, turn, "failed", { text: turn.text, error: { code: "TOOL_LIMIT", message: "The model continued requesting tools after the question limit." } });
     turn.continuation = true;
     return await runAttempt(state, turn, signal);
+  }
+
+  function saveProcess(state, turn, final = false) {
+    const steps = turn.process?.drain(final) ?? [];
+    if (!steps.length) return;
+    state.toolDisplayQueue = (state.toolDisplayQueue ?? Promise.resolve()).then(async () => {
+      await acceptQueue;
+      await sessionStore.append(state.sessionId, 'turn/process', { turnId: turn.turnId, version: PROCESS_VERSION, steps });
+    }).catch(() => { console.warn('Quick Ask could not save process presentation metadata.'); });
+  }
+
+  function processProjection(turn) {
+    return turn.process ? { process: turn.process.steps, processVersion: PROCESS_VERSION } : {};
+  }
+
+  // Display metadata cannot change tool output, permission or model replay.
+  function recordToolActivity(state, activity) {
+    const turn = state.turn;
+    if (turn?.process && activity.turnId === turn.turnId) {
+      turn.process.tool(`${activity.turnId}:${activity.batchId}`, activity.callId);
+      saveProcess(state, turn);
+    }
+    const updated = updateToolGroups(state.toolGroups ?? [], activity);
+    state.toolGroups = updated.groups;
+    pushProjection(state, { kind: 'tool-activity', group: updated.group, turnId: turn?.turnId, ...processProjection(turn ?? {}) });
+    state.toolDisplayQueue = (state.toolDisplayQueue ?? Promise.resolve()).then(async () => {
+      await acceptQueue;
+      await sessionStore.append(state.sessionId, ['queued', 'running'].includes(activity.status) ? 'turn/tool-started' : 'turn/tool-finished', activity);
+    }).catch(() => { console.warn('Quick Ask could not save tool presentation metadata.'); });
+    return state.toolDisplayQueue;
+  }
+
+  async function settleToolActivities(state, turn, status) {
+    for (const group of state.toolGroups ?? []) {
+      if (group.turnId !== turn.turnId) continue;
+      for (const call of group.calls) if (['queued', 'running'].includes(call.status)) {
+        await recordToolActivity(state, { ...call, turnId: turn.turnId,
+          batchId: group.id.slice(`${turn.turnId}:`.length), status });
+      }
+    }
   }
 
   function handleStreamEvent(state, turn, event) {
     if (!event || typeof event !== "object") return;
     switch (event.type) {
       case "search-progress":
-        turn.serverSearchStarted = true;
+        if (!turn.serverSearchStarted) {
+          turn.serverSearchStarted = true;
+          void recordToolActivity(state, { turnId: turn.turnId, batchId: 'server', callId: 'server-search',
+            name: 'web_search', server: true, provider: state.requestSearch?.provider, arguments: {}, status: 'running' });
+        }
         pushProjection(state, { kind: "search-status", status: "running", provider: state.requestSearch?.provider });
         break;
       case "created":
@@ -966,13 +1084,17 @@ function createConversation(options) {
         void acceptAccepted(state, turn);
         break;
       case "text-delta":
+        turn.attemptHadText = true;
+        if (turn.process?.append("text", event.delta ?? "")) saveProcess(state, turn);
         turn.text += event.delta ?? "";
-        pushProjection(state, { kind: "text", turnId: turn.turnId, text: turn.text });
+        pushProjection(state, { kind: "text", turnId: turn.turnId, text: turn.text, ...processProjection(turn) });
         break;
       case "reasoning-summary-delta":
       case "reasoning-text-delta":
+        turn.attemptHadReasoning = true;
+        if (turn.process?.append("reasoning", event.delta ?? "")) saveProcess(state, turn);
         turn.reasoning += event.delta ?? "";
-        pushProjection(state, { kind: "reasoning", turnId: turn.turnId, text: turn.reasoning });
+        pushProjection(state, { kind: "reasoning", turnId: turn.turnId, text: turn.reasoning, ...processProjection(turn) });
         break;
       default:
         pushProjection(state, { kind: "stream", turnId: turn.turnId, event });
@@ -1004,6 +1126,7 @@ function createConversation(options) {
       }
       await sessionStore.append(state.sessionId, "item/input", { items: rendered,
         ...(turn.imagePaths?.length ? { images: turn.imagePaths } : {}) });
+      rememberImages(state, turn.imagePaths);
       pushProjection(state, { kind: "accepted", turnId: turn.turnId });
     }).catch(() => {});
     return acceptQueue;
@@ -1011,11 +1134,26 @@ function createConversation(options) {
 
   async function finishTurn(state, turn, status, { text = "", reasoning = turn.reasoning ?? "", error = null, output = null, usage = null } = {}) {
     await acceptQueue;
+    const hint = mixedSearchErrorHint(error, state.requestSearch);
+    if (hint) error = { ...error, hint };
     if (turn.serverSearchStarted || output?.some(isResponsesWebSearchCall)) {
       const searchStatus = { status: status === "complete" ? "complete" : "failed", provider: state.requestSearch?.provider, code: status === "complete" ? null : status };
       turn.searchStatuses ??= []; turn.searchStatuses.push(searchStatus);
       pushProjection(state, { kind: "search-status", ...searchStatus });
+      const queries = turn.serverSearchQueries ?? [];
+      const nativeCalls = (output ?? []).filter(isResponsesWebSearchCall);
+      const searchState = nativeCalls.some(call => call.status === 'failed') ? 'failed'
+        : ((nativeCalls.length && nativeCalls.every(call => call.status === 'completed')) || status === 'complete') ? 'complete'
+          : status === 'stopped' ? 'cancelled' : 'interrupted';
+      await recordToolActivity(state, { turnId: turn.turnId, batchId: 'server', callId: 'server-search',
+        name: 'web_search', server: true, provider: state.requestSearch?.provider,
+        arguments: queries.length ? { query: queries.join('\n') } : {},
+        status: searchState,
+        summary: { sources: sourceSummary(turn.searchSources ?? []) } });
     }
+    await settleToolActivities(state, turn, status === 'stopped' ? 'cancelled' : 'interrupted');
+    saveProcess(state, turn, true);
+    await state.toolDisplayQueue;
     const canonical = Array.isArray(output) && output.length > 0 ? output : text.length > 0 || reasoning.length > 0
       ? [protocolFor(state.config).assistantMessage(text)]
       : [];
@@ -1050,7 +1188,7 @@ function createConversation(options) {
       occupancyAnchor: state.occupancyAnchor,
       text,
       reasoning,
-      error: error ? { code: error.code, message: error.message, status: error.status ?? null } : null,
+      error: error ? { code: error.code, message: error.message, status: error.status ?? null, ...(error.hint ? { hint: error.hint } : {}) } : null,
       sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []),
     });
     turn.status = status;
@@ -1059,8 +1197,8 @@ function createConversation(options) {
     turn.error = error;
     turn.controller = null;
     turn.images = [];
-    pushProjection(state, { kind: "turn", status, turnId: turn.turnId });
-    return { status, text, reasoning, error, sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
+    pushProjection(state, { kind: "turn", status, turnId: turn.turnId, answerText: text, error, ...processProjection(turn) });
+    return { status, text, reasoning, error, ...processProjection(turn), turnId: turn.turnId, sources: turn.searchSources ?? [], searchSuggestions: turn.searchSuggestions ?? [], searchStatuses: turn.searchStatuses ?? [], displayText: citedAnswer(text, output ?? []), accepted: turn.accepted === true, responseId: turn.responseId, retryable: Boolean(error) };
   }
 
   // Stop aborts only the owning session's current turn and commits whatever
@@ -1147,11 +1285,14 @@ function createConversation(options) {
       status: state.preparing ? "running" : state.turn?.status ?? "idle",
       text: state.turn?.text ?? "",
       reasoning: state.turn?.reasoning ?? "",
+      turnId: state.turn?.turnId,
+      ...(state.turn ? processProjection(state.turn) : {}),
       error: state.turn?.error ?? null,
       responseId: state.turn?.responseId ?? null,
       storedState: state.storedState,
       nonStreaming: state.nonStreaming,
       items: [...state.items],
+      toolGroups: [...(state.toolGroups ?? [])],
       // Occupancy is recomputed at read time: the latest provider anchor is
       // exact, and before the first anchor the local estimate stands in.
       occupancy: contextOccupancy({
@@ -1173,6 +1314,7 @@ function createConversation(options) {
   }
 
   return {
+    refreshToolConcurrency: () => toolExecutor.refreshConcurrency?.(),
     suspend() {
       for (const store of sessionStores.values()) {
         const state = store.getState().state;
@@ -1209,5 +1351,4 @@ module.exports = {
   createConversation,
   MAX_CONCURRENT_TURNS,
   ANSWER_RESERVE_TOKENS,
-  CALL_LIMIT_DEFAULT,
 };

@@ -21,10 +21,8 @@ function buildRequestBody({ model, instructions, input = [], tools = [], toolCho
   if (Number.isInteger(maxOutputTokens) && maxOutputTokens > 0) body.max_completion_tokens = maxOutputTokens;
   if (serverSearch?.chatSearch === 'google-search') {
     // CPA's AGY Chat translator recognizes the native-shaped google_search
-    // tool. Never mix it with function tools or send Responses tool_choice.
-    body.tools = [{ google_search: {} }];
-    delete body.tool_choice;
-    delete body.parallel_tool_calls;
+    // tool alongside the ordinary local function declarations.
+    body.tools = [...tools, { google_search: {} }];
   } else if (serverSearch?.provider === "google") body.web_search_options = {};
   return body;
 }

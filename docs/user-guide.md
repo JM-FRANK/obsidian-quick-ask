@@ -31,6 +31,8 @@ Open **Settings → Quick Ask → Model connections**. Add a connection with a *
 
 Settings are organized into **General**, **Model connections**, **System roles**, **Web search**, **Appearance**, and **Data and backups**. API access comes from your chosen provider; no model access is included with the plugin.
 
+Local file, image and web-search tools share a concurrency setting across all sessions (default 3, range 1–10). Same-batch calls can execute in parallel; results return in the model’s original order. There is no per-question total-call limit. Image tool details show the complete Vault-relative image path.
+
 ## Ask about your notes
 
 1. Open Quick Ask from its ribbon icon or the **Quick Ask: Open sidebar** command.
@@ -54,7 +56,7 @@ Mermaid diagrams have **Preview image**, **View source** and source-copy control
 
 In **System roles**, choose, create, rename or edit a role profile. Literature Reading and Study Quiz are supplied initially with English prompt text; Study Quiz starts with three questions. Unedited legacy Study Quiz presets upgrade to English, while edited prompts and existing conversations keep their saved text. Custom prompts replace the built-in reading role while preserving fixed tool, read-only and math/diagram formatting rules. The selected role applies to new sessions; existing conversations keep their saved role.
 
-Click the effort label to cycle **Off / Low / High / XHigh / Max**, or use the reasoning-effort command. The default is **High**. This changes the next question; actual support depends on the provider. Readable reasoning is shown when the API returns it.
+Click the effort label to cycle **Off / Low / High / XHigh / Max**, or use the reasoning-effort command. The default is **High**. This changes the next question; actual support depends on the provider. Readable reasoning is shown when the API returns it. New questions show thoughts and individual tool calls in an ordered process list. The list opens during generation while each thought and tool detail stays collapsed. Click a thought to read its Markdown or copy the complete source; tool details retain their recorded parameters, paths and result summaries. Long lists scroll internally, and successful completion folds the process while keeping the answer visible. Switching sessions or restarting resets historical disclosures. Older conversation records remain readable without migration.
 
 Type `/` in the input for actions including `/compact` and `/web_search`. Automatic or manual compaction shortens the context sent to the model without deleting local conversation history. Tracked files remain available to the allowed full-file tool. Unsent search/effort choices stay in memory and do not survive a plugin restart.
 
@@ -70,7 +72,7 @@ External and pasted images are copied into the plugin cache; original Vault imag
 
 Search is **off by default**, and the default service is **DuckDuckGo**. Use the globe button or `/web_search` to enable it for a question. You can change the default behavior in **Web search** settings and select **Firecrawl**, **Exa**, **Parallel**, **Perplexity Search**, or **Model provider’s web search**. Independent API services require their own credentials.
 
-Provider search supports the configured Responses/Chat Completions route where available, DeepSeek's independent Search API, native Gemini API-key search and supported relays such as CPA/Antigravity. Google search turns retain your explicitly added context but do not use local file tools. Search is selected manually; a failure does not silently switch services. See [provider search setup](native-search.md) for endpoint and credential details. Availability, streaming and structured source information depend on the selected service.
+Provider search supports the configured Responses/Chat Completions route where available, DeepSeek's independent Search API, native Gemini API-key search and supported relays such as CPA/Antigravity. Search is added alongside file and image tools; turning search off removes only search capability. File and image reads always check the current session’s authorization for the requested path. Search is selected manually; a failure does not silently switch services. See [provider search setup](native-search.md) for endpoint and credential details. Availability, streaming and structured source information depend on the selected service. Each connection offers **Mixed call** (default) or **Independent search**. Mixed call combines native search and read tools; independent search sends only the query in a separate provider request and returns its evidence to the main model, adding usage. Changes apply to the next question, including existing conversations on that connection. Compatibility errors suggest switching manually; there is no automatic probe or fallback.
 
 ## Accounts, costs and network use
 

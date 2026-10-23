@@ -1,62 +1,64 @@
-const { reasoningPage } = require("./stream-presentation");
+const { reasoningSummary } = require('./turn-process');
 
-// A closed disclosure contains no reasoning text DOM. An open disclosure
-// renders one bounded page; the complete source stays available for copying.
-function createReasoningView(parent, { ui, label, labels, onLayout = () => {} }) {
-  const element = ui.createEl(parent, "details", { cls: "scholar-quick-ask-reasoning" });
-  const summary = ui.createEl(element, "summary", { text: label });
-  const body = ui.createEl(element, "div", { cls: "scholar-quick-ask-reasoning-body" });
-  let text = "", streaming = false, requestedPage = null, textEl = null, controls = null;
-  let previous, next, latest, count;
-  let shownText = null;
-  let shownLabel = label;
-  let shownPage = null;
-  const button = (icon, title, action) => {
-    const item = ui.createEl(controls, "button", { attributes: { type: "button", "aria-label": title } });
-    ui.setIcon(item, icon); ui.setTooltip(item, title); item.addEventListener("click", action); return item;
-  };
-  function render() {
-    if (!element.open) return;
-    if (!textEl) {
-      controls = ui.createEl(body, "div", { cls: "scholar-quick-ask-reasoning-pages" });
-      previous = button("chevron-left", labels.previous, () => { requestedPage = reasoningPage(text, requestedPage).page - 1; render(); });
-      count = ui.createEl(controls, "span");
-      next = button("chevron-right", labels.next, () => {
-        const page = reasoningPage(text, requestedPage);
-        requestedPage = page.page + 1 >= page.count - 1 ? null : page.page + 1;
-        render();
-      });
-      latest = button("chevrons-right", labels.latest, () => { requestedPage = null; render(); });
-      button("copy", labels.copy, () => { void ui.writeClipboard(text, element).catch(() => ui.notice(labels.copyFailed)); });
-      textEl = ui.createEl(body, "div", { cls: "scholar-quick-ask-reasoning-text" });
-      textEl.addEventListener("wheel", event => {
-        if (event.deltaY < 0) requestedPage = reasoningPage(text, requestedPage).page;
-      }, { passive: true });
-    }
-    const page = reasoningPage(text, requestedPage);
-    if (shownText !== page.text) { ui.setText(textEl, page.text); shownText = page.text; }
-    if (requestedPage === null) textEl.scrollTop = textEl.scrollHeight;
-    else if (shownPage !== page.page) textEl.scrollTop = 0;
-    shownPage = page.page;
-    ui.setText(count, `${page.page + 1} / ${page.count}`);
-    previous.disabled = page.page === 0;
-    next.disabled = page.page === page.count - 1;
-    latest.disabled = requestedPage === null;
-    onLayout();
+// The disclosure owns a lazily rendered, throttled Markdown body. Collapsed
+// reasoning never invokes MarkdownRenderer; copying always uses the full source.
+function createReasoningView(parent, { ui, label, labels, onLayout = () => {}, onToggle = () => {} }) {
+  const element = ui.createEl(parent, 'details', { cls: 'scholar-quick-ask-reasoning scholar-quick-ask-process-row' });
+  const summary = ui.createEl(element, 'summary');
+  ui.setIcon(ui.createEl(summary, 'span', { cls: 'scholar-quick-ask-process-icon', attributes: { 'aria-hidden': 'true' } }), 'brain');
+  ui.createEl(summary, 'span', { cls: 'scholar-quick-ask-process-label', text: label });
+  const preview = ui.createEl(summary, 'span', { cls: 'scholar-quick-ask-reasoning-preview' });
+  const body = ui.createEl(element, 'div', { cls: 'scholar-quick-ask-reasoning-body' });
+  const owner = element.ownerDocument.defaultView;
+  let text = '', streaming = false, painted = null, timer = null, painting = false, disposed = false, generation = 0, expectedClosed = false;
+  function clearBody() {
+    generation++;
+    if (timer !== null) owner.clearTimeout(timer);
+    timer = null; painted = null;
+    ui.clear(body);
   }
-  element.addEventListener("toggle", () => { render(); onLayout(); });
+  async function render() {
+    timer = null;
+    if (disposed || !element.open || painting || painted === text) return;
+    const source = text, current = generation;
+    painted = source; painting = true;
+    ui.clear(body);
+    const copy = ui.createEl(body, 'button', { cls: 'scholar-quick-ask-reasoning-copy', attributes: { type: 'button', 'aria-label': labels.copy } });
+    ui.setIcon(copy, 'copy'); ui.setTooltip(copy, labels.copy);
+    copy.addEventListener('click', () => { void ui.writeClipboard(text, element).catch(() => ui.notice(labels.copyFailed)); });
+    const target = ui.createEl(body, 'div', { cls: 'scholar-quick-ask-reasoning-text scholar-quick-ask-message-body' });
+    try { await ui.renderMarkdown(target, source, ''); }
+    catch { if (current === generation && !disposed && element.open) ui.setText(target, source); }
+    finally {
+      painting = false;
+      if (current === generation && !disposed && element.open) onLayout();
+      schedule();
+    }
+  }
+  function schedule() {
+    if (disposed || !element.open || painting || timer !== null || painted === text) return;
+    timer = owner.setTimeout(() => { void render(); }, streaming ? 120 : 0);
+  }
+  element.addEventListener('toggle', () => {
+    if (disposed) return;
+    if (expectedClosed && !element.open) expectedClosed = false; else onToggle();
+    if (element.open) schedule(); else clearBody();
+    onLayout();
+  });
   return {
     element,
     get text() { return text; },
     update(value, active = false) {
-      if (!text && !active) requestedPage = 0;
-      const changed = value !== text || active !== streaming;
+      if (value === text && active === streaming) { element.hidden = !value; return; }
       text = value; streaming = active;
       element.hidden = !text;
-      const nextLabel = label + (streaming ? "…" : "");
-      if (shownLabel !== nextLabel) { ui.setText(summary, nextLabel); shownLabel = nextLabel; }
-      if (changed) render();
+      element.dataset.state = streaming ? 'running' : 'complete';
+      const next = reasoningSummary(text, streaming);
+      if (preview.textContent !== next) ui.setText(preview, next);
+      schedule();
     },
+    collapse() { expectedClosed = element.open; element.open = false; clearBody(); },
+    destroy() { disposed = true; clearBody(); },
   };
 }
 

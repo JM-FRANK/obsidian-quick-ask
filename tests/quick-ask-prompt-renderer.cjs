@@ -15,10 +15,10 @@ const {
 // model. Expected values are literal contracts, including historical golden
 // instructions; none are recomputed using the production renderer.
 
-test('the default rendering keeps the original version 1 bytes and the latest version is 7', () => {
+test('the default rendering keeps the original version 1 bytes and the latest version is 8', () => {
   // Version 1 stays reachable for callers that predate the line-numbering
   // follow-up; new requests select the latest explicitly (QA-007).
-  assert.equal(RENDERER_VERSION, 7);
+  assert.equal(RENDERER_VERSION, 8);
   const legacy = renderTurn({ mutations: [{ kind: 'file', path: 'a.md', text: 'alpha' }], question: 'q', rendererVersion: 1 });
   assert.equal(legacy[0].content[0].text.includes('1 | alpha'), false);
   const latest = renderTurn({ mutations: [{ kind: 'file', path: 'a.md', text: 'alpha' }], question: 'q', rendererVersion: 2 });
@@ -425,7 +425,7 @@ test('opening and manager-driven refresh preserve defaults with eager control ca
 test('renderer 4 appends the requested default role rule and preserves custom roles', () => {
   const sentence = 'Unless explicitly requested by the user, you must not include any line-number-related information in your responses.';
   const { DEFAULT_ROLE_INSTRUCTIONS } = require('../src/quick-ask/prompt-renderer');
-  assert.equal(RENDERER_VERSION, 7);
+  assert.equal(RENDERER_VERSION, 8);
   assert.equal(DEFAULT_ROLE_INSTRUCTIONS, `${expectedRole} ${sentence}`);
   const instructions = buildInstructions({ rendererVersion: 4 });
   assert.ok(instructions.includes(`${expectedRole} ${sentence}`));
@@ -486,5 +486,19 @@ test('renderer 6 uses the compact reference contract while retaining approved fo
     assert.equal(current, old.replace(oldReference, reference));
     assert.equal(/[\u3400-\u9fff]/u.test(current), false);
     assert.ok(reference.length < oldReference.length / 2);
+  }
+});
+
+
+test('renderer 8 writes exactly the approved tool guidance for default and custom roles', () => {
+  const imageGuide = "`get-image` is read-only. Use it when you determine that viewing an image is needed. For a direct image path, set sourcePath to null and path to its exact Vault-relative path. For an image link in a Markdown document already sent in this session, set sourcePath to that document's exact Vault-relative path and path to the image link. It cannot search for images or access other images.";
+  const readonlyGuide = 'Quick Ask is read-only: it cannot create, modify, rename, or delete Vault files, and you must never claim to have changed anything in the Vault.';
+  for (const customSystemPrompt of ['', 'Custom role.']) {
+    const previous = buildInstructions({ rendererVersion: 7, customSystemPrompt });
+    const current = buildInstructions({ rendererVersion: 8, customSystemPrompt });
+    assert.equal(current, previous.replace('Use only tools declared in this request. ', '')
+      .replace(readonlyGuide, `${imageGuide}\n\n${readonlyGuide}`));
+    assert.equal(current.includes('Use only tools declared in this request.'), false);
+    assert.equal(previous.includes(imageGuide), false);
   }
 });

@@ -29,20 +29,20 @@ function serverSearch(config = {}) {
     return { provider: 'openrouter', tool: responsesServerSearchTool('openrouter') };
   if (protocol === 'responses' && /^(?:google\/)?gemini-/i.test(model)) {
     // CPA/AGY exposes Google Search through the selected Responses protocol.
-    // Its hosted-search path must not be mixed with local function tools.
-    return { provider: 'google', localTools: false, tool: responsesServerSearchTool('openai'), toolChoice: 'required' };
+    // Search adds a hosted tool; local read tools retain their path permissions.
+    return { provider: 'google', tool: responsesServerSearchTool('openai') };
   }
   if (/^(?:deepseek\/)?deepseek[-_]/i.test(model)) {
     return { kind: 'provider-api', provider: 'deepseek', secretId: config.secretId ?? '', baseUrl: base, queryLimit: 128 };
   }
   if (protocol === 'chat-completions' && /^(?:google\/)?gemini-/i.test(model)) {
-    if (/\/endpoints\/openapi$/.test(base)) return { provider: 'google', localTools: false, native: false };
+    if (/\/endpoints\/openapi$/.test(base)) return { provider: 'google', native: false };
     // Explicit Gemini API paths retain the native API-key adapter. Standard
     // OpenAI-compatible bases (including CPA /v1) stay on Chat Completions.
     const native = /\/v1(?:beta|alpha)(?:\/openai)?$/.test(base)
       || /^https:\/\/generativelanguage\.googleapis\.com(?:\/|$)/.test(base);
-    return native ? { provider: 'google', localTools: false, native: true }
-      : { provider: 'google', localTools: false, chatSearch: 'google-search' };
+    return native ? { provider: 'google', native: true }
+      : { provider: 'google', chatSearch: 'google-search' };
   }
   if (protocol !== 'responses') return null;
   if (/^(?:openai\/)?(gpt-(4\.1|4o|5)(?:[.-]|$)|gpt-6-astra(?:$|-)|o[34](?:-|$))/.test(model))
@@ -60,7 +60,9 @@ function searchRoute(enabled, settings = {}, config = {}) {
   if (SEARCH_PROVIDERS.includes(values.provider)) return { kind: 'independent', provider: values.provider, secretId: values.secretId };
   if (values.provider === 'server') {
     const server = serverSearch(config);
-    return server ? { kind: 'server', ...server } : { kind: 'invalid', provider: 'server', error: 'searchServer' };
+    return server ? config.providerSearchMode === 'independent' && server.kind !== 'provider-api'
+      ? { kind: 'provider-search', provider: server.provider, server }
+      : { kind: 'server', ...server } : { kind: 'invalid', provider: 'server', error: 'searchServer' };
   }
   return { kind: 'invalid', provider: values.provider, error: 'searchProvider' };
 }

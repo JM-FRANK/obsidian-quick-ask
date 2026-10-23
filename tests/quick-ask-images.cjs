@@ -39,6 +39,18 @@ test('byte/count boundaries are inclusive and checked before reading oversized f
   assert.equal(reads, 0);
 });
 
+test('native body validation rejects a signature-only image before base64 encoding', async () => {
+  let encodes = 0, validations = 0;
+  const source = { stat: async () => ({ size: PNG.length }), readBinary: async () => PNG,
+    validate: async (bytes, path) => { validations++; assert.equal(path, 'broken.png'); assert.deepEqual(bytes, PNG); throw new Error('native decoder rejected body'); },
+    encodeBase64: () => { encodes++; return 'not used'; } };
+  await assert.rejects(prepareImages(['broken.png'], source), error => error.code === 'IMAGE_FORMAT' && error.path === 'broken.png');
+  assert.equal(validations, 1); assert.equal(encodes, 0);
+  source.validate = async () => { validations++; };
+  const valid = await prepareImages(['valid.png'], source);
+  assert.equal(validations, 2); assert.equal(encodes, 1); assert.equal(valid[0].size, PNG.length);
+});
+
 test('startup cleanup stays inside the image cache and runs once per application lifetime', async () => {
   const app = {}, session = new WeakMap();
   let cleanups = 0, finish;

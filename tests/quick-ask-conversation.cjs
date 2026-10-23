@@ -99,13 +99,13 @@ function conversationEnvironment(script = () => sseResponse(streamedTurn())) {
   };
 }
 
-function makeConversation({ config = {}, script = () => sseResponse(streamedTurn()), settings = {}, imageSource = null } = {}) {
+function makeConversation({ config = {}, script = () => sseResponse(streamedTurn()), settings = {}, imageSource = null, files = {} } = {}) {
   const sessionStore = makeStore();
   const tracker = makeTracker();
   const network = makeNetwork(script);
   const environment = {
     images: { readForSend: paths => require('../src/quick-ask/images').prepareImages(paths, imageSource) },
-    vault: { normalizePath: path => path, readText: async () => null },
+    vault: { normalizePath: path => path, readText: async path => files[path] ?? null },
     network,
     scheduler: {
       now: () => Date.parse('2026-09-12T00:00:00.000Z'),
@@ -120,17 +120,192 @@ function makeConversation({ config = {}, script = () => sseResponse(streamedTurn
     baseUrl: 'https://api.openai.com/v1', model: 'gpt-5', secretId: 'openai-key',
     systemPrompt: 'Be terse.', contextWindowTokens: 262144, ...settings,
   };
+  const projections = [];
   const conversation = createConversation({
     sessionStore, tracker, environment,
     getSettings: () => ({ quickAsk: merged }),
+    onSessionChange: (_id, projection) => projections.push(projection),
   });
-  return { conversation, sessionStore, tracker, network, settings: merged };
+  return { conversation, sessionStore, tracker, network, settings: merged, projections };
 }
 
 async function newSession(sessionStore, conversation, config = {}) {
   const { id } = await sessionStore.createSession({ config });
   await conversation.load(id);
   return id;
+}
+
+function imageToolResponse(protocol, name, path, callId, sourcePath = null) {
+  const args = JSON.stringify({ path, ...(name === 'get-image' ? { sourcePath } : {}) });
+  return protocol === 'responses' ? sseResponse([
+    { type: 'response.created', data: { response: { id: callId } } },
+    { type: 'response.completed', data: { response: { id: callId, output: [{ type: 'function_call', id: `fc-${callId}`, call_id: callId, name, arguments: args }] } } },
+  ]) : chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: callId, type: 'function', function: { name, arguments: args } }] });
+}
+
+test('the production conversation executor shares the live global cap across sessions', async () => {
+  const reads = [], gates = {};
+  const files = {};
+  for (const id of ['a', 'b']) Object.defineProperty(files, `${id}.md`, { get() {
+    reads.push(id); return new Promise(resolve => { gates[id] = resolve; });
+  } });
+  const f = makeConversation({ files, settings: { toolConcurrency: 1 }, script: (_url, options) => {
+    const body = JSON.parse(options.body);
+    return body.input.some(item => item.type === 'function_call_output')
+      ? sseResponse(streamedTurn()) : imageToolResponse('responses', 'get-full-file', `${body.model}.md`, `call-${body.model}`);
+  } });
+  f.tracker.allowlist = () => ['a.md', 'b.md'];
+  const a = await newSession(f.sessionStore, f.conversation, { ...f.settings, model: 'a', toolConcurrency: 10 });
+  const b = await newSession(f.sessionStore, f.conversation, { ...f.settings, model: 'b', toolConcurrency: 10 });
+  const first = f.conversation.send(a, 'Read a');
+  const second = f.conversation.send(b, 'Read b');
+  for (let attempt = 0; attempt < 20 && reads.length < 1; attempt++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 1);
+  const initial = reads[0]; gates[initial]('first');
+  for (let attempt = 0; attempt < 20 && reads.length < 2; attempt++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 2); gates[reads[1]]('second');
+  assert.equal((await first).status, 'complete'); assert.equal((await second).status, 'complete');
+});
+
+for (const protocol of ['responses', 'chat-completions']) {
+  test(`${protocol}: legacy limits do not hide tools or cap repeated continuation rounds`, async () => {
+    let requests = 0;
+    const f = makeConversation({ settings: { protocol }, script: () => {
+      requests++;
+      return requests <= 8 ? imageToolResponse(protocol, 'get-full-file', 'missing.md', `round-${requests}`)
+        : protocol === 'responses' ? sseResponse(streamedTurn()) : chatResponse();
+    } });
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, callLimit: 1, fullFileCallLimit: 1 });
+    assert.equal((await f.conversation.send(id, 'Use the requested tools')).status, 'complete');
+    assert.equal(requests, 9);
+    assert.ok(f.network.requests.every(request => JSON.parse(request.options.body).tools.length === 2));
+    const records = f.sessionStore.records.get(id);
+    assert.equal(records.filter(record => record.kind === 'turn/tool-finished').length, 8);
+  });
+
+  test(`${protocol}: linked document images persist exact paths and replay after reload without source Markdown`, async () => {
+    const sourcePath = 'file01/file11/paper.md', path = 'file01/file11/attachments/pic01.png';
+    const files = { [sourcePath]: '![figure](attachments/pic01.png)' }, reads = [];
+    const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    const answer = () => protocol === 'responses' ? sseResponse(streamedTurn()) : chatResponse();
+    const f = makeConversation({ settings: { protocol }, files, imageSource: {
+      stat: async input => input === path ? { size: bytes.length } : null,
+      readBinary: async input => { reads.push(input); return bytes; },
+    }, script: [() => imageToolResponse(protocol, 'get-image', 'attachments/pic01.png', 'linked', sourcePath), answer, answer,
+      () => imageToolResponse(protocol, 'get-image', path, 'direct'), answer] });
+    f.tracker.allowlist = () => [sourcePath];
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    assert.equal((await f.conversation.send(id, 'Read this document image')).status, 'complete');
+    const activity = f.projections.filter(projection => projection.kind === 'tool-activity');
+    assert.deepEqual(activity.map(projection => projection.group.calls[0].status), ['queued', 'running', 'complete']);
+    const metadata = f.sessionStore.records.get(id).filter(record => record.kind.startsWith('turn/tool-'));
+    assert.deepEqual(metadata.map(record => record.kind), ['turn/tool-started', 'turn/tool-started', 'turn/tool-finished']);
+    assert.equal(metadata[2].payload.summary.path, path);
+    assert.equal(f.network.requests.some(request => /tool-activity|turn\/tool-|"batchId"|"toolGroups"/.test(request.options.body)), false);
+    assert.match(f.network.requests[1].options.body, /data:image/);
+    const record = f.sessionStore.records.get(id).find(record => record.payload?.imagePaths);
+    assert.deepEqual(record.payload.imagePaths, [path]);
+    assert.equal(JSON.stringify(f.sessionStore.records.get(id)).includes('data:image'), false);
+    delete files[sourcePath];
+    f.conversation.forget(id);
+    await f.conversation.load(id);
+    const restoredCalls = f.conversation.snapshot(id).toolGroups.flatMap(group => group.calls);
+    assert.equal(restoredCalls.length, 1);
+    assert.equal(restoredCalls[0].status, 'complete');
+    assert.equal(restoredCalls[0].summary.path, path);
+    assert.equal((await f.conversation.send(id, 'Look again')).status, 'complete');
+    assert.match(f.network.requests[2].options.body, /data:image/);
+    assert.equal((await f.conversation.send(id, 'Read the exact authorized path')).status, 'complete');
+    assert.match(f.network.requests[4].options.body, /data:image/);
+    assert.ok(reads.length >= 4);
+    assert.ok(reads.every(input => input === path));
+  });
+
+  test(`${protocol}: get-image replays path-based tool results through followups, reload and compaction`, async () => {
+    let bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    let reads = 0;
+    const answer = () => protocol === 'responses' ? sseResponse(streamedTurn()) : chatResponse();
+    const f = makeConversation({ settings: { protocol }, imageSource: {
+      stat: async () => ({ size: bytes.length }), readBinary: async () => { reads++; return bytes; },
+    }, script: [answer,
+      () => imageToolResponse(protocol, 'get-image', 'fig.png', 'image-1'),
+      () => imageToolResponse(protocol, 'get-full-file', 'missing.md', 'file-1'), answer, answer, answer,
+      () => imageToolResponse(protocol, 'get-image', 'fig.png', 'image-2'), answer] });
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    assert.equal((await f.conversation.send(id, 'Look', { images: ['fig.png'] })).status, 'complete');
+    const firstTools = JSON.parse(f.network.requests[0].options.body).tools.map(tool => tool.function ?? tool);
+    assert.ok(firstTools.some(tool => tool.name === 'get-image'), 'provided by default before the first image is accepted');
+    bytes = Uint8Array.from([...bytes, 2]);
+    assert.equal((await f.conversation.send(id, 'Look again')).status, 'complete');
+    const requests = f.network.requests.map(request => JSON.parse(request.options.body));
+    const definition = requests[1].tools.map(tool => tool.function ?? tool).find(tool => tool.name === 'get-image');
+    assert.equal(definition.parameters.properties.path.enum, undefined, 'document links must not be restricted to sent attachment paths');
+    assert.deepEqual(definition.parameters.required, ['path', 'sourcePath']);
+    assert.deepEqual(definition.parameters.properties.sourcePath.type, ['string', 'null']);
+    assert.equal(JSON.stringify(requests[1]).includes('data:image'), false);
+    const continuation = protocol === 'responses' ? requests[2].input : requests[2].messages;
+    const output = continuation.find(item => item.call_id === 'image-1' && item.type === 'function_call_output' || item.tool_call_id === 'image-1');
+    if (protocol === 'responses') {
+      assert.equal(output.output[0].text, 'Image read: fig.png.');
+      assert.equal(output.output[1].type, 'input_image');
+      assert.equal(continuation.some(item => item.role === 'user' && item.content?.some(part => part.type === 'input_image')), false,
+        'Responses keeps the image inside its tool output');
+    } else {
+      assert.equal(output.content, 'Image read: fig.png.');
+      assert.equal(continuation.at(-1).role, 'user');
+      assert.equal(continuation.at(-1).content.at(-1).type, 'image_url');
+    }
+    assert.match(JSON.stringify(continuation), new RegExp(Buffer.from(bytes).toString('base64')));
+    assert.equal(JSON.stringify(requests[3]).includes('data:image'), true, 'ordinary tool continuation retains the image result');
+    assert.equal(f.conversation.stateFor(id).occupancyAnchor, null);
+    assert.equal(JSON.stringify(f.conversation.snapshot(id).items).includes('data:image'), false);
+    const priorReads = reads;
+    assert.equal((await f.conversation.send(id, 'Plain followup')).status, 'complete');
+    assert.match(f.network.requests[4].options.body, /data:image/);
+    assert.ok(reads > priorReads, 'normal followup rematerializes the current source');
+    bytes = Uint8Array.from([...bytes, 3]);
+    f.conversation.forget(id);
+    await f.conversation.load(id);
+    assert.equal((await f.conversation.send(id, 'After reload')).status, 'complete');
+    assert.match(f.network.requests[5].options.body, new RegExp(Buffer.from(bytes).toString('base64')));
+    const lastItem = f.conversation.stateFor(id).items.length - 1;
+    await f.sessionStore.append(id, 'compaction/start', {});
+    await f.sessionStore.append(id, 'compaction/checkpoint', { range: { from: 0, to: lastItem }, checkpoint: { framed: 'IMAGE_TOOL_SUMMARY' } });
+    await f.sessionStore.append(id, 'compaction/end', { ok: true });
+    f.conversation.forget(id);
+    await f.conversation.load(id);
+    assert.equal((await f.conversation.send(id, 'After reload, look again')).status, 'complete');
+    assert.equal(f.network.requests[6].options.body.includes('data:image'), false, 'compacted image results are no longer active');
+    assert.match(f.network.requests[6].options.body, /IMAGE_TOOL_SUMMARY/);
+    assert.match(f.network.requests[7].options.body, /data:image/, 'explicit call can retrieve a compacted image again');
+    const logs = JSON.stringify(f.sessionStore.records.get(id));
+    assert.equal(logs.includes('data:image'), false);
+    assert.equal(logs.includes('base64'), false);
+    const toolRecord = f.sessionStore.records.get(id).find(record => record.kind === 'item/output' && record.payload.tool && record.payload.imagePaths?.length);
+    assert.deepEqual(toolRecord.payload.imagePaths, ['fig.png']);
+  });
+
+  test(`${protocol}: image permissions do not cross sessions and unavailable sources return text without images`, async () => {
+    let available = true, reads = 0;
+    const answer = () => protocol === 'responses' ? sseResponse(streamedTurn()) : chatResponse();
+    const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const f = makeConversation({ settings: { protocol }, imageSource: {
+      stat: async () => available ? { size: bytes.length } : null, readBinary: async () => { reads++; return bytes; },
+    }, script: [answer, () => imageToolResponse(protocol, 'get-image', 'fig.png', 'foreign'), answer,
+      () => imageToolResponse(protocol, 'get-image', 'fig.png', 'missing'), answer] });
+    const owner = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    await f.conversation.send(owner, 'Look', { images: ['fig.png'] });
+    const other = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    assert.equal((await f.conversation.send(other, 'Read fig.png')).status, 'complete');
+    assert.equal(reads, 1);
+    assert.match(f.network.requests[2].options.body, /not authorized/);
+    assert.equal(f.network.requests[2].options.body.includes('data:image'), false);
+    available = false;
+    assert.equal((await f.conversation.send(owner, 'Look again')).status, 'complete');
+    assert.match(f.network.requests[4].options.body, /IMAGE_MISSING/);
+    assert.equal(f.network.requests[4].options.body.includes('data:image'), false);
+    assert.equal(reads, 1);
+  });
 }
 
 test('history preview precedes replay while the next request retains the complete canonical context', async () => {
@@ -338,6 +513,7 @@ test('a burst of long reasoning coalesces presentation and retains only canonica
   assert.ok(updates <= 2, `one burst generated ${updates} full-prefix updates`);
   t.diagnostic(`${count} reasoning chunks -> ${updates} presentation update(s); ${result.reasoning.length} characters preserved`);
   assert.equal(runtime.stateFor(id).projections, undefined, 'transient full-prefix snapshots must not accumulate');
+  assert.equal(sessionStore.records.get(id).filter(record => record.kind === 'turn/process').length, 2, 'two thousand deltas produce only two boundary writes');
 });
 
 test('response.created is the checkpoint that accepts staged Context and starts tracking', async () => {
@@ -683,6 +859,11 @@ test('server sources are preserved and progress reaches a terminal state',async(
  const result=await runtime.send(id,'q',{webSearch:true});
  assert.equal(result.sources.length,1);
  assert.deepEqual(projections.filter(p=>p.kind==='search-status').map(p=>p.status),['running','complete']);
+ const tools=projections.filter(p=>p.kind==='tool-activity');
+ assert.deepEqual(tools.map(p=>p.group.calls[0].status),['running','complete']);
+ const groups=require('../src/quick-ask/tool-history').toolHistory(f.sessionStore.records.get(id));
+ assert.equal(groups.length,1);assert.equal(groups[0].calls.length,1);
+ assert.equal(groups[0].calls[0].summary.sources[0].url,'https://example.org/');
 });
 
 
@@ -697,16 +878,16 @@ test('invalid selected server search blocks before requests and preserves one-sh
  assert.equal((await f.conversation.send(id,'without search',{webSearch:false})).status,'complete');
 });
 
-test('a rejected independent key stops before answer continuation without another service',async()=>{
+test('a rejected independent key returns its error to the model without switching services',async()=>{
  let modelCalls=0,searchCalls=0;
  const f=makeConversation({settings:{webSearch:{provider:'exa',secretId:'bad-key-ref'}},script:(url,options)=>{
   if(url==='https://api.exa.ai/search'){searchCalls++;return {status:401,text:'invalid API key'};}
-  modelCalls++;return searchTurn();
+  modelCalls++;return modelCalls===1?searchTurn():sseResponse(streamedTurn());
  }});
  const id=await newSession(f.sessionStore,f.conversation,f.settings);
  const result=await f.conversation.send(id,'q',{webSearch:true});
- assert.equal(result.status,'failed');assert.equal(result.error.code,'SEARCH_FAILED');
- assert.equal(modelCalls,1);assert.equal(searchCalls,1);
+ assert.equal(result.status,'complete');
+ assert.equal(modelCalls,2);assert.equal(searchCalls,1);
  assert.equal(f.network.requests.some(r=>r.url.includes('duckduckgo')),false);
 });
 
@@ -930,7 +1111,10 @@ test('CC reasoning stays visible across tool rounds and is replayed as native re
   assert.equal(result.reasoning, 'First reasoning.Final reasoning.');
   f.conversation.forget(id); await f.conversation.load(id);
   const visible = require('../src/quick-ask/conversation-messages').conversationFromRecords(f.sessionStore.records.get(id));
-  assert.equal(visible.at(-1).reasoning, result.reasoning);
+  const process = visible.find(entry => entry.kind === 'process');
+  assert.equal(process.steps.filter(step => step.kind === 'reasoning').map(step => step.text).join(''), result.reasoning);
+  assert.deepEqual(process.steps.map(step => step.kind), ['reasoning', 'tool', 'reasoning']);
+  assert.equal(visible.at(-1).text, 'Answer');
   await f.conversation.send(id, 'Next');
   const history = JSON.parse(f.network.requests.at(-1).options.body).messages;
   assert.deepEqual(history.filter(m => m.reasoning_content).map(m => m.reasoning_content), ['First reasoning.', 'Final reasoning.']);
@@ -946,7 +1130,7 @@ test('CC reasoning survives a search tool failure and replay', async () => {
   assert.equal(result.status, 'failed');
   assert.equal(result.reasoning, 'Need evidence.');
   const visible = require('../src/quick-ask/conversation-messages').conversationFromRecords(f.sessionStore.records.get(id));
-  assert.equal(visible.at(-1).reasoning, 'Need evidence.');
+  assert.equal(visible.find(entry => entry.kind === 'process').steps.find(step => step.kind === 'reasoning').text, 'Need evidence.');
 });
 
 test('Stop during a CC search retains reasoning and paired tool history', async () => {
@@ -1239,7 +1423,7 @@ test('Vertex native search sends only documented search options and keeps citati
   const body = JSON.parse(f.network.requests[0].options.body);
   assert.equal(f.network.requests[0].url, GOOGLE_VERTEX_BASE + '/chat/completions');
   assert.deepEqual(body.web_search_options, {});
-  assert.equal(body.tools, undefined); assert.equal(body.tool_choice, undefined); assert.equal(body.parallel_tool_calls, undefined);
+  assert.deepEqual(body.tools.map(tool=>tool.function.name), ['get-full-file','get-image']); assert.equal(body.tool_choice, 'auto'); assert.equal(body.parallel_tool_calls, true);
   assert.ok(JSON.stringify(body.messages).includes('EXPLICIT_CONTEXT'));
   assert.deepEqual(result.sources.map(s => s.url), ['https://example.org/grounded']);
   assert.ok(result.displayText.includes('](https://example.org/grounded)'));
@@ -1257,16 +1441,18 @@ test('Vertex native search sends only documented search options and keeps citati
   assert.deepEqual(followup.messages.find(m => m.annotations)?.annotations, [SEARCH_CITATION]);
 });
 
-test('Vertex server-search model cannot execute an unadvertised local function call', async () => {
+test('Vertex server search keeps local functions enabled and applies file permissions at execution', async () => {
+  let attempt = 0;
   const f = makeConversation({ settings: { protocol: 'chat-completions', baseUrl: GOOGLE_VERTEX_BASE, model: 'google/gemini-3.1-pro-preview', webSearch: { provider: 'server' } },
-    script: () => chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'unexpected', type: 'function', function: { name: 'get-full-file', arguments: '{"path":"a.md"}' } }] }),
+    script: () => attempt++ === 0 ? chatResponse({ role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'get-full-file', arguments: '{"path":"unauthorized.md"}' } }] }) : chatResponse(),
   });
   const id = await newSession(f.sessionStore, f.conversation, f.settings);
   const result = await f.conversation.send(id, 'Question', { webSearch: true });
-  assert.equal(result.status, 'failed'); assert.equal(result.error.code, 'TOOLS_UNSUPPORTED');
-  assert.equal(f.network.requests.length, 1);
+  assert.equal(result.status, 'complete');
+  assert.equal(f.network.requests.length, 2);
   const records = f.sessionStore.records.get(id);
-  assert.ok(records.filter(r => r.kind === 'item/output').some(r => r.payload.item.tool_call_id === 'unexpected' && /not executed/.test(r.payload.item.content)));
+  assert.ok(records.some(r => r.kind === 'turn/tool-finished' && r.payload.status === 'failed'));
+  assert.ok(records.filter(r => r.kind === 'item/output').some(r => r.payload.item.tool_call_id === 'read'));
 });
 
 test('DeepSeek Flash uses independent Search with the model key through both conversation protocols', async () => {
@@ -1364,7 +1550,7 @@ test('ordinary Gemini API keys use native search on relay URLs and preserve grou
   assert.equal(first.url,GEMINI_STUDIO_BASE.replace('/openai','')+'/models/'+model.replace('google/','')+':generateContent');
   assert.equal(first.options.headers['x-goog-api-key'],'sk-test');assert.equal(first.options.headers.Authorization,undefined);
   const body=JSON.parse(first.options.body);
-  assert.deepEqual(body.tools,[{google_search:{}}]);assert.equal(body.model,undefined);assert.equal(body.stream,undefined);
+  assert.deepEqual(body.tools.find(tool=>tool.functionDeclarations).functionDeclarations.map(tool=>tool.name),['get-full-file','get-image']);assert.ok(body.tools.some(tool=>tool.google_search));assert.equal(body.model,undefined);assert.equal(body.stream,undefined);
   assert.ok(JSON.stringify(body.contents).includes('EXPLICIT_NATIVE_CONTEXT'));
   const records=f.sessionStore.records.get(id);
   f.conversation.forget(id);await f.conversation.load(id);
@@ -1408,7 +1594,7 @@ test('CPA Gemini hosted search sends the proven Responses shape and replays opaq
  const result=await f.conversation.send(id,'Search public facts',{webSearch:true,additions:[{kind:'file',path:'fixture.md',text:'USER_CONTEXT_SENTINEL'}]});
  assert.equal(result.status,'complete');assert.ok(result.text);assert.ok(result.sources.length);
  const sent=f.network.requests[0];const body=JSON.parse(sent.options.body);
- assert.equal(sent.url,'http://127.0.0.1:8317/v1/responses');assert.deepEqual(body.tools,[{type:'web_search'}]);assert.equal(body.tool_choice,'required');
+ assert.equal(sent.url,'http://127.0.0.1:8317/v1/responses');assert.deepEqual(body.tools.map(tool=>tool.name??tool.type),['get-full-file','get-image','web_search']);assert.equal(body.tool_choice,'auto');
  assert.ok(JSON.stringify(body.input).includes('USER_CONTEXT_SENTINEL'));
  const canonical=f.sessionStore.records.get(id).filter(r=>r.kind==='item/output').map(r=>r.payload.item);
  assert.deepEqual(canonical,successful.output);
@@ -1425,8 +1611,8 @@ test('CPA Gemini CC searches without changing protocol and does not fabricate st
  const result=await f.conversation.send(id,'Question',{webSearch:true,additions:[{kind:'file',path:'a.md',text:'EXPLICIT_CPA_CC_CONTEXT'}]});
  assert.equal(result.status,'complete');assert.equal(f.network.requests.length,1);
  const request=f.network.requests[0],body=JSON.parse(request.options.body);
- assert.equal(request.url,'http://127.0.0.1:8317/v1/chat/completions');assert.deepEqual(body.tools,[{google_search:{}}]);
- assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,undefined);assert.equal(body.parallel_tool_calls,undefined);
+ assert.equal(request.url,'http://127.0.0.1:8317/v1/chat/completions');assert.deepEqual(body.tools.map(tool=>tool.function?.name??(tool.google_search?'google_search':'')),['get-full-file','get-image','google_search']);
+ assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,'auto');assert.equal(body.parallel_tool_calls,true);
  assert.ok(JSON.stringify(body.messages).includes('EXPLICIT_CPA_CC_CONTEXT'));
  assert.deepEqual(result.sources,[]);assert.deepEqual(result.searchStatuses,[]);
  f.conversation.forget(id);await f.conversation.load(id);
@@ -1434,4 +1620,277 @@ test('CPA Gemini CC searches without changing protocol and does not fabricate st
  const off=JSON.parse(f.network.requests.at(-1).options.body);
  assert.ok(off.tools.some(tool=>tool.function?.name==='get-full-file'));assert.equal(off.tools.some(tool=>tool.google_search),false);
  assert.ok(off.messages.some(message=>message.content.includes('Answer with')));
+});
+
+for (const protocol of ['responses', 'chat-completions']) test(`${protocol}: ordered process survives reload without entering canonical items, permissions or model requests`, async () => {
+  const reasoning = ['First thought.', 'Second thought.', 'Final thought.'];
+  let attempt = 0;
+  const f = makeConversation({ settings: { protocol }, files: { 'a.md': 'alpha' }, script: () => {
+    const round = attempt++;
+    const calls = round < 2 ? [{ type: 'function_call', id: `fc-${round}`, call_id: `call-${round}`, name: 'get-full-file', arguments: '{"path":"a.md"}' }] : [];
+    if (protocol === 'chat-completions') return chatResponse({ role: 'assistant', content: round < 2 ? null : 'Final answer',
+      reasoning_content: reasoning[round] ?? 'Next thought',
+      ...(calls.length ? { tool_calls: calls.map(call => ({ index: 0, id: call.call_id, type: 'function', function: { name: call.name, arguments: call.arguments } })) } : {}) });
+    return sseResponse([
+      { type: 'response.created', data: { response: { id: `r-${round}` } } },
+      { type: 'response.reasoning_text.delta', data: { delta: reasoning[round] ?? 'Next thought' } },
+      ...(round < 2 ? [] : [{ type: 'response.output_text.delta', data: { delta: 'Final answer' } }]),
+      { type: 'response.completed', data: { response: { id: `r-${round}`, output: [
+        { type: 'reasoning', id: `rs-${round}`, summary: [{ type: 'summary_text', text: reasoning[round] ?? 'Next thought' }] }, ...calls,
+        ...(round < 2 ? [] : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Final answer' }] }]),
+      ] } } },
+    ]);
+  } });
+  f.tracker.allowlist = () => ['a.md'];
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  const result = await f.conversation.send(id, 'Read twice');
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.process.map(step => step.kind), ['reasoning', 'tool', 'reasoning', 'tool', 'reasoning', 'text']);
+  const records = f.sessionStore.records.get(id), canonical = JSON.stringify(f.conversation.stateFor(id).items);
+  assert.ok(records.filter(record => record.kind === 'turn/process').length < 10);
+  const messages = require('../src/quick-ask/conversation-messages').conversationFromRecords(records);
+  const process = messages.find(entry => entry.kind === 'process');
+  assert.deepEqual(process.steps.map(step => step.kind), ['reasoning', 'tool', 'reasoning', 'tool', 'reasoning']);
+  assert.deepEqual(process.steps.filter(step => step.kind === 'reasoning').map(step => step.text), reasoning);
+  assert.ok(process.steps.filter(step => step.kind === 'tool').every(step => step.call.status === 'complete'));
+  assert.equal(messages.at(-1).text, 'Final answer');
+  f.conversation.forget(id); await f.conversation.load(id);
+  assert.equal(JSON.stringify(f.conversation.stateFor(id).items), canonical);
+  assert.deepEqual(f.conversation.snapshot(id).process, result.process);
+  // Older readers ignore optional records. Simulate that interpretation and
+  // verify the same canonical history is still produced by the real loader.
+  f.sessionStore.records.set(id, records.filter(record => record.kind !== 'turn/process'));
+  f.conversation.forget(id); await f.conversation.load(id);
+  assert.equal(JSON.stringify(f.conversation.stateFor(id).items), canonical);
+  f.sessionStore.records.set(id, records);
+  f.conversation.forget(id); await f.conversation.load(id);
+  await f.conversation.send(id, 'Next');
+  const request = JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(JSON.stringify(request).includes('step-0'), false);
+  assert.equal(JSON.stringify(request).includes('processVersion'), false);
+  assert.equal(JSON.stringify(request).includes('groupId'), false);
+});
+
+test('failed optional process writes retain canonical response and reasoning fallback', async () => {
+  const f = makeConversation({ script: () => sseResponse([
+    { type: 'response.created', data: { response: { id: 'r' } } },
+    { type: 'response.reasoning_text.delta', data: { delta: 'Readable reasoning' } },
+    { type: 'response.output_text.delta', data: { delta: 'Answer' } },
+    { type: 'response.completed', data: { response: { id: 'r' } } },
+  ]) });
+  const append = f.sessionStore.append.bind(f.sessionStore);
+  f.sessionStore.append = async (id, kind, payload) => {
+    if (kind === 'turn/process') throw new Error('disk failure');
+    return append(id, kind, payload);
+  };
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  const result = await f.conversation.send(id, 'Q');
+  assert.equal(result.status, 'complete');
+  const messages = require('../src/quick-ask/conversation-messages').conversationFromRecords(f.sessionStore.records.get(id));
+  assert.equal(messages.find(entry => entry.kind === 'process').steps[0].text, 'Readable reasoning');
+  assert.equal(messages.at(-1).text, 'Answer');
+});
+
+for (const protocol of ['responses','chat-completions']) test(`${protocol}: Gemini hosted search keeps both read tools and permits a mixed parallel batch with path-level rejection`, async () => {
+  let attempt=0;
+  const calls=[{callId:'read',name:'get-full-file',arguments:'{"path":"allowed.md"}'},
+    {callId:'image',name:'get-image',arguments:'{"path":"forbidden.png","sourcePath":null}'}];
+  const f=makeConversation({settings:{protocol,model:'gemini-3.8-flash-high',baseUrl:'http://127.0.0.1:8317/v1',webSearch:{provider:'server'}},files:{'allowed.md':'CURRENT_AUTHORIZED_TEXT'},script:()=>{
+    const first=attempt++===0;
+    if(protocol==='chat-completions') return chatResponse(first?{role:'assistant',content:null,tool_calls:calls.map((call,index)=>({index,id:call.callId,type:'function',function:{name:call.name,arguments:call.arguments}}))}:{role:'assistant',content:'Finished after tool results'});
+    return sseResponse([{type:'response.created',data:{response:{id:`r-${attempt}`}}},
+      ...(!first?[{type:'response.output_text.delta',data:{delta:'Finished after tool results'}}]:[]),
+      {type:'response.completed',data:{response:{id:`r-${attempt}`,output:first?calls.map(call=>({type:'function_call',id:call.callId,call_id:call.callId,name:call.name,arguments:call.arguments})):[{type:'message',role:'assistant',content:[{type:'output_text',text:'Finished after tool results'}]}]}}}]);
+  }});
+  f.tracker.allowlist=()=>['allowed.md'];
+  const id=await newSession(f.sessionStore,f.conversation,f.settings);
+  const result=await f.conversation.send(id,'Read and search',{webSearch:true});
+  assert.equal(result.status,'complete');assert.equal(attempt,2);
+  for(const request of f.network.requests){
+    const body=JSON.parse(request.options.body),names=body.tools.map(tool=>tool.function?.name??tool.name??tool.type??'google_search');
+    assert.ok(names.includes('get-full-file'));assert.ok(names.includes('get-image'));
+    assert.ok(body.tools.some(tool=>tool.type==='web_search'||tool.google_search));
+    assert.equal(body.tool_choice,'auto');
+  }
+  const records=f.sessionStore.records.get(id),finished=records.filter(record=>record.kind==='turn/tool-finished');
+  assert.deepEqual(finished.map(record=>record.payload.name).sort(),['get-full-file','get-image']);
+  assert.equal(finished.find(record=>record.payload.name==='get-full-file').payload.status,'complete');
+  assert.equal(finished.find(record=>record.payload.name==='get-image').payload.status,'failed');
+  f.conversation.forget(id);await f.conversation.load(id);
+  const before=JSON.stringify(f.conversation.snapshot(id).items);
+  await f.conversation.send(id,'Read without search',{webSearch:false});
+  const off=JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(off.tools.some(tool=>tool.type==='web_search'||tool.google_search),false);
+  assert.equal(off.tools.length,2);
+  assert.ok(before.includes('CURRENT_AUTHORIZED_TEXT'));
+});
+
+test('native Gemini Google search continues local functions, replays signed results, and keeps file permissions', async () => {
+  let attempt=0;
+  const nativeCall={role:'model',parts:[{functionCall:{id:'native-read',name:'get-full-file',args:{path:'allowed.md'}},thoughtSignature:'preserve-me'}]};
+  const f=makeConversation({settings:{protocol:'chat-completions',baseUrl:GEMINI_STUDIO_BASE,model:'gemini-3.8-flash',webSearch:{provider:'server'}},files:{'allowed.md':'NATIVE_FILE_CONTENT'},script:()=>({status:200,json:{responseId:`native-${attempt}`,candidates:[{content:attempt++===0?nativeCall:{role:'model',parts:[{text:'Read finished'}]},finishReason:'STOP'}]}})});
+  f.tracker.allowlist=()=>['allowed.md'];
+  const id=await newSession(f.sessionStore,f.conversation,f.settings);
+  const result=await f.conversation.send(id,'Search and read',{webSearch:true});
+  assert.equal(result.status,'complete');assert.equal(attempt,2);
+  for(const request of f.network.requests){
+    const body=JSON.parse(request.options.body);
+    assert.ok(body.tools.some(tool=>tool.google_search));
+    assert.deepEqual(body.tools.find(tool=>tool.functionDeclarations).functionDeclarations.map(tool=>tool.name),['get-full-file','get-image']);
+    assert.equal(body.toolConfig.includeServerSideToolInvocations,true);
+  }
+  const next=JSON.parse(f.network.requests[1].options.body);
+  assert.ok(next.contents.some(content=>JSON.stringify(content)===JSON.stringify(nativeCall)));
+  const returned=next.contents.find(content=>content.parts.some(part=>part.functionResponse));
+  assert.equal(returned.role,'user');assert.equal(returned.parts[0].functionResponse.id,'native-read');
+  assert.ok(returned.parts[0].functionResponse.response.output.includes('NATIVE_FILE_CONTENT'));
+  f.conversation.forget(id);await f.conversation.load(id);
+  await f.conversation.send(id,'Continue search',{webSearch:true});
+  assert.ok(f.network.requests.at(-1).options.body.includes('preserve-me'));
+});
+
+function independentSearchFixture(protocol, script) {
+  const f=makeConversation({settings:{protocol,model:'gemini-3.8-flash',systemPrompt:'PRIVATE_ROLE_SENTINEL',webSearch:{provider:'server'}},script});
+  f.settings.providerProfiles=[{id:'search-profile',name:'Search connection',baseUrl:f.settings.baseUrl,secretId:f.settings.secretId,
+    models:[{id:f.settings.model,protocol}],selectedModelId:f.settings.model,searchMode:'independent'}];
+  f.settings.activeProviderProfileId='search-profile';
+  return f;
+}
+function publicSearchCall(protocol) {
+  return protocol==='chat-completions' ? chatResponse({role:'assistant',content:null,tool_calls:[{index:0,id:'search-one',type:'function',function:{name:'web_search',arguments:'{"query":"public query"}'}}]})
+    : sseResponse([{type:'response.created',data:{response:{id:'main-search'}}},
+      {type:'response.completed',data:{response:{id:'main-search',output:[{type:'function_call',id:'search-one',call_id:'search-one',name:'web_search',arguments:'{"query":"public query"}'}],usage:{input_tokens:100,output_tokens:3,total_tokens:103}}}}]);
+}
+function publicSearchResult(protocol) {
+  return protocol==='chat-completions' ? chatResponse({role:'assistant',content:'Public search summary',annotations:[SEARCH_CITATION]})
+    : sseResponse([{type:'response.created',data:{response:{id:'child-search'}}},
+      {type:'response.output_text.delta',data:{delta:'Public search summary'}},
+      {type:'response.completed',data:{response:{id:'child-search',output:[{type:'web_search_call',id:'hosted',status:'completed',action:{query:'public query',sources:[{url:'https://example.org/grounded',title:'Evidence'}]}},
+        {type:'message',role:'assistant',content:[{type:'output_text',text:'Public search summary'}]}],usage:{input_tokens:5,output_tokens:6,total_tokens:11}}}}]);
+}
+for(const protocol of ['responses','chat-completions']) test(`${protocol}: manual independent search isolates the query, resumes main tools, accounts usage and replays without network`,async()=>{
+  const final=()=>protocol==='responses'?sseResponse(streamedTurn({text:'Final synthesis'})):chatResponse({role:'assistant',content:'Final synthesis'});
+  const f=independentSearchFixture(protocol,[()=>publicSearchCall(protocol),()=>publicSearchResult(protocol),final,final]);
+  const config=require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings);
+  const id=await newSession(f.sessionStore,f.conversation,config);
+  let searchAnchor;
+  const append=f.sessionStore.append.bind(f.sessionStore);
+  f.sessionStore.append=async(id,kind,payload)=>{
+    if(kind==='turn/usage'&&payload.scope==='search')searchAnchor=f.conversation.stateFor(id).occupancyAnchor;
+    return append(id,kind,payload);
+  };
+  const result=await f.conversation.send(id,'Find public facts',{webSearch:true,additions:[{kind:'file',path:'private.md',text:'PRIVATE_NOTE_SENTINEL'}]});
+  assert.equal(result.status,'complete');assert.equal(f.network.requests.length,3);
+  const [first,child,last]=f.network.requests.map(request=>JSON.parse(request.options.body));
+  assert.deepEqual(first.tools.map(tool=>tool.function?.name??tool.name),['get-full-file','get-image','web_search']);
+  assert.equal(first.tools.some(tool=>tool.type==='web_search'||tool.google_search),false);
+  assert.equal(JSON.stringify(first).includes('PRIVATE_NOTE_SENTINEL'),true);
+  assert.equal(JSON.stringify(child).includes('PRIVATE_NOTE_SENTINEL'),false);assert.equal(JSON.stringify(child).includes('PRIVATE_ROLE_SENTINEL'),false);
+  if (protocol==='responses') {
+    assert.equal(child.instructions,undefined);
+    assert.deepEqual(child.input,[{type:'message',role:'user',content:[{type:'input_text',text:'public query'}]}]);
+  } else assert.deepEqual(child.messages,[{role:'user',content:'public query'}]);
+  assert.equal(JSON.stringify(child).includes('get-full-file'),false);assert.equal(JSON.stringify(child).includes('get-image'),false);
+  assert.equal(child.previous_response_id,undefined);assert.equal(child.store,protocol==='responses'?false:undefined);
+  assert.ok(child.tools.some(tool=>tool.type==='web_search'||tool.google_search));
+  assert.ok(JSON.stringify(last).includes('Public search summary'));
+  assert.equal(searchAnchor,null,'search-only input must not anchor main context occupancy');
+  const records=f.sessionStore.records.get(id);
+  assert.equal(records.find(record=>record.kind==='turn/started').payload.searchExecution,'independent');
+  assert.equal(records.filter(record=>record.kind==='turn/tool-finished').length,1);
+  assert.equal(records.find(record=>record.kind==='turn/tool-finished').payload.status,'complete');
+  assert.equal(f.conversation.snapshot(id).turnUsage.attempts,3);
+  assert.equal(f.conversation.snapshot(id).turnUsage.input,protocol==='responses'?115:60);
+  assert.equal(result.sources[0].url,'https://example.org/grounded');
+  const usage=f.conversation.snapshot(id).turnUsage,anchor={...f.conversation.stateFor(id).occupancyAnchor};
+  f.conversation.forget(id);await f.conversation.load(id);
+  assert.deepEqual(f.conversation.snapshot(id).turnUsage,usage);assert.deepEqual(f.conversation.stateFor(id).occupancyAnchor,anchor);
+  assert.equal(f.network.requests.length,3);
+  await f.conversation.send(id,'Without search',{webSearch:false});
+  const off=JSON.parse(f.network.requests.at(-1).options.body);
+  assert.equal(off.tools.length,2);assert.equal(f.network.requests.length,4);
+});
+
+test('mixed search errors carry a short manual-switch hint without probing, retrying or changing mode',async()=>{
+  const f=independentSearchFixture('responses',[()=>({ok:false,status:400,headers:{get:()=>null},text:async()=>JSON.stringify({error:{message:'Tool use with function calling is unsupported'}})})]);
+  f.settings.providerProfiles[0].searchMode='mixed';
+  const config=require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings),id=await newSession(f.sessionStore,f.conversation,config);
+  const result=await f.conversation.send(id,'Search',{webSearch:true});
+  assert.equal(result.status,'failed');assert.equal(result.error.hint,'search.switchIndependent');
+  assert.equal(f.projections.find(projection=>projection.kind==='turn'&&projection.status==='failed').error.hint,'search.switchIndependent');
+  assert.equal(f.network.requests.length,1);assert.equal(f.settings.providerProfiles[0].searchMode,'mixed');
+  const finished=f.sessionStore.records.get(id).find(record=>record.kind==='turn/finished');
+  assert.equal(finished.payload.error.hint,'search.switchIndependent');
+  f.settings.providerProfiles[0].searchMode='independent';
+  assert.equal(f.conversation.validateSearchForSend(id,true).route.kind,'provider-search','manual change applies to the same existing session');
+});
+
+test('independent provider search authentication failure returns one tool error and lets the main model continue',async()=>{
+  const f=independentSearchFixture('responses',[()=>publicSearchCall('responses'),
+    ()=>({ok:false,status:401,headers:{get:()=>null},text:async()=>JSON.stringify({error:{message:'Unauthorized'}})}),
+    ()=>sseResponse(streamedTurn({text:'Search failed; retained local answer'}))]);
+  const id=await newSession(f.sessionStore,f.conversation,require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings));
+  const result=await f.conversation.send(id,'Search',{webSearch:true});
+  assert.equal(result.status,'complete');assert.equal(f.network.requests.length,3);
+  const body=JSON.parse(f.network.requests.at(-1).options.body);
+  assert.ok(JSON.stringify(body).includes('AUTH'));
+  assert.equal(result.searchStatuses[0].status,'failed');
+  assert.equal(f.settings.providerProfiles[0].searchMode,'independent');
+});
+
+test('cancelling an independent provider search cancels its tool and never starts a main continuation',async()=>{
+  const controller=new AbortController();
+  const f=independentSearchFixture('responses',[()=>publicSearchCall('responses'),()=>{controller.abort();throw {name:'AbortError'};}]);
+  const id=await newSession(f.sessionStore,f.conversation,require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings));
+  const result=await f.conversation.send(id,'Search',{webSearch:true,signal:controller.signal});
+  assert.equal(result.status,'stopped');assert.equal(f.network.requests.length,2);
+  assert.equal(f.sessionStore.records.get(id).find(record=>record.kind==='turn/tool-finished').payload.status,'cancelled');
+});
+
+test('manual mode changes apply to the next question without changing an in-flight tool continuation',async()=>{
+  const f=independentSearchFixture('responses',[()=>publicSearchCall('responses'),()=>{
+    f.settings.providerProfiles[0].searchMode='mixed';
+    return publicSearchResult('responses');
+  },()=>sseResponse(streamedTurn()),()=>publicSearchResult('responses')]);
+  const id=await newSession(f.sessionStore,f.conversation,require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings));
+  assert.equal((await f.conversation.send(id,'Search',{webSearch:true})).status,'complete');
+  const continuation=JSON.parse(f.network.requests[2].options.body);
+  assert.equal(continuation.tools.some(tool=>tool.type==='web_search'),false);
+  assert.ok(continuation.tools.some(tool=>tool.name==='web_search'));
+  assert.equal((await f.conversation.send(id,'Next search',{webSearch:true})).status,'complete');
+  const next=JSON.parse(f.network.requests[3].options.body);
+  assert.ok(next.tools.some(tool=>tool.type==='web_search'));
+});
+
+test('independent mode keeps main Chat protocol while the search child uses the configured native Gemini endpoint',async()=>{
+  const f=independentSearchFixture('chat-completions',[()=>publicSearchCall('chat-completions'),
+    ()=>({status:200,json:nativeGeminiResponse()}),()=>chatResponse({role:'assistant',content:'Final native-search synthesis'})]);
+  f.settings.baseUrl=GEMINI_STUDIO_BASE;f.settings.providerProfiles[0].baseUrl=GEMINI_STUDIO_BASE;
+  const id=await newSession(f.sessionStore,f.conversation,require('../src/quick-ask/settings').sessionConfigSnapshot(f.settings));
+  const result=await f.conversation.send(id,'Search',{webSearch:true});
+  assert.equal(result.status,'complete');assert.equal(f.network.requests.length,3);
+  assert.ok(f.network.requests[0].url.endsWith('/chat/completions'));
+  assert.ok(f.network.requests[1].url.endsWith('/models/gemini-3.8-flash:generateContent'));
+  assert.ok(f.network.requests[2].url.endsWith('/chat/completions'));
+  const body=JSON.parse(f.network.requests[1].options.body);
+  assert.deepEqual(body.tools,[{google_search:{}}]);
+  assert.deepEqual(body.contents,[{role:'user',parts:[{text:'public query'}]}]);
+  assert.equal(body.systemInstruction,undefined);
+  assert.equal(result.sources[0].url,'https://example.org/google-evidence');
+  assert.equal(f.conversation.snapshot(id).turnUsage.attempts,3);
+});
+
+for(const defaultEnabled of [false,true]) test(`search state before loading an old session is safe with web default ${defaultEnabled}`,async()=>{
+  const f=independentSearchFixture('responses',[]);
+  f.settings.webSearch.defaultEnabled=defaultEnabled;
+  const {id}=await f.sessionStore.createSession({config:{protocol:'responses',baseUrl:f.settings.baseUrl,model:f.settings.model,secretId:f.settings.secretId}});
+  assert.equal(f.conversation.stateFor(id).config,null);
+  assert.doesNotThrow(()=>f.conversation.nextSearchRoute(id),'the view reads the route before parsing a session header');
+  assert.doesNotThrow(()=>f.conversation.validateSearchForSend(id,defaultEnabled));
+  assert.equal(f.conversation.stateFor(id).config,null);
+  assert.equal(f.network.requests.length,0);
+  await f.conversation.load(id);
+  assert.equal(f.conversation.nextSearchRoute(id).kind,defaultEnabled?'provider-search':'off');
+  assert.deepEqual(await f.conversation.recover(id),{status:'clean'});
+  assert.equal(f.network.requests.length,0);
 });

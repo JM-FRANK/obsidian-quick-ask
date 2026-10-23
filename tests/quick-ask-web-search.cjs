@@ -74,7 +74,7 @@ test('a failing search callback releases the shared executor queue',async()=>{
  const executor=createToolExecutor({vault:{},maxConcurrent:1});const question=executor.createQuestionState({callLimit:3});
  await assert.rejects(executor.executeCall({name:'web_search',arguments:{query:'q'}},{question,search:async()=>{throw new Error('disk failure');}}),/disk failure/);
  const result=await executor.executeCall({name:'web_search',arguments:{query:'q'}},{question,search:async()=>({ok:true,sources:[]})});
- assert.equal(result.ok,true);assert.equal(question.callsUsed,2);
+ assert.equal(result.ok,true);assert.equal(question.callsUsed,undefined);
 });
 test('auth and rate-limit failures never invoke a fallback service',async()=>{
  for(const status of [401,403,429,500]){
@@ -94,11 +94,11 @@ test('server annotation citations become clickable without changing copied sourc
 test('Google search identifies Gemini family without restricting models to two names or official hosts',()=>{
  for(const model of ['gemini-2.0-flash','gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite','gemini-3-flash-preview','gemini-3.1-pro-preview','gemini-3.8-flash','google/gemini-4-argon'])for(const baseUrl of ['https://generativelanguage.googleapis.com/v1beta/openai','https://relay.example/gemini/v1beta/openai']){
   const route=searchRoute(true,{provider:'server'},{protocol:'chat-completions',baseUrl,model});
-  assert.equal(route.kind,'server');assert.equal(route.provider,'google');assert.equal(route.native,true);assert.equal(route.localTools,false);
+  assert.equal(route.kind,'server');assert.equal(route.provider,'google');assert.equal(route.native,true);assert.equal(route.localTools,undefined);
  }
  const vertex='https://relay.example/v1/projects/project/locations/global/endpoints/openapi';
  assert.equal(searchRoute(true,{provider:'server'},{protocol:'chat-completions',baseUrl:vertex,model:'google/gemini-2.5-flash'}).native,false);
- assert.equal(searchRoute(true,{provider:'server'},{protocol:'responses',model:'gemini-2.5-flash'}).toolChoice,'required');
+ assert.equal(searchRoute(true,{provider:'server'},{protocol:'responses',model:'gemini-2.5-flash'}).toolChoice,undefined);
  assert.equal(searchRoute(false,{provider:'server'},{protocol:'chat-completions',model:'gemini-2.5-flash'}).kind,'off');
  assert.equal(searchRoute(true,{provider:'server'},{protocol:'responses',baseUrl:'https://relay.example/v1',model:'gpt-5'}).provider,'openai');
 });
@@ -207,11 +207,11 @@ test('malformed Google grounding supports are skipped without breaking terminal 
  }
 });
 
-test('CPA Gemini Responses search keeps the selected protocol and separates hosted search from functions',()=>{
+test('CPA Gemini Responses search keeps the selected protocol and adds hosted search without disabling functions',()=>{
  for(const model of ['gemini-3-flash','gemini-3.8-flash-high','google/gemini-2.5-flash']){
   const route=searchRoute(true,{provider:'server'},{protocol:'responses',baseUrl:'http://127.0.0.1:8317/v1',model});
   assert.equal(route.kind,'server');assert.equal(route.provider,'google');assert.equal(route.native,undefined);
-  assert.equal(route.localTools,false);assert.equal(route.toolChoice,'required');assert.deepEqual(route.tool,{type:'web_search'});
+  assert.equal(route.localTools,undefined);assert.equal(route.toolChoice,undefined);assert.deepEqual(route.tool,{type:'web_search'});
   assert.equal(searchRoute(false,{provider:'server'},{protocol:'responses',baseUrl:'http://127.0.0.1:8317/v1',model}).kind,'off');
  }
 });
@@ -219,7 +219,17 @@ test('CPA Gemini Responses search keeps the selected protocol and separates host
 test('CPA Gemini CC search stays on CC, separate from explicit Gemini native and Vertex endpoints',()=>{
  for(const baseUrl of ['http://127.0.0.1:8317/v1','https://relay.example/v1','https://relay.example']){
   const route=searchRoute(true,{provider:'server'},{protocol:'chat-completions',baseUrl,model:'gemini-3-flash'});
-  assert.equal(route.kind,'server');assert.equal(route.chatSearch,'google-search');assert.equal(route.native,undefined);assert.equal(route.localTools,false);
+  assert.equal(route.kind,'server');assert.equal(route.chatSearch,'google-search');assert.equal(route.native,undefined);assert.equal(route.localTools,undefined);
  }
  assert.equal(searchRoute(true,{provider:'server'},{protocol:'chat-completions',baseUrl:'https://generativelanguage.googleapis.com/v1beta/openai',model:'gemini-3-flash'}).native,true);
+});
+
+test('provider search execution is explicitly chosen and never overrides the web toggle or independent APIs', () => {
+  const config={protocol:'responses',model:'gemini-3.8-flash',baseUrl:'http://localhost:8317/v1'};
+  assert.equal(searchRoute(true,{provider:'server'},config).kind,'server');
+  const separate=searchRoute(true,{provider:'server'},{...config,providerSearchMode:'independent'});
+  assert.equal(separate.kind,'provider-search');assert.deepEqual(separate.server.tool,{type:'web_search'});
+  assert.equal(searchRoute(false,{provider:'server'},{...config,providerSearchMode:'independent'}).kind,'off');
+  assert.equal(searchRoute(true,{provider:'duckduckgo'},{...config,providerSearchMode:'independent'}).kind,'local');
+  assert.equal(searchRoute(true,{provider:'server'},{protocol:'responses',model:'deepseek-flash',providerSearchMode:'independent'}).kind,'provider-api');
 });

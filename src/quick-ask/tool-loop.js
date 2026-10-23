@@ -7,10 +7,11 @@ const { protocolFor } = require("./protocol");
 
 const { GET_FULL_FILE_TOOL, numberLines } = require("./prompt-renderer");
 const { responsesFunctionCallsFrom } = require("./transport");
+const { GET_IMAGE_TOOL } = require('./tool');
 
 // Which calls Quick Ask accepts is domain policy. Reading the wire function
 // calls belongs to transport with the rest of the Responses vocabulary.
-const TOOL_NAMES = Object.freeze([GET_FULL_FILE_TOOL.name, "web_search"]);
+const TOOL_NAMES = Object.freeze([GET_FULL_FILE_TOOL.name, "web_search", GET_IMAGE_TOOL.name]);
 
 function functionCallsFrom(output) {
   return responsesFunctionCallsFrom(output).filter((call) => TOOL_NAMES.includes(call.name));
@@ -28,45 +29,51 @@ function wireCalls(calls) {
 }
 
 function createToolLoop({ executor, tracker = null, config = {} }) {
-  const callLimit = Number.isInteger(config.callLimit) ? config.callLimit : 3;
 
-  // A question's tool budget is fixed when the question starts.
-  function beginQuestion({ allowlist = [], callLimit: limit } = {}) {
+  function beginQuestion({ allowlist = [], imageAllowlist = [] } = {}) {
     return {
-      state: executor.createQuestionState({ allowlist, callLimit: limit ?? callLimit }),
+      state: executor.createQuestionState({ allowlist, imageAllowlist }),
       statuses: [],
     };
   }
 
   // Execute one batch and return the items to append plus the status UI facts.
-  async function runBatch(calls, question, { normalizePath = (value) => value, fitsInContext = () => true, search = null, signal = null } = {}) {
-    const results = [];
-    for (const call of calls) {
-      const result = TOOL_NAMES.includes(call.name)
-        ? await executor.executeCall(call, { question: question.state, normalizePath, fitsInContext, search, signal })
-        : { ok: false, output: "Unsupported tool; not executed" };
-      results.push(result);
+  async function runBatch(calls, question, { normalizePath = (value) => value, fitsInContext = () => true, search = null, signal = null,
+    onCallQueued = async () => {}, onCallStart = async () => {}, onCallEnd = async () => {} } = {}) {
+    const results = await Promise.all(calls.map(async (call, index) => {
+      await onCallQueued(call, index);
+      let result;
+      try {
+        result = TOOL_NAMES.includes(call.name)
+          ? await executor.executeCall(call, { question: question.state, normalizePath, fitsInContext, search, signal,
+            onStart: () => onCallStart(call, index) })
+          : { ok: false, output: 'Unsupported tool; not executed' };
+      } catch {
+        result = { ok: false, output: signal?.aborted ? 'Cancelled' : 'Tool execution failed.' };
+      }
+      await onCallEnd(call, index, result);
+      return result;
+    }));
+    // Native continuation results and file baselines stay in model call order,
+    // regardless of completion order. One failure never cancels its siblings.
+    for (const result of results) {
       question.statuses.push(result.search ? { kind: "search", ok: result.ok, code: result.result?.code, sources: result.result?.sources ?? [] } : result.ok
         ? { kind: "read", path: result.path }
         : { kind: "error", path: result.path, output: result.output });
       // A successful read refreshes the synchronization baseline of a still
       // tracked file, and never restores tracking for a removed File Row.
-      if (result.ok && !result.search && tracker?.applyFullFileResult) tracker.applyFullFileResult(result.path, result.output);
+      if (result.ok && !result.search && !result.image && tracker?.applyFullFileResult) tracker.applyFullFileResult(result.path, result.output);
     }
     return {
       items: protocolFor(config).toolContinuationItems({
         calls: wireCalls(calls),
-        outputs: results.map(result => config.rendererVersion >= 2 && result.ok && !result.search ? numberLines(result.output) : result?.output ?? ""),
+        outputs: results.map(result => config.rendererVersion >= 2 && result.ok && !result.search && !result.image ? numberLines(result.output) : result?.output ?? ""),
       }),
       results,
     };
   }
 
-  function remaining(question) {
-    return Math.max(0, question.state.callLimit - question.state.callsUsed);
-  }
-
-  return { beginQuestion, runBatch, remaining, callLimit };
+  return { beginQuestion, runBatch };
 }
 
 module.exports = { createToolLoop, functionCallsFrom, TOOL_NAMES };

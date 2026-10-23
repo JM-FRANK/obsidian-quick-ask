@@ -1,4 +1,4 @@
-// Search-only Gemini wire for a Chat Completions session. The stored session
+// Gemini search and local-function wire for a Chat Completions session. The stored session
 // remains Chat-native; this boundary translates one request and preserves the
 // complete native response for faithful replay of thoughts and signatures.
 const { normalizeError } = require('./transport');
@@ -42,7 +42,7 @@ function buildGeminiSearchBody(chatBody = {}) {
   const model = String(chatBody.model ?? '').replace(/^(?:google|models)\//, '');
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(model)) protocolError('Invalid Gemini search model');
   if (!Array.isArray(chatBody.messages)) protocolError('Gemini search requires Chat Completions messages');
-  const contents = [], systemParts = [];
+  const contents = [], systemParts = [], calls = new Map();
   for (const message of chatBody.messages) {
     if (!message || typeof message !== 'object') protocolError('Invalid Gemini search message');
     if (message.role === 'system' || message.role === 'developer') {
@@ -53,6 +53,7 @@ function buildGeminiSearchBody(chatBody = {}) {
     }
     if (!['user', 'assistant', 'tool'].includes(message.role)) protocolError('Unsupported Gemini search message role');
     const native = message.role === 'assistant' ? message.extra_content?.google?.nativeContent : null;
+    for (const call of message.tool_calls ?? []) calls.set(call.id, { name: call.function?.name, native: Boolean(native) });
     if (native) {
       if (native.role !== 'model' || !Array.isArray(native.parts) || !native.parts.length || native.parts.some(part => !part || typeof part !== 'object' || Array.isArray(part))) protocolError('Invalid preserved Gemini search content');
       contents.push(native);
@@ -60,19 +61,26 @@ function buildGeminiSearchBody(chatBody = {}) {
     }
     const parts = contentParts(message.content);
     if (message.role === 'assistant' && typeof message.refusal === 'string' && message.refusal) parts.push({ text: message.refusal });
-    // Historical Chat tool batches are evidence, not new native function calls.
-    // Preserve their IDs, arguments and complete outputs without declaring tools
-    // whose Gemini signatures were never present in the old Chat session.
-    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+    // Old Chat calls have no native thought signatures. Keep that history as
+    // textual evidence rather than inventing signed Gemini function parts.
+    if (message.role === 'assistant' && message.tool_calls?.length)
       parts.push({ text: JSON.stringify({ historical_tool_calls: message.tool_calls }) });
-    }
     if (message.role === 'tool') {
-      parts.unshift({ text: JSON.stringify({ historical_tool_result: { tool_call_id: message.tool_call_id, ...(message.name ? { name: message.name } : {}) } }) });
+      const call = calls.get(message.tool_call_id);
+      if (!call) protocolError('Gemini tool result has no matching function call');
+      if (call.native) {
+        const text = parts.filter(part => typeof part.text === 'string').map(part => part.text).join('');
+        const media = parts.filter(part => typeof part.text !== 'string');
+        parts.splice(0, parts.length, { functionResponse: { id: message.tool_call_id, name: call.name, response: { output: text } } }, ...media);
+      } else parts.unshift({ text: JSON.stringify({ historical_tool_result: { tool_call_id: message.tool_call_id, ...(message.name ? { name: message.name } : {}) } }) });
     }
     if (parts.length) contents.push({ role: message.role === 'assistant' ? 'model' : 'user', parts });
   }
   if (!contents.length) protocolError('Gemini search requires nonempty conversation content');
-  const body = { model, contents, tools: [{ google_search: {} }] };
+  const declarations = (chatBody.tools ?? []).filter(tool => tool.type === 'function' && tool.function?.name)
+    .map(tool => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters }));
+  const body = { model, contents, tools: [{ google_search: {} }, ...(declarations.length ? [{ functionDeclarations: declarations }] : [])],
+    ...(declarations.length ? { toolConfig: { includeServerSideToolInvocations: true } } : {}) };
   if (systemParts.length) body.systemInstruction = { parts: systemParts };
   const max = chatBody.max_completion_tokens ?? chatBody.max_tokens;
   const thinking = thinkingConfig(model, chatBody.reasoning_effort);
@@ -113,17 +121,30 @@ function eventsFromResponse(payload, state, emit) {
   const parts = native?.parts ?? [];
   // Never attach rejected media/tool payloads to partial output: conversation
   // persistence would otherwise serialize inline base64 into the session log.
-  if (parts.some(part => part.functionCall || part.functionResponse || part.inlineData || part.fileData || part.executableCode || part.codeExecutionResult)) {
+  if (parts.some(part => part.functionResponse || part.inlineData || part.fileData || part.executableCode || part.codeExecutionResult)) {
     protocolError('Unexpected Gemini search tool or media output');
   }
   const text = parts.filter(part => !part.thought && typeof part.text === 'string').map(part => part.text).join('');
   const reasoning = parts.filter(part => part.thought && typeof part.text === 'string').map(part => part.text).join('');
+  const calls = parts.flatMap((part, index) => {
+    if (!part.functionCall) return [];
+    const call = part.functionCall;
+    if (typeof call.name !== 'string' || !call.name || !call.args || typeof call.args !== 'object' || Array.isArray(call.args)) protocolError('Invalid Gemini function call');
+    return [{ id: call.id || `${state.responseId ?? 'gemini'}-call-${index}`, type: 'function',
+      function: { name: call.name, arguments: JSON.stringify(call.args) } }];
+  });
   const google = { ...(native ? { nativeContent: native } : {}),
     ...(candidate.groundingMetadata ? { groundingMetadata: candidate.groundingMetadata } : {}),
     finishReason: candidate.finishReason,
     ...(candidate.safetyRatings ? { safetyRatings: candidate.safetyRatings } : {}),
     ...(candidate.finishMessage ? { finishMessage: candidate.finishMessage } : {}) };
-  const message = { role: 'assistant', content: text, ...(reasoning ? { reasoning_content: reasoning } : {}), extra_content: { google } };
+  // Preserve the original parts/signatures but give missing call IDs stable
+  // names in the Chat record used to pair local results.
+  for (const call of calls) {
+    state.callOrder.push({ id: call.id, callId: call.id, name: call.function.name, arguments: call.function.arguments, emitted: true });
+    emit({ type: 'function-call', callId: call.id, name: call.function.name, arguments: call.function.arguments });
+  }
+  const message = { role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}), ...(reasoning ? { reasoning_content: reasoning } : {}), extra_content: { google } };
   state.geminiMessage = message;
   state.text = text;
   state.reasoning = reasoning;
@@ -147,7 +168,7 @@ function eventsFromResponse(payload, state, emit) {
   }
   const finish = candidate.finishReason;
   const status = !['STOP', 'MAX_TOKENS'].includes(finish) ? 'failed' : finish === 'MAX_TOKENS' ? 'incomplete' : 'completed';
-  if (status === 'completed' && !text) protocolError('Gemini search returned no answer text');
+  if (status === 'completed' && !text && !calls.length) protocolError('Gemini search returned no answer text');
   if (status === 'failed') state.terminalError = normalizeError({ kind: 'provider', error: {
     code: finish,
     message: candidate.finishMessage ?? `Gemini search stopped: ${finish}`,

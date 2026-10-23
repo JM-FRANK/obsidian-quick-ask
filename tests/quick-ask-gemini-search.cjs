@@ -22,7 +22,7 @@ test('Gemini search converts the complete Chat conversation, images and historic
     { role: 'assistant', content: 'Earlier answer' },
     { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.test/image.png' } }, { type: 'text', text: 'Search now' }] },
   ];
-  const input = { model: 'gemini-2.5-flash', messages, tools: [{ type: 'function' }], tool_choice: 'auto', web_search_options: {}, max_completion_tokens: 2048, reasoning_effort: 'none' };
+  const input = { model: 'gemini-2.5-flash', messages, tools: [{ type: 'function', function: { name: 'get-full-file', parameters: { type: 'object' } } }], tool_choice: 'auto', web_search_options: {}, max_completion_tokens: 2048, reasoning_effort: 'none' };
   const before = JSON.stringify(input);
   const body = build(input);
   assert.equal(JSON.stringify(input), before);
@@ -34,7 +34,8 @@ test('Gemini search converts the complete Chat conversation, images and historic
   assert.equal(body.contents[2].parts[1].text, '# Complete file\nimportant details');
   assert.equal(body.contents[3].parts[0].text, 'Earlier answer');
   assert.deepEqual(body.contents[4].parts[0], { fileData: { mimeType: 'image/*', fileUri: 'https://example.test/image.png' } });
-  assert.deepEqual(body.tools, [{ google_search: {} }]);
+  assert.deepEqual(body.tools, [{google_search:{}},{functionDeclarations:[{name:'get-full-file',description:undefined,parameters:{type:'object'}}]}]);
+  assert.deepEqual(body.toolConfig,{includeServerSideToolInvocations:true});
   assert.deepEqual(body.generationConfig, { maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } });
   assert.equal(body.tool_choice, undefined);
 });
@@ -141,8 +142,8 @@ test('prompt blocks, provider errors, wrong protocols and malformed success cann
   assert.throws(() => fold(response({ content: { role: 'model', parts: [null] } })), error => error.kind === 'protocol');
 });
 
-test('unexpected native functions or media fail before attaching persistable native content', () => {
-  for (const part of [{ functionCall: { name: 'get-full-file', args: {} } }, { inlineData: { mimeType: 'image/png', data: 'YWJj' } }]) {
+test('malformed native functions or media fail before attaching persistable native content', () => {
+  for (const part of [{ functionCall: { args: {} } }, { inlineData: { mimeType: 'image/png', data: 'YWJj' } }]) {
     const content = { role: 'model', parts: [part] };
     const state = { usageSamples: [], text: '', reasoning: '', callOrder: [] };
     assert.throws(() => wire.eventsFromResponse(response({ content }), state, () => {}), error => error.kind === 'protocol');
@@ -218,4 +219,24 @@ test('rejected inline media cannot enter session output through shared transport
   assert.equal(result.status, 'failed');
   assert.equal(result.output, null);
   assert.equal(JSON.stringify(result).includes('YWJjRE9OT1RQRVJTSVNU'), false);
+});
+
+test('native search accepts parallel local calls and preserves all signed context for continuation', () => {
+  const native = { role:'model',parts:[
+    {text:'Read context',thought:true,thoughtSignature:'thinking-signature'},
+    {functionCall:{id:'file',name:'get-full-file',args:{path:'paper.md'}},thoughtSignature:'call-signature'},
+    {functionCall:{id:'image',name:'get-image',args:{path:'fig.png',sourcePath:null}}},
+  ]};
+  const {state}=fold(response({content:native}));
+  assert.equal(state.terminal.status,'completed');
+  assert.deepEqual(state.callOrder.map(call=>call.callId),['file','image']);
+  const declarations=['get-full-file','get-image'].map(name=>({type:'function',function:{name,parameters:{type:'object'}}}));
+  const body=build({model:'gemini-3.8-flash',tools:declarations,messages:[{role:'user',content:'Read'},state.terminalOutput[0],
+    {role:'tool',tool_call_id:'file',content:'file text'},
+    {role:'tool',tool_call_id:'image',content:'image unavailable'},
+  ]});
+  assert.deepEqual(body.contents[1],native);
+  assert.deepEqual(body.contents.slice(2).map(content=>[content.role,content.parts[0].functionResponse.id]),[['user','file'],['user','image']]);
+  assert.deepEqual(body.tools[1].functionDeclarations.map(tool=>tool.name),['get-full-file','get-image']);
+  assert.equal(body.toolConfig.includeServerSideToolInvocations,true);
 });

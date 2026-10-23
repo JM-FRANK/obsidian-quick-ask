@@ -209,3 +209,41 @@ test('native settings initialization and refresh callbacks never persist or disc
   await f.tick(); assert.equal(f.calls.length, 0); assert.equal(f.notices.length, 0);
   f.manager.dispose();
 });
+
+test('provider search mode is a manual two-choice preference, defaults to mixed and survives export', () => {
+  const { providerSearchMode } = require('../src/quick-ask/provider-profiles');
+  const settings = normalizeQuickAskSettings({baseUrl:'https://one.test/v1',secretId:'one',model:'gpt-5'});
+  assert.equal(activeProvider(settings).searchMode,'mixed');
+  const before=sessionConfigSnapshot(settings);
+  act(settings,{type:'search-mode',id:'default',searchMode:'independent'});
+  assert.equal(providerSearchMode(before,settings),'independent','same existing connection adopts the next-question setting');
+  const snapshot=sessionConfigSnapshot(settings);
+  assert.equal(snapshot.providerSearchMode,'independent');
+  assert.equal(redactQuickAskSettings(settings).providerProfiles[0].searchMode,'independent');
+  const exported=redactQuickAskSettings(snapshot);
+  assert.equal(exported.providerProfileId,'default');assert.equal(exported.providerSearchMode,'independent');
+  act(settings,{type:'add',id:'two',name:'Second'});
+  assert.equal(activeProvider(settings).searchMode,'mixed');
+  assert.equal(providerSearchMode(snapshot,settings),'independent','active profile does not control another connection');
+  act(settings,{type:'connection',id:'default',baseUrl:'https://changed.test/v1'});
+  assert.equal(providerSearchMode(snapshot,settings),'independent','changed connection cannot retarget the old session');
+  act(settings,{type:'search-mode',id:'two',searchMode:'auto'});
+  assert.equal(activeProvider(settings).searchMode,'mixed','no auto mode is persisted');
+});
+
+test('changing search mode does not start discovery or send a capability probe', async () => {
+  const f=fixture();
+  assert.equal(await f.manager.run({type:'search-mode',id:'default',searchMode:'independent'}),true);
+  await f.tick();
+  assert.equal(f.calls.length,0);assert.equal(f.timers.size,0);
+  assert.equal(activeProvider(f.store.values().quickAsk).searchMode,'independent');
+  f.manager.dispose();
+});
+
+test('unloaded session configuration has a safe mixed default without adopting the active connection', () => {
+  const {providerSearchMode}=require('../src/quick-ask/provider-profiles');
+  const settings=normalizeQuickAskSettings({});
+  act(settings,{type:'search-mode',id:'default',searchMode:'independent'});
+  assert.equal(providerSearchMode(null,settings),'mixed');
+  assert.equal(providerSearchMode(undefined,settings),'mixed');
+});

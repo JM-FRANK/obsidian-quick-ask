@@ -64,6 +64,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
   let fuzzySearch = null;
   const hoverParents = new WeakMap();
   const markdownComponents = new WeakMap();
+  const markdownRoots = new WeakMap();
   const markdownVisuals = new WeakMap();
   let markdownProcessorRegistered = false;
   const imageDirectory = `${pluginDirectory}/quick-ask/image-cache`;
@@ -181,6 +182,17 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         const { Buffer } = hostRequire("node:buffer");
         return prepareImages(paths, {
           stat: path => vault.adapter.stat(path), readBinary: path => vault.adapter.readBinary(path),
+          async validate(bytes, path) {
+            let bitmap;
+            try {
+              const owner = ownerWindow() ?? globalThis;
+              const decode = owner.createImageBitmap?.bind(owner) ?? globalThis.createImageBitmap?.bind(globalThis);
+              const BlobClass = owner.Blob ?? globalThis.Blob;
+              const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+              bitmap = await decode(new BlobClass([buffer], { type: imageMime(path) }));
+              if (!(bitmap.width > 0 && bitmap.height > 0)) throw imageError('IMAGE_FORMAT', path);
+            } finally { bitmap?.close(); }
+          },
           encodeBase64: bytes => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64"),
         });
       },
@@ -354,6 +366,9 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         return element;
       },
       clear(element) {
+        for (const root of [element, ...element.querySelectorAll('[data-quick-ask-markdown-root]')]) {
+          markdownRoots.get(root)?.unload();
+        }
         for (const dispose of selectionCleanups.get(element) ?? []) dispose();
         selectionCleanups.delete(element);
         for (const component of markdownComponents.get(element) ?? []) component.unload();
@@ -389,7 +404,19 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         const owner = element.closest(".scholar-quick-ask-history") ?? element;
         let components = markdownComponents.get(owner);
         if (!components) { components = new Set(); markdownComponents.set(owner, components); }
+        markdownRoots.get(element)?.unload();
         const component = new Component();
+        let active = true;
+        markdownRoots.set(element, component);
+        element.setAttribute('data-quick-ask-markdown-root', '');
+        component.register(() => {
+          active = false;
+          components.delete(component);
+          if (markdownRoots.get(element) === component) {
+            markdownRoots.delete(element);
+            element.removeAttribute('data-quick-ask-markdown-root');
+          }
+        });
         components.add(component);
         component.load();
         if (!markdownProcessorRegistered) {
@@ -407,7 +434,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         markdownVisuals.set(element, visuals);
         component.register(() => { visuals.dispose(); markdownVisuals.delete(element); });
         await MarkdownRenderer.render(plugin.app, markdown, element, sourcePath ?? "", component);
-        visuals.settled(element);
+        if (active) visuals.settled(element);
       },
       // The host's own fuzzy matcher and highlight helper; the picker does not
       // reinvent Obsidian's ranking.

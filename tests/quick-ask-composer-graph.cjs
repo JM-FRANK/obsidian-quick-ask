@@ -52,17 +52,30 @@ function runtimeDependencies() {
     factory(module, module.exports, id => { throw new Error(`Unexpected dependency external: ${id}`); });
     dependencies[name] = module.exports;
   }
-  return { runtime, dependencies };
+  return { runtime, dependencies, factories };
 }
 
 test('shipped dependency facades expose only the consumed APIs and stay within the size budget', () => {
-  const { runtime, dependencies } = runtimeDependencies();
+  const { runtime, dependencies, factories } = runtimeDependencies();
   const expected = { 'diff': ['createTwoFilesPatch'], 'eventsource-parser': ['createParser'],
-    'zustand/vanilla': ['createStore'], 'tokenx': ['estimateTokenCount'] };
+    'zustand/vanilla': ['createStore'], 'tokenx': ['estimateTokenCount'], '@lezer/markdown': ['parser'] };
   assert.deepEqual(Object.keys(dependencies).sort(), Object.keys(expected).sort());
   for (const [name, exports] of Object.entries(expected)) assert.deepEqual(Object.keys(dependencies[name]), exports);
-  assert.ok(Buffer.byteLength(runtime.quickAskDependencies) < 30000, 'unused package APIs must not return');
+  // Document-image resolution needs the parser without loading the DOM editor.
+  // Keep the original four-dependency budget; bound the parser separately.
+  const parserBytes = Buffer.byteLength(factories['@lezer/markdown'].toString());
+  assert.ok(parserBytes < 90000, 'document link parsing must not bundle unrelated editor APIs');
+  assert.ok(Buffer.byteLength(runtime.quickAskDependencies) - parserBytes < 30000, 'unused package APIs must not return');
   assert.ok(Buffer.byteLength(runtime.composerModule) < 650000, 'generated editor formatting must not inflate the installation');
+});
+
+test('shipped Markdown parser preserves image destinations and literal boundaries', () => {
+  const { dependencies } = runtimeDependencies();
+  const parser = require('@lezer/markdown').parser;
+  for (const text of ['![a](./a%20b.png "title")', '![a][fig]\n\n[fig]: ../a.png',
+    '![[./a.png|100]]', '`![[./a.png]]`\n\n```md\n![a](./a.png)\n```']) {
+    assert.equal(dependencies['@lezer/markdown'].parser.parse(text).toString(), parser.parse(text).toString());
+  }
 });
 
 test('shipped diff and token functions match the pinned source APIs exactly', () => {

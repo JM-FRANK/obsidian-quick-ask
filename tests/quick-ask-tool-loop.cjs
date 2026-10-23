@@ -32,7 +32,7 @@ test('only get-full-file calls are collected from a completed attempt', () => {
 
 test('the accepted tool-name policy has one immutable exported source', () => {
   assert.equal(Object.isFrozen(TOOL_NAMES), true);
-  assert.deepEqual(TOOL_NAMES, ['get-full-file', 'web_search']);
+  assert.deepEqual(TOOL_NAMES, ['get-full-file', 'web_search', 'get-image']);
 });
 
 test('a malformed argument payload becomes an empty object instead of throwing', () => {
@@ -84,14 +84,14 @@ test('a failed read reports the normalized error in the output item', async () =
   assert.equal(question.statuses[0].kind, 'error');
 });
 
-test('the question budget is the configured per-question limit', async () => {
+test('legacy per-question limits are ignored across batches', async () => {
   const { loop } = makeLoop({ files: { 'a.md': 'A', 'b.md': 'B' }, allowlist: ['a.md', 'b.md'], callLimit: 1 });
   const question = loop.beginQuestion({ allowlist: ['a.md', 'b.md'] });
-  assert.equal(loop.remaining(question), 1);
+  assert.equal(loop.remaining, undefined);
   await loop.runBatch(functionCallsFrom([callFor('a.md')]), question);
-  assert.equal(loop.remaining(question), 0);
+
   const { results } = await loop.runBatch(functionCallsFrom([callFor('b.md')]), question);
-  assert.equal(results[0].ok, false, 'the budget is spent');
+  assert.equal(results[0].ok, true, 'legacy total-call settings are ignored');
 });
 
 test('a successful read refreshes the tracker baseline without reviving a removed file', async () => {
@@ -103,12 +103,12 @@ test('a successful read refreshes the tracker baseline without reviving a remove
   assert.deepEqual(applied, [{ path: 'notes/a.md', text: 'alpha' }]);
 });
 
-test('a result that cannot fit reports the context-space error and consumes its call', async () => {
+test('a result that cannot fit reports the context-space error', async () => {
   const { loop } = makeLoop();
   const question = loop.beginQuestion({ allowlist: ['notes/a.md'], callLimit: 3 });
   const { items } = await loop.runBatch(functionCallsFrom([callFor('notes/a.md')]), question, { fitsInContext: () => false });
   assert.equal(items[1].output, '上下文空间不足，无法读取完整文件');
-  assert.equal(loop.remaining(question), 2, 'the rejected attempt consumed exactly one call');
+  assert.equal(loop.remaining, undefined);
 });
 
 test('several calls in one batch are all answered', async () => {
@@ -125,5 +125,5 @@ test('the executor caps concurrency at three even for a wider batch', async () =
   const { loop, executor } = makeLoop({ files: {}, allowlist: [], callLimit: 10 });
   assert.equal(executor.MAX_CONCURRENT_CALLS ?? MAX_CONCURRENT_CALLS, 3);
   const question = loop.beginQuestion({ allowlist: [], callLimit: 10 });
-  assert.equal(loop.remaining(question), 10, 'the configured total may exceed the concurrency cap');
+  assert.equal(question.state.callLimit, undefined);
 });

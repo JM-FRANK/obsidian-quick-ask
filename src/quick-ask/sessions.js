@@ -44,6 +44,7 @@ const KNOWN_RECORD_KINDS = new Set([
   "turn/started",
   "turn/response-created",
   "turn/accepted",
+  "turn/process",
   "turn/tool-started",
   "turn/tool-finished",
   "turn/finished",

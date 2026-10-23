@@ -1,7 +1,8 @@
+const { DEFAULT_TOOL_CONCURRENCY, normalizeToolConcurrency } = require('./tool-scheduler');
 const { normalizeProfiles, applyProfileAction } = require("./profiles");
 const { normalizeSearchSettings } = require("./web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("./i18n");
-const { DEFAULT_CONTEXT_WINDOW_TOKENS, CONNECTION_FIELDS, normalizeProviderProfiles, providerValues, providerPatch } = require('./provider-profiles');
+const { DEFAULT_CONTEXT_WINDOW_TOKENS, CONNECTION_FIELDS, normalizeProviderProfiles, providerValues, providerPatch, activeProvider } = require('./provider-profiles');
 const DISPLAY_FIELDS = {
   fontSize: { default: 14, min: 12, max: 24, step: 1 },
   lineHeight: { default: 1.5, min: 1.2, max: 2, step: 0.1 },
@@ -61,9 +62,6 @@ function quickAskDisplayPage(settings) {
 // The fixed answer reserve, in tokens. It follows pi-agent's reserveTokens
 // default and is deliberately not a setting.
 const ANSWER_RESERVE_TOKENS = 16384;
-const DEFAULT_CALL_LIMIT = 3;
-const MIN_CALL_LIMIT = 1;
-const MAX_CALL_LIMIT = 10;
 const DEFAULT_PRESERVED_COPY_DIRECTORY = "quick-ask-preserved";
 
 function stripTrailingSlashes(value) {
@@ -85,17 +83,13 @@ function defaultQuickAskSettings() {
     systemPrompt: "",
     ...normalizeProfiles(),
     contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    callLimit: DEFAULT_CALL_LIMIT,
+    toolConcurrency: DEFAULT_TOOL_CONCURRENCY,
     preservedCopy: { enabled: false, directory: DEFAULT_PRESERVED_COPY_DIRECTORY },
     ...providerValues(normalizeProviderProfiles()),
   };
 }
 
-function normalizeCallLimit(value) {
-  return Number.isInteger(value) && value >= MIN_CALL_LIMIT && value <= MAX_CALL_LIMIT
-    ? value
-    : DEFAULT_CALL_LIMIT;
-}
+
 
 function normalizeContextWindowTokens(value) {
   if (value === null || value === "" || value === undefined) return null;
@@ -126,7 +120,7 @@ function normalizeQuickAskSettings(saved) {
     contextWindowTokens: Object.hasOwn(saved, "contextWindowTokens")
       ? normalizeContextWindowTokens(saved.contextWindowTokens)
       : defaults.contextWindowTokens,
-    callLimit: normalizeCallLimit(saved.callLimit),
+    toolConcurrency: normalizeToolConcurrency(saved.toolConcurrency),
     preservedCopy: {
       enabled: typeof saved.preservedCopy?.enabled === "boolean" ? saved.preservedCopy.enabled : defaults.preservedCopy.enabled,
       directory: typeof saved.preservedCopy?.directory === "string"
@@ -178,14 +172,16 @@ function validateQuickAskSettings(settings) {
 // affect new sessions only.
 function sessionConfigSnapshot(settings, { createdAt } = {}) {
   const values = normalizeQuickAskSettings(settings);
+  const provider = activeProvider(values);
   return {
+    providerProfileId: provider.id,
+    providerSearchMode: provider.searchMode,
     protocol: values.protocol,
     baseUrl: values.baseUrl,
     model: values.model,
     secretId: values.secretId,
     systemPrompt: values.systemPrompt,
     contextWindowTokens: values.contextWindowTokens,
-    callLimit: values.callLimit,
     language: LANGUAGES.includes(settings?.language) ? settings.language : DEFAULT_LANGUAGE,
     createdAt: createdAt ?? null,
   };
@@ -197,6 +193,10 @@ function sessionConfigSnapshot(settings, { createdAt } = {}) {
 function redactQuickAskSettings(settings) {
   const values = normalizeQuickAskSettings(settings);
   return {
+    ...(typeof settings?.providerProfileId === 'string' ? {
+      providerProfileId: settings.providerProfileId,
+      providerSearchMode: settings.providerSearchMode === 'independent' ? 'independent' : 'mixed',
+    } : {}),
     enable: values.enable,
     keepCachedImages: values.keepCachedImages,
     display: { ...values.display },
@@ -207,7 +207,7 @@ function redactQuickAskSettings(settings) {
     systemPrompt: values.systemPrompt,
     ...normalizeProfiles(values),
     contextWindowTokens: values.contextWindowTokens,
-    callLimit: values.callLimit,
+    toolConcurrency: values.toolConcurrency,
     preservedCopy: { ...values.preservedCopy },
     // The SecretStorage reference name is deliberately kept: the copy must stay
     // usable after an import, and a reference is not a credential. The value it
@@ -225,13 +225,11 @@ module.exports = {
   quickAskDisplayPage,
   ANSWER_RESERVE_TOKENS,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
-  DEFAULT_CALL_LIMIT,
-  MIN_CALL_LIMIT,
-  MAX_CALL_LIMIT,
+  DEFAULT_TOOL_CONCURRENCY,
   DEFAULT_PRESERVED_COPY_DIRECTORY,
   defaultQuickAskSettings,
   normalizeQuickAskSettings,
-  normalizeCallLimit,
+  normalizeToolConcurrency,
   normalizeContextWindowTokens,
   normalizeBaseUrl,
   baseUrlError,
@@ -266,7 +264,7 @@ function applyQuickAskPatch(target, patch) {
     Object.assign(target, catalog, { systemPrompt: current.prompt });
     applied++;
   }
-  for (const field of ["enable", "keepCachedImages", "protocol", "baseUrl", "secretId", "model", "contextWindowTokens", "callLimit"]) {
+  for (const field of ["enable", "keepCachedImages", "protocol", "baseUrl", "secretId", "model", "contextWindowTokens", "toolConcurrency"]) {
     if (Object.hasOwn(patch, field) && target[field] !== normalized[field]) {
       target[field] = normalized[field];
       applied += 1;

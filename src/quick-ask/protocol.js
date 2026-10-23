@@ -26,6 +26,14 @@ const RESPONSE_PROTOCOL = Object.freeze({
   buildRequestBody: responses.buildRequestBody,
   functionTool: tool => tool,
   toolContinuationItems: responses.responsesToolContinuationItems,
+  imageToolResults: (items, results) => items.map(item => {
+    const result = results.get(item);
+    if (!result) return item;
+    return { ...item, output: result.error ?? [
+      { type: 'input_text', text: item.output ?? '' },
+      ...result.images.map(image => ({ type: 'input_image', image_url: image.url })),
+    ] };
+  }),
 });
 const CHAT_PROTOCOL = Object.freeze({
   ...chat.chatWire,
@@ -43,6 +51,24 @@ const CHAT_PROTOCOL = Object.freeze({
   ]),
   buildRequestBody: chat.buildRequestBody, functionTool: chat.functionTool,
   toolContinuationItems: chat.toolContinuationItems,
+  imageToolResults: (items, results) => {
+    const output = [];
+    let pending = [];
+    const flush = () => {
+      if (!pending.length) return;
+      output.push(CHAT_PROTOCOL.imageMessage(`Images requested via get-image: ${JSON.stringify(pending.map(image => image.path))}`, pending));
+      pending = [];
+    };
+    for (const item of items) {
+      // All outputs of one assistant tool batch must precede its image message.
+      if (item.role !== 'tool') flush();
+      const result = results.get(item);
+      output.push(result?.error ? { ...item, content: result.error } : item);
+      if (result?.images) pending.push(...result.images);
+    }
+    flush();
+    return output;
+  },
 });
 function protocolFor(config) {
   const id = config?.protocol ?? "responses";

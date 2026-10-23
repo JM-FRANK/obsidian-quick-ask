@@ -81,6 +81,15 @@ function providerSettings(host, SecretComponent) {
         setting.setErrorMessage(profile().secretId ? '' : tr('settings.quickAsk.validation.required'));
       });
     } },
+    { name: tr('search.executionMode'), desc: tr('search.executionModeHelp'), render: setting => {
+      let input;
+      setting.addDropdown(control => {
+        input = control;
+        control.addOption('mixed', tr('search.mixed')).addOption('independent', tr('search.independent'));
+        control.onChange(searchMode => { void run({ type: 'search-mode', id: profile().id, searchMode }); });
+      });
+      watch(setting, () => input.setValue(profile().searchMode));
+    } },
   ];
   const modelItems = [
     { name: tr('providers.models'), desc: tr('providers.discoveryHelp'), render: setting => {

@@ -1,6 +1,7 @@
 const { citedAnswer } = require("./web-search");
 const { isMessage, messageText, messageReasoning } = require("./protocol");
 const { selectionSnapshots } = require("./history-selections");
+const { toolHistory } = require('./tool-history');
 // Reconstruct visible turns without losing their original Markdown or moving
 // readable reasoning into a separate, later assistant message.
 function questionFromInput(text) {
@@ -9,12 +10,14 @@ function questionFromInput(text) {
   return trimmed || null;
 }
 
-function conversationFromRecords(records) {
+function legacyConversationFromRecords(records) {
   const messages = [];
   let assistant = null;
   let nativeReasoning = "";
   let selections = [];
-  for (const record of records ?? []) {
+  const tools = new Map(toolHistory(records ?? []).map(group => [group.index, group]));
+  for (const [index, record] of (records ?? []).entries()) {
+    if (tools.has(index)) messages.push(tools.get(index));
     const payload = record.payload ?? {};
     if (record.kind === "turn/started") {
       assistant = null; nativeReasoning = "";
@@ -60,6 +63,69 @@ function conversationFromRecords(records) {
     });
   }
   return messages;
+}
+
+// New and old turns can share a log. Only explicitly versioned turns use the
+// ordered display projection; old records keep their original interpretation.
+function conversationFromRecords(records = []) {
+  if (!(records ?? []).some(record => record.kind === "turn/started" && record.payload?.processVersion === 1))
+    return legacyConversationFromRecords(records);
+  const messages = [];
+  let chunk = [];
+  const flush = () => {
+    if (!chunk.length) return;
+    const start = chunk.find(record => record.kind === 'turn/started');
+    messages.push(...(start?.payload?.processVersion === 1 ? processConversation(chunk) : legacyConversationFromRecords(chunk)));
+    chunk = [];
+  };
+  for (const record of records ?? []) {
+    if (record.kind === 'turn/started') flush();
+    chunk.push(record);
+    if (record.kind === "turn/finished") flush();
+  }
+  flush(); return messages;
+}
+
+function processConversation(records) {
+  const { restoreProcess, processParts } = require('./turn-process');
+  const base = legacyConversationFromRecords(records);
+  const start = records.find(record => record.kind === 'turn/started').payload;
+  const finished = records.findLast(record => record.kind === 'turn/finished')?.payload;
+  const groups = toolHistory(records);
+  const byGroup = new Map(groups.map(group => [group.id, group]));
+  const parts = processParts(restoreProcess(records.filter(record => record.payload?.turnId === start.turnId)), finished?.text);
+  const steps = parts.steps.map(step => step.kind !== 'tool' ? step : {
+    ...step, call: byGroup.get(step.groupId)?.calls.find(call => call.callId === step.callId),
+  });
+  // Missing optional metadata must not hide readable reasoning or tool calls.
+  const recordedReasoning = steps.filter(step => step.kind === 'reasoning').map(step => step.text).join('');
+  const reasoning = finished?.reasoning || base.filter(entry => entry.role === 'assistant').map(entry => entry.reasoning ?? '').join('');
+  if (reasoning && reasoning !== recordedReasoning) {
+    const text = reasoning.startsWith(recordedReasoning) ? reasoning.slice(recordedReasoning.length) : reasoning;
+    steps.push({ kind: 'reasoning', id: 'unsegmented-reasoning', text, unsegmented: true });
+  }
+  const knownCalls = new Set(steps.filter(step => step.kind === 'tool').map(step => `${step.groupId}\n${step.callId}`));
+  for (const group of groups) for (const call of group.calls) {
+    if (!knownCalls.has(`${group.id}\n${call.callId}`)) steps.push({ kind: 'tool', id: `unsegmented:${group.id}:${call.callId}`, groupId: group.id, callId: call.callId, call, unsegmented: true });
+  }
+  const answer = base.findLast(entry => entry.role === 'assistant');
+  const firstStep = records.findIndex(record => ['turn/process', 'turn/tool-started', 'turn/tool-finished'].includes(record.kind));
+  const checkpoints = records.flatMap((record, index) => record.kind === 'compaction/checkpoint' ? [index] : []);
+  const result = [], afterProcess = [];
+  for (const entry of base) {
+    if (entry.role === 'assistant' || entry.kind === 'tools' || entry.kind === 'interrupted') continue;
+    const after = entry.kind === 'compaction' && checkpoints.shift() > firstStep && firstStep >= 0;
+    (after ? afterProcess : result).push(entry);
+  }
+  if (steps.length) result.push({ kind: 'process', id: start.turnId, turnId: start.turnId,
+    status: finished?.state ?? 'interrupted', steps });
+  result.push(...afterProcess);
+  if (answer?.text) {
+    const { reasoning: _reasoning, ...visible } = answer;
+    result.push({ ...visible, turnId: start.turnId });
+  } else if (finished && parts.answer) result.push({ role: 'assistant', text: parts.answer, turnId: start.turnId });
+  result.push(...base.filter(entry => entry.kind === 'interrupted'));
+  return result;
 }
 
 module.exports = { conversationFromRecords, questionFromInput };

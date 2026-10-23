@@ -2,6 +2,7 @@
 // pure data; credentials are represented exclusively by SecretStorage names.
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
 const DEFAULT_PROVIDER_ID = 'default';
+const normalizeSearchMode = value => value === 'independent' ? 'independent' : 'mixed';
 const CONNECTION_FIELDS = ['baseUrl', 'secretId', 'protocol', 'model', 'contextWindowTokens'];
 const cleanUrl = value => typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
 const capacity = value => value == null || value === '' ? null : Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
@@ -30,13 +31,13 @@ function normalizeProviderProfiles(saved = {}, legacy = saved) {
     }
     if (!models.length) models.push(modelConfig());
     providerProfiles.push({ id: source.id, name: typeof source.name === 'string' && source.name.trim() ? source.name.trim() : null,
-      baseUrl: cleanUrl(source.baseUrl), secretId: typeof source.secretId === 'string' ? source.secretId : '', models,
+      searchMode: normalizeSearchMode(source.searchMode), baseUrl: cleanUrl(source.baseUrl), secretId: typeof source.secretId === 'string' ? source.secretId : '', models,
       selectedModelId: models.some(model => model.id === source.selectedModelId) ? source.selectedModelId : models[0].id });
   }
   if (!providerProfiles.length) {
     const model = modelConfig({ id: legacy.model ?? '', protocol: legacy.protocol ?? 'responses',
       contextWindowTokens: Object.hasOwn(legacy, 'contextWindowTokens') ? legacy.contextWindowTokens : DEFAULT_CONTEXT_WINDOW_TOKENS });
-    providerProfiles.push({ id: DEFAULT_PROVIDER_ID, name: null, baseUrl: cleanUrl(legacy.baseUrl), secretId: typeof legacy.secretId === 'string' ? legacy.secretId : '', models: [model], selectedModelId: model.id });
+    providerProfiles.push({ id: DEFAULT_PROVIDER_ID, name: null, searchMode: normalizeSearchMode(legacy.providerSearchMode), baseUrl: cleanUrl(legacy.baseUrl), secretId: typeof legacy.secretId === 'string' ? legacy.secretId : '', models: [model], selectedModelId: model.id });
   }
   const activeProviderProfileId = providerProfiles.some(profile => profile.id === saved.activeProviderProfileId)
     ? saved.activeProviderProfileId : providerProfiles[0].id;
@@ -64,7 +65,7 @@ function applyProviderAction(saved, action) {
       && (item.name ? [item.name] : ['Default connection', '默认连接']).some(label => label.toLocaleLowerCase() === name.toLocaleLowerCase()))) throw new Error('providers.invalidName');
     if (action.type === 'add') {
       if (!action.id || profile) throw new Error('providers.missing');
-      profiles.push({ id: action.id, name, baseUrl: '', secretId: '', models: [modelConfig()], selectedModelId: '' });
+      profiles.push({ id: action.id, name, searchMode: 'mixed', baseUrl: '', secretId: '', models: [modelConfig()], selectedModelId: '' });
       catalog.activeProviderProfileId = action.id;
     } else {
       if (!profile) throw new Error('providers.missing');
@@ -80,6 +81,8 @@ function applyProviderAction(saved, action) {
     } else if (action.type === 'connection') {
       if (Object.hasOwn(action, 'baseUrl')) profile.baseUrl = cleanUrl(action.baseUrl);
       if (Object.hasOwn(action, 'secretId')) profile.secretId = String(action.secretId ?? '');
+    } else if (action.type === 'search-mode') {
+      profile.searchMode = normalizeSearchMode(action.searchMode);
     } else if (action.type === 'model-select') {
       if (!profile.models.some(model => model.id === action.modelId)) throw new Error('providers.modelMissing');
       profile.selectedModelId = action.modelId;
@@ -129,4 +132,16 @@ function providerPatch(saved, patch) {
   return providerValues(catalog);
 }
 
-module.exports = { DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_PROVIDER_ID, CONNECTION_FIELDS, normalizeProviderProfiles, activeProvider, selectedModel, providerValues, applyProviderAction, providerPatch };
+// Modes are live execution preferences. Never adopt the active profile's mode
+// for a different session connection, or match an ambiguous legacy connection.
+function providerSearchMode(config, saved = {}) {
+  // The view reads the next route before load has attached a session header.
+  if (config == null) return 'mixed';
+  const profiles = normalizeProviderProfiles(saved ?? {}).providerProfiles;
+  const sameConnection = profile => profile.baseUrl === cleanUrl(config.baseUrl) && profile.secretId === (config.secretId ?? '');
+  const matches = config.providerProfileId ? profiles.filter(profile => profile.id === config.providerProfileId && sameConnection(profile))
+    : profiles.filter(sameConnection);
+  return matches.length === 1 ? matches[0].searchMode : normalizeSearchMode(config.providerSearchMode);
+}
+
+module.exports = { normalizeSearchMode, providerSearchMode, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_PROVIDER_ID, CONNECTION_FIELDS, normalizeProviderProfiles, activeProvider, selectedModel, providerValues, applyProviderAction, providerPatch };

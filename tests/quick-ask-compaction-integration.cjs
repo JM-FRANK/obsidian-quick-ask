@@ -139,6 +139,41 @@ for (const mode of ['official', 'fallback', 'chat-completions']) {
   });
 }
 
+for (const mode of ['official', 'fallback', 'chat-completions']) {
+  test(`${mode}: compaction materializes tool image references without persisting bytes, then removes the old image`, async () => {
+    const protocol = mode === 'chat-completions' ? mode : 'responses';
+    const { protocolFor, isToolOutput } = require('../src/quick-ask/protocol');
+    const native = protocolFor({ protocol });
+    const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    let reads = 0;
+    const fixture = makeFixture({ settings: { protocol }, official: mode === 'official' ? 'supported' : 'unsupported',
+      imageSource: { stat: async () => ({ size: bytes.length }), readBinary: async () => { reads++; return bytes; } } });
+    const id = await start(fixture);
+    await fixture.sessionStore.append(id, 'item/input', { items: [native.userMessage('Old image context '.repeat(1000))], images: ['fig.png'] });
+    if (protocol === 'chat-completions') await fixture.sessionStore.append(id, 'item/output', { tool: true, item: {
+      role: 'assistant', content: null, tool_calls: [{ id: 'img', type: 'function', function: { name: 'get-image', arguments: '{"path":"fig.png"}' } }],
+    } });
+    const items = native.toolContinuationItems({ calls: [{ callId: 'img', name: 'get-image', arguments: '{"path":"fig.png"}' }], outputs: ['Image read: fig.png.'] });
+    for (const item of items) await fixture.sessionStore.append(id, 'item/output', { item, tool: true,
+      ...(isToolOutput(item) ? mode === 'fallback' ? { images: ['fig.png'] } : { imagePaths: ['fig.png'] } : {}) });
+    await fixture.sessionStore.append(id, 'item/output', { item: native.assistantMessage('Old answer') });
+    await fixture.sessionStore.append(id, 'item/input', { items: [native.userMessage('Recent question')] });
+    await fixture.sessionStore.append(id, 'item/output', { item: native.assistantMessage('Recent answer') });
+    await fixture.conversation.load(id);
+    const before = JSON.stringify(fixture.sessionStore.records.get(id));
+    assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
+    const body = mode === 'official' ? JSON.parse(fixture.compactRequests.at(-1).body)
+      : fixture.requests.map(request => JSON.parse(request.options.body)).find(request => request.tool_choice === 'none');
+    assert.match(JSON.stringify(body), /data:image/);
+    assert.equal(JSON.stringify(fixture.sessionStore.records.get(id)).includes('data:image'), false);
+    assert.equal(before.includes('data:image'), false);
+    const priorReads = reads;
+    assert.equal((await fixture.conversation.send(id, 'After compaction')).status, 'complete');
+    assert.equal(fixture.requests.at(-1).options.body.includes('data:image'), false);
+    assert.equal(reads, priorReads, 'shadowed image references do not read source files');
+  });
+}
+
 test('a configured capacity is validated against the whole prospective request', async () => {
   const fixture = makeFixture();
   const id = await start(fixture);
@@ -832,7 +867,7 @@ for (const mode of ['official', 'fallback', 'chat-completions']) {
     const read = await loop.runBatch([{ id: 'f1', callId: 'f1', name: 'get-full-file', arguments: { path: 'z.md' } }], question);
     assert.equal(read.results[0].output, files.get('z.md'));
     assert.equal(read.results[0].ok, true);
-    assert.equal(loop.remaining(question), 2, 'the default three-call limit is unchanged');
+    assert.equal(loop.remaining, undefined, 'compaction does not reinstate a total-call limit');
   });
 }
 

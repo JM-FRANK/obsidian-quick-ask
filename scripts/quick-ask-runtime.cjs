@@ -21,6 +21,7 @@ function bundle(options) {
 // An ESM facade exposes only the functions used by the feature, allowing the
 // bundler to discard unrelated package APIs before converting to CommonJS.
 const dependencyExports = [
+  ["@lezer/markdown", ["parser"]],
   ["eventsource-parser", ["createParser"]],
   ["diff", ["createTwoFilesPatch"]],
   ["zustand/vanilla", ["createStore"]],

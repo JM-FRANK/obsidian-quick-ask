@@ -245,6 +245,6 @@ test('CC rejection or cancellation before the first frame has no fabricated part
 test('CPA CC search emits only google_search with no mixed functions or unrelated search options',()=>{
  const {buildRequestBody}=require('../src/quick-ask/chat-completions');
  const body=buildRequestBody({model:'gemini-3-flash',instructions:'system',input:[{role:'user',content:'Question'}],tools:[{type:'function',function:{name:'get-full-file'}}],serverSearch:{provider:'google',chatSearch:'google-search'}});
- assert.deepEqual(body.tools,[{google_search:{}}]);assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,undefined);assert.equal(body.parallel_tool_calls,undefined);
+ assert.deepEqual(body.tools,[{type:'function',function:{name:'get-full-file'}},{google_search:{}}]);assert.equal(body.web_search_options,undefined);assert.equal(body.tool_choice,'auto');assert.equal(body.parallel_tool_calls,true);
  assert.equal(body.messages.at(-1).content,'Question');
 });
