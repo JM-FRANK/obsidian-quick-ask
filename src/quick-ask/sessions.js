@@ -12,13 +12,15 @@ const { sessionConfigSnapshot } = require("./settings");
 // as Responses items. No existing log is rewritten during upgrade.
 const CURRENT_SCHEMA_VERSION = 1;
 const CHAT_SCHEMA_VERSION = 2;
+const EDIT_SCHEMA_OFFSET = 2;
 function sessionSchemaVersion(config) {
   const protocol = config?.protocol ?? "responses";
   return protocol === "responses" ? CURRENT_SCHEMA_VERSION : protocol === "chat-completions" ? CHAT_SCHEMA_VERSION : null;
 }
 function isSupportedSession(parsed) {
+  if (!parsed?.header) return false;
   const expected = sessionSchemaVersion(parsed.header?.config);
-  return !parsed.damaged && expected !== null && (parsed.version ?? parsed.header?.schemaVersion ?? 1) === expected;
+  return !parsed.damaged && expected !== null && [expected, expected + EDIT_SCHEMA_OFFSET].includes(parsed.version ?? parsed.header?.schemaVersion ?? 1);
 }
 const INDEX_KIND = "quick-ask-index";
 const SESSIONS_DIRECTORY = "quick-ask/sessions";
@@ -54,6 +56,8 @@ const KNOWN_RECORD_KINDS = new Set([
   "compaction/end",
   "session/renamed",
   "session/search-state",
+  "session/configured",
+  "session/withdrawn",
   "search/result",
 ]);
 
@@ -352,7 +356,7 @@ class QuickAskSessionStore {
       const parsed = await this.readLog(id);
       if (parsed.missing) throw new Error(`Quick Ask session ${id} does not exist`);
       if (parsed.damaged) throw new Error(`Quick Ask session ${id} is damaged and cannot be appended to`);
-      if (parsed.version > CHAT_SCHEMA_VERSION) {
+      if (parsed.version > CHAT_SCHEMA_VERSION + EDIT_SCHEMA_OFFSET) {
         throw new Error(`Quick Ask session ${id} was created by a newer Scholar Workbench`);
       }
       if (!isSupportedSession(parsed)) {
@@ -368,6 +372,30 @@ class QuickAskSessionStore {
       const indexChanged = await this.touch(id, { at: timestamp, kind, payload,
         deferIndex: parsed.running && kind !== "turn/started" && kind !== "turn/finished" && kind !== "session/renamed" });
       await this.notifyCommitted(id, { indexChanged });
+      return record;
+    });
+  }
+
+  // First edit upgrades the format together with its event. An old reader
+  // rejects the new header instead of replaying withdrawn or misconfigured data.
+  async commitEdit(id, kind, payload, { nextSeq } = {}) {
+    return this.enqueue(id, async () => {
+      const parsed = await this.readLog(id);
+      if (!isSupportedSession(parsed) || parsed.running || (nextSeq !== undefined && parsed.nextSeq !== nextSeq))
+        throw new Error("Session changed; reload before editing");
+      const record = { seq: parsed.nextSeq, at: new Date(this.scheduler?.now?.() ?? Date.now()).toISOString(), kind, payload };
+      const header = { ...parsed.header, schemaVersion: sessionSchemaVersion(parsed.header.config) + EDIT_SCHEMA_OFFSET };
+      const path = this.adapterPathFor(id), adapter = this.pluginData.dataAdapter;
+      // Obsidian rename refuses an existing destination. Its public atomic
+      // read-modify-save primitive commits the upgraded header and event together.
+      await adapter.process(path, current => {
+        const before = parseLog(current);
+        if (!isSupportedSession(before) || before.running || before.validText !== parsed.validText)
+          throw new Error("Session changed; reload before editing");
+        return [header, ...parsed.records, record].map(value => JSON.stringify(value)).join("\n") + "\n";
+      });
+      try { await this.touch(id, { at: record.at, kind, payload }); } catch (error) { this.onError(error); }
+      await this.notifyCommitted(id);
       return record;
     });
   }

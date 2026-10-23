@@ -1,3 +1,4 @@
+const { effectiveRecords } = require("./session-editing");
 const { citedAnswer } = require("./web-search");
 const { isMessage, messageText, messageReasoning } = require("./protocol");
 const { selectionSnapshots } = require("./history-selections");
@@ -15,12 +16,13 @@ function legacyConversationFromRecords(records) {
   let assistant = null;
   let nativeReasoning = "";
   let selections = [];
+  let turnId = null, config = null, editable = false;
   const tools = new Map(toolHistory(records ?? []).map(group => [group.index, group]));
   for (const [index, record] of (records ?? []).entries()) {
     if (tools.has(index)) messages.push(tools.get(index));
     const payload = record.payload ?? {};
     if (record.kind === "turn/started") {
-      assistant = null; nativeReasoning = "";
+      assistant = null; nativeReasoning = ""; turnId = payload.turnId; config = payload.config ?? null; editable = Boolean(payload.editDraft);
       selections = selectionSnapshots(payload.additions);
     }
     if (record.kind === "item/output") nativeReasoning += messageReasoning(payload.item);
@@ -34,7 +36,7 @@ function legacyConversationFromRecords(records) {
         const question = questionFromInput(text);
         const images = position === items.length - 1 ? payload.images : null;
         if (question !== null || images?.length || selections.length) {
-          messages.push({ role: "user", text: question ?? "", ...(images?.length ? { images } : {}),
+          messages.push({ role: "user", ...(editable && turnId ? { turnId } : {}), text: question ?? "", ...(images?.length ? { images } : {}),
             ...(selections.length ? { selections } : {}) });
           selections = [];
         }
@@ -50,6 +52,7 @@ function legacyConversationFromRecords(records) {
         assistant = { role: "assistant", text: payload.text ?? "" };
         messages.push(assistant);
       }
+      if (assistant && editable) { assistant.turnId = turnId; if ((payload.config ?? config)?.model) assistant.model = (payload.config ?? config).model; }
       if (assistant && payload.displayText && payload.displayText !== assistant.text) assistant.displayText = payload.displayText;
       if (assistant && (payload.reasoning || nativeReasoning)) assistant.reasoning = payload.reasoning || nativeReasoning;
       if (assistant && payload.sources?.length) assistant.sources = payload.sources;
@@ -68,6 +71,7 @@ function legacyConversationFromRecords(records) {
 // New and old turns can share a log. Only explicitly versioned turns use the
 // ordered display projection; old records keep their original interpretation.
 function conversationFromRecords(records = []) {
+  records = effectiveRecords(records);
   if (!(records ?? []).some(record => record.kind === "turn/started" && record.payload?.processVersion === 1))
     return legacyConversationFromRecords(records);
   const messages = [];

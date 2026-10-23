@@ -139,6 +139,8 @@ test('a session snapshots endpoint, model, credential reference, prompt, and cap
   };
   const snapshot = sessionConfigSnapshot(settings, { createdAt: '2026-09-12T00:00:00.000Z' });
   assert.deepEqual(snapshot, {
+    systemProfileId: 'default',
+    systemProfileName: null,
     providerProfileId: 'default',
     providerSearchMode: 'mixed',
     protocol: 'responses',

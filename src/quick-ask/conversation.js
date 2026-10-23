@@ -1,3 +1,4 @@
+const { effectiveRecords, latestTurn, recoverableDraft, restoredDraft, sessionUsage: replaySessionUsage, changedConnection, portableItems, compactionUsage, legacyRoleProfile } = require("./session-editing");
 const { providerSearchMode } = require("./provider-profiles");
 const { runProviderSearch, mixedSearchErrorHint } = require("./provider-search");
 const { PROCESS_VERSION, createTurnProcess, restoreProcess } = require("./turn-process");
@@ -108,12 +109,12 @@ function createConversation(options) {
   }
   function nextSearchRoute(sessionId) {
     const state = stateFor(sessionId);
-    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
+    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), { ...state.config, providerSearchMode: (state.config?.configurationVersion ? state.config.providerSearchMode : providerSearchMode(state.config, getSettings()?.quickAsk)) });
   }
   function validateSearchForSend(sessionId, enabled = searchEnabled(sessionId)) {
     const state = stateFor(sessionId);
     const settings = normalizeSearchSettings(getSettings()?.quickAsk?.webSearch);
-    const route = searchRoute(enabled, settings, { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
+    const route = searchRoute(enabled, settings, { ...state.config, providerSearchMode: (state.config?.configurationVersion ? state.config.providerSearchMode : providerSearchMode(state.config, getSettings()?.quickAsk)) });
     const errors = {};
     if (route.kind === "invalid") errors[route.error] = true;
     if (["independent", "provider-api"].includes(route.kind) && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
@@ -158,9 +159,11 @@ function createConversation(options) {
   }
 
   // Rebuild in-memory state by replaying the durable log.
-  async function load(sessionId, { onParsed = null } = {}) {
-    const parsed = await sessionStore.readLog(sessionId);
+  async function load(sessionId, { onParsed = null, editing = false } = {}) {
+    const raw = await sessionStore.readLog(sessionId);
+    const parsed = { ...raw, records: effectiveRecords(raw.records) };
     const state = stateFor(sessionId);
+    if (state.editing && !editing) throw new Error("Session is being edited");
     if (parsed.missing) throw new Error(`Quick Ask session ${sessionId} does not exist`);
     if (state.activeController || state.turn?.controller) {
       if (onParsed) await onParsed(parsed);
@@ -196,17 +199,25 @@ function createConversation(options) {
     for (const record of parsed.records ?? []) {
       applyRecord(state, record);
     }
+    state.roleDisplayProfile = legacyRoleProfile(state.config, getSettings()?.quickAsk);
     if (state.turn?.processVersion === PROCESS_VERSION) {
       const records = (parsed.records ?? []).filter(record => record.payload?.turnId === state.turn.turnId);
       state.turn.process = createTurnProcess(restoreProcess(records));
     }
+    state.sessionUsage = replaySessionUsage(raw.records ?? []);
+    state.restoredDraft = restoredDraft(raw.records ?? []);
+    state.editableTurn = latestTurn(raw.records ?? []);
     state.toolGroups = toolHistory(parsed.records ?? []);
     if (draftSearch !== undefined) state.searchEnabled = draftSearch;
     if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
+    // A replay can happen after a configuration edit, without view activation.
+    // Reconcile on the next send even if a modify event preceded that replay.
+    for (const file of trackerFor(sessionId).trackedFiles?.() ?? []) trackerFor(sessionId).modifiedFile?.(file.path);
     // Replay must never contact a provider, even near capacity. Price only the
     // restored active generation after the tracked files have been restored.
     priceLocalRequest(state, { question: "", additions: [] });
+    state.reloadRequired = false;
     return { state, parsed };
   }
 
@@ -214,6 +225,27 @@ function createConversation(options) {
     state.contextProjection.sourceRecord(record);
     const payload = record.payload ?? {};
     switch (record.kind) {
+      case "session/configured":
+        if (payload.portable) {
+          const originals = [...state.items];
+          const migrated = state.contextProjection.items(originals);
+          state.items = portableItems(migrated, state.config.protocol, (_from, to, index) => {
+            state.imageToolResults.copy(originals[index], to);
+          });
+          state.compactedSurface = null;
+          state.compactedItems = [];
+        }
+        state.config = { ...payload.config };
+        if (payload.portable) {
+          state.nonStreaming = false;
+          state.inputTokensUnsupported = false;
+          state.officialUnsupported = false;
+          state.overflowRecoveryDone = false;
+        }
+        state.requestSearch = null;
+        state.requestEffort = null;
+        state.occupancyAnchor = null;
+        break;
       case "session/search-state":
         state.searchEnabled = payload.enabled === true;
         break;
@@ -257,6 +289,8 @@ function createConversation(options) {
         state.turn = {
           turnId: payload.turnId,
           processVersion: payload.processVersion,
+          config: payload.config ?? { ...state.config },
+          editDraft: payload.editDraft,
           question: payload.question ?? "",
           additions: payload.additions ?? [],
           imagePaths: payload.images ?? [],
@@ -506,7 +540,7 @@ function createConversation(options) {
   async function compactNow(sessionId) {
     if (!isEnabled()) return { status: "disabled" };
     const state = stateFor(sessionId);
-    if (state.preparing || state.turn?.status === "running" || runningTurns() >= MAX_CONCURRENT_TURNS) return { status: "busy" };
+    if (state.editing || state.preparing || state.turn?.status === "running" || runningTurns() >= MAX_CONCURRENT_TURNS) return { status: "busy" };
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };
     const controller = createAbortController(environment.network);
@@ -591,6 +625,7 @@ function createConversation(options) {
         pushProjection(state, { kind: "compaction", status: "failed", reason: "no-shrink" });
         return committed;
       }
+      if (result.usage) state.sessionUsage.addTurn(compactionUsage(result.usage));
       applyCompactedSurface(state, committed.checkpoint, retained);
       pushProjection(state, {
         kind: "compaction", status: "committed", reason, usage: result.usage,
@@ -616,6 +651,7 @@ function createConversation(options) {
       pushProjection(state, { kind: "compaction", status: "failed", reason: "no-shrink" });
       return committed;
     }
+    if (summary.usage) state.sessionUsage.addTurn(compactionUsage(summary.usage));
     applyCompactedSurface(state, committed.checkpoint, retained);
     pushProjection(state, {
       kind: "compaction", status: "committed", reason,
@@ -716,11 +752,12 @@ function createConversation(options) {
   }
 
   // One user turn: durable pending state, then the streamed attempt.
-  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION, images = [] } = {}) {
+  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION, images = [], editDraft = null } = {}) {
     const state = stateFor(sessionId);
     // All asynchronous phases resolve only their owning session's tracker.
     if (!isEnabled()) return { status: "disabled" };
-    if (state.preparing || (state.turn && state.turn.status === "running")) {
+    if (state.reloadRequired) return { status: "failed", accepted: false, error: { code: "SESSION_RELOAD", message: "Reload this conversation before sending." } };
+    if (state.editing || state.preparing || (state.turn && state.turn.status === "running")) {
       return { status: "busy", error: normalizeError({ kind: "protocol", message: "This session already has a running turn" }) };
     }
     if (runningTurns() >= MAX_CONCURRENT_TURNS) {
@@ -780,10 +817,10 @@ function createConversation(options) {
       state.usage = createTurnUsage();
       state.usageSamples = [];
       state.pendingMutations = stagedAdditions;
-      const turn = { turnId, processVersion: PROCESS_VERSION, process: createTurnProcess(), question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
+      const turn = { turnId, config: { ...state.config }, editDraft, processVersion: PROCESS_VERSION, process: createTurnProcess(), question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
       state.contextProjection.beginTurn(stagedAdditions, rendererVersion);
-      await sessionStore.append(sessionId, "turn/started", { turnId, processVersion: PROCESS_VERSION, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, searchExecution: selectedSearch.kind === 'provider-search' ? 'independent' : 'mixed', nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
+      state.editableTurn = await sessionStore.append(sessionId, "turn/started", { turnId, config: { ...state.config }, ...(recoverableDraft(editDraft) ? { editDraft } : {}), processVersion: PROCESS_VERSION, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, searchExecution: selectedSearch.kind === 'provider-search' ? 'independent' : 'mixed', nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
       // Read the current toggle here so a manual change made during preflight
       // cannot be overwritten by consuming this question's one-shot permission.
       if ((state.searchRevision ?? 0) === searchRevision) {
@@ -1183,6 +1220,7 @@ function createConversation(options) {
     if (!turn.accepted) trackerFor(state.sessionId).rejectTurn();
     await sessionStore.append(state.sessionId, "turn/finished", {
       turnId: turn.turnId,
+      config: turn.config ?? state.config,
       state: status,
       usageSamples: state.usageSamples ?? [],
       occupancyAnchor: state.occupancyAnchor,
@@ -1282,6 +1320,10 @@ function createConversation(options) {
     if (!state) return null;
     return {
       config: state.config ?? null,
+      roleDisplayProfile: state.roleDisplayProfile ?? null,
+      editableTurn: state.editableTurn ?? null,
+      restoredDraft: state.restoredDraft ?? null,
+      turnConfig: state.turn?.config ?? state.config,
       status: state.preparing ? "running" : state.turn?.status ?? "idle",
       text: state.turn?.text ?? "",
       reasoning: state.turn?.reasoning ?? "",
@@ -1306,6 +1348,53 @@ function createConversation(options) {
     };
   }
 
+  function canEdit(sessionId) {
+    const state = stateFor(sessionId);
+    return isEnabled() && Boolean(state.config) && !state.reloadRequired && !state.editing && !state.preparing &&
+      !state.activeController && !state.manualCompacting && state.turn?.status !== "running";
+  }
+
+  async function editSession(sessionId, operation) {
+    if (!canEdit(sessionId)) return { status: "busy" };
+    const state = stateFor(sessionId);
+    state.editing = true;
+    let committed = false;
+    try {
+      const { parsed } = await load(sessionId, { editing: true });
+      if (!isSupportedSession(parsed) || parsed.running) throw new Error("Session unavailable");
+      const action = operation(parsed, state);
+      await sessionStore.commitEdit(sessionId, action.kind, action.payload, { nextSeq: parsed.nextSeq });
+      committed = true;
+      await load(sessionId, { editing: true });
+      pushProjection(state, { kind: "session-edited", action: action.kind });
+      return { status: "committed", draft: action.payload.draft ?? null };
+    } catch (error) {
+      if (committed) state.reloadRequired = true;
+      return { status: "failed", error: { code: committed ? "SESSION_RELOAD" : error.message === "HISTORY_INCOMPATIBLE" ? "HISTORY_INCOMPATIBLE" : "SESSION_EDIT" } };
+    } finally { state.editing = false; }
+  }
+
+  async function configure(sessionId, patch) {
+    return editSession(sessionId, (_parsed, state) => {
+      const config = { ...state.config, ...patch, configurationVersion: (state.config.configurationVersion ?? 0) + 1 };
+      if (config.protocol !== state.config.protocol) throw new Error("HISTORY_INCOMPATIBLE");
+      const portable = changedConnection(state.config, config);
+      if (portable) portableItems(state.contextProjection.items(state.items), config.protocol);
+      const validation = validateQuickAskSettings(normalizeQuickAskSettings(config));
+      if (Object.hasOwn(patch, "model") && (!validation.valid || !environment.secrets.resolve(config.secretId))) throw new Error("Invalid connection");
+      return { kind: "session/configured", payload: { config, portable } };
+    });
+  }
+
+  async function withdraw(sessionId, { hasDraft = false } = {}) {
+    if (hasDraft) return { status: "draft" };
+    return editSession(sessionId, parsed => {
+      const turn = latestTurn(parsed.records);
+      if (!turn || !recoverableDraft(turn.payload?.editDraft)) throw new Error("Original draft unavailable");
+      return { kind: "session/withdrawn", payload: { turnId: turn.payload.turnId, draft: turn.payload.editDraft } };
+    });
+  }
+
   // Permanently switch this session from server-side chaining to local replay.
   function applyStateFallback(sessionId) {
     const state = stateFor(sessionId);
@@ -1314,6 +1403,7 @@ function createConversation(options) {
   }
 
   return {
+    canEdit, configure, withdraw,
     refreshToolConcurrency: () => toolExecutor.refreshConcurrency?.(),
     suspend() {
       for (const store of sessionStores.values()) {

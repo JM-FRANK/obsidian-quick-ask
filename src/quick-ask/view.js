@@ -1,9 +1,10 @@
+const { modelChoices, selectionLabel, recoverableDraft, inheritSessionRole, hasPendingDraft } = require("./session-editing");
 const { imageMime, imagePaths, imageError, IMAGE_MAX_COUNT } = require("./images");
 const { appendImageDraft, imageDraftPaths } = require("./image-drafts");
 const { renderImages } = require("./image-ui");
-const { activeProfile, profileName } = require("./profiles");
+const { activeProfile, profileName, normalizeProfiles } = require("./profiles");
 const { RENDERER_VERSION } = require("./prompt-renderer");
-const { REASONING_LEVELS, nextReasoningEffort } = require("./reasoning");
+const { REASONING_LEVELS } = require("./reasoning");
 const { safeSourceUrl } = require("./web-search");
 const { sessionNavigation, createSessionActionQueue, adoptUnassignedDraft } = require("./session-navigation");
 const { prepareSubmission, recoverSubmittedDraft } = require("./submission-state");
@@ -123,6 +124,8 @@ class QuickAskView {
     if (this.roots.pending) this.ui.clear(this.roots.pending);
     if (this.roots.history) this.ui.clear(this.roots.history);
     if (this.roots.conversation) this.ui.clear(this.roots.conversation);
+    this.closeChoiceMenu?.();
+    this.closeChoiceMenu = null;
     this.closeSessionMenu?.();
     this.composer?.destroy?.();
     this.mounted = false;
@@ -172,6 +175,8 @@ class QuickAskView {
   }
 
   renderHeader() {
+    this.closeChoiceMenu?.();
+    this.closeChoiceMenu = null;
     this.closeSessionMenu?.();
     this.closeSessionMenu = null;
     const ui = this.ui;
@@ -200,9 +205,13 @@ class QuickAskView {
     });
     const profile = ui.createEl(header, 'span', {
       cls: 'scholar-quick-ask-profile',
-      text: profileName(activeProfile(this.getSettings()?.quickAsk), this.getSettings()),
+      text: this.sessionRoleName(),
+      attributes: { role: 'button', tabindex: '0' },
     });
-    ui.setTooltip(profile, `${profile.textContent} — ${this.t(this.getSettings(), 'profiles.newSessionsOnly')}`);
+    ui.setTooltip(profile, this.t(this.getSettings(), 'editing.chooseRole'));
+    const chooseRole = () => this.openRoleMenu(profile);
+    profile.addEventListener('click', chooseRole);
+    profile.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); chooseRole(); } });
     const create = ui.createEl(header, "button", {
       cls: "scholar-quick-ask-new-session",
       attributes: { "aria-label": this.t(this.getSettings(), "sidebar.newSession"), type: "button" },
@@ -259,6 +268,13 @@ class QuickAskView {
       }
       const bubble = ui.createEl(parent, "div", { cls: `scholar-quick-ask-message scholar-quick-ask-message-${entry.role}` });
       this.labelMessageRole(bubble, entry.role);
+      if (entry.role === "user") bubble.addEventListener("contextmenu", event => {
+        if (entry.turnId !== this.runtime?.snapshot?.(this.activeSessionId)?.editableTurn?.payload?.turnId) return;
+        event.preventDefault();
+        this.closeChoiceMenu?.();
+        this.closeChoiceMenu = ui.choiceMenu(bubble, [{ entries: [{ label: this.t(this.getSettings(), "editing.withdraw"),
+          disabled: !this.canWithdraw(), choose: () => { void this.withdrawLastTurn(); } }] }]);
+      });
       if (entry.role === "assistant" && entry.reasoning) {
         const reasoning = this.settlingReasoning ?? this.makeReasoning(bubble);
         this.settlingReasoning = null;
@@ -782,7 +798,7 @@ class QuickAskView {
     try {
       if (imageDraftPaths(owner).length + files.length > IMAGE_MAX_COUNT) throw imageError("IMAGE_COUNT");
       const paths = imagePaths(await this.environment.images.importFiles(files));
-      if (!this.mounted) return;
+      if (!this.mounted || this.editingDraftLocked) return;
       const updated = appendImageDraft(this.drafts, id, paths);
       if (!updated || this.activeSessionId !== id) return;
       this.pending = updated.pending;
@@ -804,6 +820,7 @@ class QuickAskView {
     const panel = ui.createEl(area, "div", { cls: "scholar-quick-ask-context-panel" });
     renderImages({ parent: panel, paths: images, environment: this.environment, translate: key => this.t(this.getSettings(), key),
       onRemove: path => {
+        if (this.editingDraftLocked) return;
         this.pending = { ...this.pending, images: (this.pending.images ?? []).filter(entry => entry !== path) };
         this.composer?.removeFile?.(path);
         this.saveDraft(); this.renderPending();
@@ -850,6 +867,7 @@ class QuickAskView {
     });
     ui.setIcon(remove, "x");
     remove.addEventListener("click", () => {
+      if (this.editingDraftLocked) return;
       const tracker = this.currentTracker();
       const sent = tracker?.allowlist?.().includes(row.path) === true;
       tracker?.removedFile?.(row.path);
@@ -876,6 +894,7 @@ class QuickAskView {
     });
     ui.setIcon(remove, "x");
     remove.addEventListener("click", () => {
+      if (this.editingDraftLocked) return;
       this.pending = removeSelection(this.pending, row.index);
       this.saveDraft();
       this.renderPending();
@@ -946,12 +965,10 @@ class QuickAskView {
       cls: "scholar-quick-ask-effort", attributes: { role: "button", tabindex: "0" },
     });
     this.roots.effort = effort;
-    const cycle = () => {
-      if (this.activeSessionId && this.runtime) this.runtime.setReasoningEffort(this.activeSessionId, nextReasoningEffort(this.runtime.reasoningEffort(this.activeSessionId)));
-    };
-    effort.addEventListener("click", cycle);
+    const choose = () => this.openModelMenu(effort);
+    effort.addEventListener("click", choose);
     effort.addEventListener("keydown", event => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); cycle(); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(); }
     });
     const controls = this.ui.createEl(footer, "div", { cls: "scholar-quick-ask-composer-controls" });
     this.roots.controls = controls;
@@ -1053,9 +1070,9 @@ class QuickAskView {
     if (!controls) return;
     if (this.roots.effort) {
       const level = this.runtime?.reasoningEffort(this.activeSessionId) ?? "high";
-      this.roots.effort.textContent = REASONING_LEVELS[level];
+      this.roots.effort.textContent = selectionLabel(this.getConfig?.(this.activeSessionId)?.model ?? "", REASONING_LEVELS[level]);
       this.roots.effort.setAttribute("aria-label", `${this.t(this.getSettings(), "reasoning.effort")}: ${REASONING_LEVELS[level]}`);
-      this.ui.setTooltip(this.roots.effort, this.t(this.getSettings(), "reasoning.cycle"), { placement: "top" });
+      this.ui.setTooltip(this.roots.effort, this.t(this.getSettings(), "editing.chooseModelEffort"), { placement: "top" });
     }
     // One rebuild of the whole action row keeps the ring and the action from
     // accumulating duplicates across repeated renders.
@@ -1212,7 +1229,7 @@ class QuickAskView {
         this.messages[index] = entry;
         if (this.activeSessionId === sessionId && this.mounted) this.renderConversation();
       }
-      result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion, images: submission.images ?? [] });
+      result = await this.runtime.send(sessionId, submission.question, { additions, webSearch, webSearchRevision, reasoning, rendererVersion: submission.rendererVersion, images: submission.images ?? [], editDraft: submission.originalDraftUnavailable ? null : { version: 1, composer: submission.draft, pending: submission.pending, images: submission.images ?? [] } });
     } catch {
       result = { status: "failed", accepted: false };
       this.environment.ui.notice(this.t(this.getSettings(), "composer.failed"));
@@ -1220,6 +1237,10 @@ class QuickAskView {
     if (result?.error?.code?.startsWith("IMAGE_")) this.imageError(result.error);
     const accepted = result?.accepted || ["complete", "incomplete"].includes(result?.status);
     const visible = this.activeSessionId === sessionId && this.mounted;
+    if (result?.turnId && visible) {
+      const entry = this.messages.find(entry => entry.submission === submission || entry.retry === submission);
+      if (entry) entry.turnId = result.turnId;
+    }
     if (!accepted && (visible || this.drafts.has(sessionId))) {
       const current = visible ? { ...this.drafts.get(sessionId), ...this.captureDraft() }
         : this.drafts.get(sessionId) ?? { composer: "", pending: createPendingContext() };
@@ -1267,8 +1288,10 @@ class QuickAskView {
     const failed = this.drafts.get(this.activeSessionId)?.failedSubmission;
     if (failed?.submission || this.lastSubmission) return this.send(failed?.submission ?? this.lastSubmission);
     const turn = this.runtime.stateFor(this.activeSessionId)?.turn;
-    if (turn?.question || turn?.imagePaths?.length) return this.send({ question: turn.question, draft: turn.question, references: [],
-      images: turn.imagePaths ?? [], pending: { files: [], selections: [], images: turn.imagePaths ?? [] }, additions: turn.additions ?? [], rendererVersion: turn.rendererVersion });
+    const original = recoverableDraft(turn?.editDraft) ? turn.editDraft : null;
+    if (turn?.question || turn?.imagePaths?.length) return this.send({ question: turn.question, draft: original?.composer ?? turn.question, references: [],
+      images: turn.imagePaths ?? [], pending: original?.pending ?? { files: [], selections: [], images: turn.imagePaths ?? [] },
+      originalDraftUnavailable: !original, additions: turn.additions ?? [], rendererVersion: turn.rendererVersion });
     return null;
   }
 
@@ -1345,6 +1368,7 @@ class QuickAskView {
   // File explorer URIs stage Composer chips. Editor-selection captures keep
   // their existing exact-text validation and restricted pending/composer targets.
   async handleDrop(event, region) {
+    if (this.editingDraftLocked) { event.preventDefault(); return; }
     this.roots.composer.classList.remove("is-drag-over");
     const files = this.ui.droppedImages(event);
     if (files.length) {
@@ -1459,6 +1483,11 @@ class QuickAskView {
       return null;
     }
     if (generation !== this.activationGeneration) return null;
+    const recoveredDraft = this.runtime.snapshot?.(id)?.restoredDraft;
+    if (recoveredDraft && !this.drafts.get(id)?.restoreHandled && !this.hasUnsentDraft()) {
+      this.drafts.set(id, { ...recoveredDraft, restoreHandled: true });
+      this.restoreDraft();
+    }
     this.hasSessionHistory = (loaded?.parsed?.records ?? []).some(record => ["turn/started", "item/input", "item/output"].includes(record.kind));
     if (recover && this.runtime.recover) {
       // A pending turn with a recoverable stored Response is retrieved; the
@@ -1559,7 +1588,9 @@ class QuickAskView {
     return this.runSessionAction(async () => {
       const { sessionConfigSnapshot } = require("./settings");
       this.saveDraft();
-      const created = await this.sessionStore.createSession({ config: sessionConfigSnapshot(this.getSettings()?.quickAsk) });
+      const config = inheritSessionRole(sessionConfigSnapshot(this.getSettings()?.quickAsk),
+        this.runtime?.snapshot?.(this.activeSessionId)?.config);
+      const created = await this.sessionStore.createSession({ config });
       await this.reloadSessions();
       this.sending = false;
       this.renderPending();
@@ -1596,6 +1627,15 @@ class QuickAskView {
   // A projection from the owning session's run. Projections for another
   // session are ignored here; that session's own view, if open, receives them.
   applySessionProjection(sessionId, projection) {
+    if (projection.kind === "session-edited" && sessionId === this.activeSessionId) {
+      if (projection.action === "session/withdrawn" && !this.sessionActions.busy) {
+        const draft = this.runtime.snapshot(sessionId)?.restoredDraft;
+        if (draft) this.drafts.set(sessionId, { ...draft, restoreHandled: true });
+        this.restoreDraft();
+        void this.activateSession(sessionId).then(() => { if (this.mounted) { this.renderHeader(); this.renderConversation(); this.renderSendButton(); } });
+      } else { this.refreshTokenFacts(); this.renderHeader(); this.renderSendButton(); }
+      return;
+    }
     const summary = this.sessions.find(session => session.id === sessionId);
     if (summary && projection.kind === "title") {
       summary.title = projection.title;
@@ -1641,6 +1681,100 @@ class QuickAskView {
       this.renderSendButton();
       return true;
     });
+  }
+
+  sessionRoleName() {
+    const snapshot = this.runtime?.snapshot?.(this.activeSessionId);
+    const config = snapshot?.config;
+    if (!config) return profileName(activeProfile(this.getSettings()?.quickAsk), this.getSettings());
+    if (config.systemProfileName) return config.systemProfileName;
+    if (config.systemProfileId) return profileName({ id: config.systemProfileId, name: null }, this.getSettings());
+    if (snapshot.roleDisplayProfile) return profileName(snapshot.roleDisplayProfile, this.getSettings());
+    return this.t(this.getSettings(), "editing.savedRole");
+  }
+
+  canConfigure() {
+    return !this.loadingSessions && !this.sending && !this.sessionActions.busy && this.runtime?.canEdit?.(this.activeSessionId);
+  }
+
+  openRoleMenu(anchor) {
+    if (!this.canConfigure()) return;
+    const sessionId = this.activeSessionId;
+    const config = this.runtime.snapshot(sessionId).config;
+    this.closeChoiceMenu?.();
+    this.closeChoiceMenu = this.ui.choiceMenu(anchor, [{ entries: normalizeProfiles(this.getSettings()?.quickAsk).systemProfiles.map(profile => ({
+      label: profileName(profile, this.getSettings()),
+      current: profile.id === config.systemProfileId && profile.prompt === config.systemPrompt,
+      choose: () => { if (sessionId === this.activeSessionId) void this.configureSession({
+        systemProfileId: profile.id, systemProfileName: profileName(profile, this.getSettings()), systemPrompt: profile.prompt,
+      }); },
+    })) }]);
+  }
+
+  openModelMenu(anchor) {
+    if (!this.canConfigure()) return;
+    const sessionId = this.activeSessionId, config = this.runtime.snapshot(sessionId).config;
+    const choices = modelChoices(this.getSettings()?.quickAsk, config.protocol ?? "responses", this.t(this.getSettings(), "providers.default"));
+    this.closeChoiceMenu?.();
+    this.closeChoiceMenu = this.ui.choiceMenu(anchor, [
+      { label: this.t(this.getSettings(), "providers.chooseModel"), entries: choices.map(choice => ({
+        label: choice.label, current: choice.config.baseUrl === config.baseUrl && choice.model === config.model && choice.config.secretId === config.secretId,
+        choose: () => { if (sessionId === this.activeSessionId) void this.configureSession(choice.config); },
+      })) },
+      { label: this.t(this.getSettings(), "reasoning.effort"), entries: Object.entries(REASONING_LEVELS).map(([value, label]) => ({
+        label, current: value === this.runtime.reasoningEffort(sessionId),
+        choose: () => { if (sessionId === this.activeSessionId && this.canConfigure()) this.runtime.setReasoningEffort(sessionId, value); },
+      })) },
+    ]);
+  }
+
+  async configureSession(patch) {
+    if (!this.canConfigure()) return null;
+    return this.runSessionAction(async () => {
+      const result = await this.runtime.configure(this.activeSessionId, patch);
+      if (result.status !== "committed") this.ui.notice(this.t(this.getSettings(), result.error?.code === "HISTORY_INCOMPATIBLE" ? "editing.incompatible" : "sidebar.actionFailed"));
+      this.refreshTokenFacts();
+      return result;
+    });
+  }
+
+  hasUnsentDraft() {
+    return hasPendingDraft(this.captureDraft(), this.currentTracker()?.trackedFiles?.() ?? []);
+  }
+
+  canWithdraw() {
+    const turn = this.runtime?.snapshot?.(this.activeSessionId)?.editableTurn;
+    return this.canConfigure() && recoverableDraft(turn?.payload?.editDraft) &&
+      ![...openViews].some(view => view.activeSessionId === this.activeSessionId && view.getSettings === this.getSettings && view.hasUnsentDraft());
+  }
+
+  async withdrawLastTurn() {
+    if (!this.canWithdraw()) return null;
+    const sessionId = this.activeSessionId;
+    const owners = [...openViews].filter(view => view.activeSessionId === sessionId && view.getSettings === this.getSettings);
+    for (const view of owners) { view.editingDraftLocked = true; view.composer?.setReadOnly?.(true); }
+    let committed = false;
+    try { return await this.runSessionAction(async () => {
+      const result = await this.runtime.withdraw(sessionId, { hasDraft: this.hasUnsentDraft() });
+      if (result.status !== "committed") { this.ui.notice(this.t(this.getSettings(), "sidebar.actionFailed")); return result; }
+      committed = true;
+      this.drafts.set(sessionId, { ...result.draft, restoreHandled: true });
+      this.restoreDraft();
+      await this.activateSession(sessionId);
+      this.restoreDraft();
+      this.composer?.focus?.();
+      return result;
+    }); } finally {
+      for (const view of owners) {
+        if (committed && view !== this && view.mounted && view.activeSessionId === sessionId) {
+          view.restoreDraft();
+          await view.activateSession(sessionId);
+          view.renderHeader(); view.renderConversation(); view.renderSendButton();
+        }
+        view.editingDraftLocked = false;
+        if (view.mounted) view.composer?.setReadOnly?.(false);
+      }
+    }
   }
 
   saveDraft() {

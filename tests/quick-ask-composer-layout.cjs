@@ -62,8 +62,8 @@ test('profile header source keeps muted bounded text between the session selecto
   const css = fs.readFileSync(path.join(__dirname, '../src/quick-ask/styles.css'), 'utf8');
   const header = source.slice(source.indexOf('  renderHeader() {'), source.indexOf('  renderConversation() {'));
   assert.match(header, /scholar-quick-ask-session-select[\s\S]*scholar-quick-ask-profile[\s\S]*scholar-quick-ask-new-session/);
-  assert.match(header, /profileName\(activeProfile\(this.getSettings\(\)\?\.quickAsk\)/);
-  assert.match(header, /setTooltip\(profile,[^\n]*profiles.newSessionsOnly/);
+  assert.match(header, /text: this\.sessionRoleName\(\)/);
+  assert.match(header, /setTooltip\(profile,[^\n]*editing.chooseRole/);
   const profileStyle = css.match(/\.scholar-quick-ask-profile\s*\{([^}]+)\}/)?.[1] ?? '';
   for (const rule of ['color: var(--text-muted)', 'max-width: 28%', 'min-width: 0', 'text-overflow: ellipsis', 'white-space: nowrap']) assert.ok(profileStyle.includes(rule), rule);
   assert.match(css, /button\.scholar-quick-ask-session-select\s*\{[^}]*flex: 1 1 auto;[^}]*min-width: 0;/);

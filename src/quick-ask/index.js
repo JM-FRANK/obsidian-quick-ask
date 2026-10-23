@@ -235,7 +235,7 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
       name: t(settings(), "command.reasoningEffort"),
       checkCallback: checking => {
         const sessionId = sessionStore.index?.activeSessionId;
-        if (!registered || !sessionId) return false;
+        if (!registered || !sessionId || !conversation.canEdit(sessionId)) return false;
         if (!checking) {
           class EffortPicker extends SuggestModal {
             getSuggestions(query) { return Object.keys(REASONING_LEVELS).filter(value => REASONING_LEVELS[value].toLowerCase().includes(query.toLowerCase())); }
@@ -255,16 +255,28 @@ function createQuickAsk({ plugin, getSettings, loadEditorModules, moduleVersions
     registrations.addCommand({
       id: 'switch-system-profile', name: t(settings(), 'command.switchProfile'),
       checkCallback: checking => {
-        if (!registered) return false;
+        const sessionId = sessionStore.index?.activeSessionId;
+        if (!registered || (sessionId && !conversation.canEdit(sessionId))) return false;
         if (!checking) {
           class ProfilePicker extends SuggestModal {
             getSuggestions(query) { return normalizeProfiles(settings().quickAsk).systemProfiles.filter(profile => profileName(profile, settings()).toLocaleLowerCase().includes(query.toLocaleLowerCase())); }
-            renderSuggestion(profile, element) { element.setText(`${profileName(profile, settings())}${activeProfile(settings().quickAsk).id === profile.id ? ' ✓' : ''}`); }
-            onChooseSuggestion(profile) { if (registered) void profiles.run({ type: 'select', id: profile.id }); }
+            renderSuggestion(profile, element) {
+              const config = sessionId ? conversation.snapshot(sessionId)?.config : null;
+              const selected = config ? config.systemProfileId === profile.id && config.systemPrompt === profile.prompt : activeProfile(settings().quickAsk).id === profile.id;
+              element.setText(`${profileName(profile, settings())}${selected ? ' ✓' : ''}`);
+            }
+            onChooseSuggestion(profile) {
+              if (!registered) return;
+              if (sessionId) void conversation.configure(sessionId, { systemProfileId: profile.id,
+                systemProfileName: profileName(profile, settings()), systemPrompt: profile.prompt }).then(result => {
+                  if (result.status !== 'committed') environment.ui.notice(t(settings(), 'sidebar.actionFailed'));
+                });
+              else void profiles.run({ type: 'select', id: profile.id });
+            }
           }
           profilePicker?.close();
           profilePicker = new ProfilePicker(plugin.app);
-          profilePicker.setPlaceholder(t(settings(), 'profiles.newSessionsOnly'));
+          profilePicker.setPlaceholder(t(settings(), 'editing.chooseRole'));
           profilePicker.open();
         }
         return true;

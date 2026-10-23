@@ -225,6 +225,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         read: (path) => vault.adapter.read(path),
         write: (path, data) => vault.adapter.write(path, data),
         append: (path, data) => vault.adapter.append(path, data),
+        process: (path, update) => vault.adapter.process(path, update),
         exists: (path) => vault.adapter.exists(path),
         mkdir: (path) => vault.adapter.mkdir(path),
         remove: (path) => vault.adapter.remove(path),
@@ -506,6 +507,19 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
           close() { suggest.close(); },
           dispose() { disposed = true; suggest.close(); },
         };
+      },
+      choiceMenu(anchor, groups) {
+        const menu = new Menu();
+        groups.forEach((group, index) => {
+          if (index) menu.addSeparator();
+          if (group.label) menu.addItem(item => item.setTitle(group.label).setDisabled(true));
+          for (const entry of group.entries) menu.addItem(item => item.setTitle(entry.label)
+            .setChecked(entry.current === true).setDisabled(entry.disabled === true)
+            .onClick(() => entry.choose()));
+        });
+        const box = anchor.getBoundingClientRect();
+        menu.showAtPosition({ x: box.left, y: box.bottom }, anchor.ownerDocument);
+        return () => menu.hide();
       },
       sessionMenu(anchor, sessions, { activeSessionId, ...actions }) {
         if (sessions.length === 0) return null;

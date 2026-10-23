@@ -118,7 +118,7 @@ function createChipPlugin(ownerDocument, isSupported, unsupportedLabel, resolveP
 // The host's public AbstractInputSuggest owns completion rendering, keyboard
 // navigation and popup placement. CodeMirror owns only text and chip state.
 const { defaultKeymap, history, historyKeymap } = require("@codemirror/commands");
-const { EditorState, Transaction } = require("@codemirror/state");
+const { EditorState, Transaction, Compartment } = require("@codemirror/state");
 const VISIBLE_ROWS = 6;
 
 function createComposerEditor({ parent, sidebar = parent, paths = [], createFileSuggester = null,
@@ -127,6 +127,9 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   onCommand = null, commandAvailable = () => true,
   placeholderText = "", onChange = () => {}, onSubmit = null,
 }) {
+  const editability = new Compartment();
+  let readOnly = false;
+  const editabilityExtensions = () => [EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)];
   let filePaths = paths;
   let suggest = null;
   let disposed = false;
@@ -157,7 +160,7 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
   const view = new EditorView({
     parent,
     state: EditorState.create({ doc: "", extensions: [
-      fileReferenceField, editingReferenceField, createChipPlugin(ownerDocument, isSupported, unsupportedLabel, resolvePath), history(), EditorView.lineWrapping,
+      editability.of(editabilityExtensions()), fileReferenceField, editingReferenceField, createChipPlugin(ownerDocument, isSupported, unsupportedLabel, resolvePath), history(), EditorView.lineWrapping,
       // The public theme extension outranks CodeMirror's default light theme.
       // Host CSS variables update with Obsidian's theme without a second palette.
       EditorView.theme({
@@ -241,9 +244,10 @@ function createComposerEditor({ parent, sidebar = parent, paths = [], createFile
     get isPickerOpen() { return suggest?.isOpen === true; },
     get isEditingReference() { return view.state.field(editingReferenceField) !== null; },
     getDraft: () => view.state.doc.toString(),
+    setReadOnly(value) { readOnly = value === true; suggest?.close(); view.dispatch({ effects: editability.reconfigure(editabilityExtensions()) }); },
     setDraft(text = "") {
       suggest?.close();
-      view.setState(emptyState.update({ changes: { from: 0, insert: text }, selection: { anchor: text.length }, annotations: Transaction.addToHistory.of(false) }).state);
+      view.setState(emptyState.update({ changes: { from: 0, insert: text }, selection: { anchor: text.length }, effects: editability.reconfigure(editabilityExtensions()), annotations: Transaction.addToHistory.of(false) }).state);
     },
     removeFile(path) {
       suggest?.close();

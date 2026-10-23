@@ -321,10 +321,17 @@
   overflow-wrap: anywhere;
 }
 .scholar-quick-ask-selection-quote { white-space: pre-wrap; }
-.scholar-quick-ask-message-assistant {
-  --scholar-bubble-surface: color-mix(in oklch, var(--scholar-assistant-bubble-tint, #39c5bb) 12%, var(--scholar-bubble-base));
+/* Process disclosures share the answer's outer edges; nested tool rows retain
+   the process body's own width instead of receiving the bubble inset again. */
+.scholar-quick-ask-message-assistant,
+:is(.scholar-quick-ask-history, .scholar-quick-ask-live) > :is(.scholar-quick-ask-process, .scholar-quick-ask-tool-history) {
   align-self: flex-start;
   width: calc(100% - 6px);
+  box-sizing: border-box;
+  margin-inline: 0;
+}
+.scholar-quick-ask-message-assistant {
+  --scholar-bubble-surface: color-mix(in oklch, var(--scholar-assistant-bubble-tint, #39c5bb) 12%, var(--scholar-bubble-base));
 }
 .scholar-quick-ask-message-user,
 .scholar-quick-ask-message-assistant {

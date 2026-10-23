@@ -27,7 +27,7 @@ Open **Settings → Quick Ask → Model connections**. Add a connection with a *
 - Select **Responses** or **Chat Completions** explicitly to match your service. For a compatible `/v1` endpoint, enter the Base URL without appending `/responses` or `/chat/completions`. The plugin does not switch protocols automatically after errors.
 - Each connection remembers its selected model. Each model stores its own protocol and context window. The default window is **200K tokens**; configure it to match your service.
 - When both address and secret are configured, editing either triggers a model-list request. **Refresh models** repeats it. Opening settings, selecting a saved connection and restarting do not fetch model lists. Discovery sends no note content, preserves existing selections and model overrides, and does not verify generation compatibility. You can enter a model ID manually.
-- Existing single-connection settings migrate to a default connection. Connection/model changes apply to **new sessions only**; existing sessions retain their saved connection, model, protocol and capacity, even after a profile is removed.
+- Existing single-connection settings migrate to a default connection. Settings changes do not automatically refresh existing conversations. Use the current conversation’s effort-label menu to explicitly select another saved model with the same protocol. Removing a connection does not alter saved session snapshots.
 
 Settings are organized into **General**, **Model connections**, **System roles**, **Web search**, **Appearance**, and **Data and backups**. API access comes from your chosen provider; no model access is included with the plugin.
 
@@ -54,11 +54,28 @@ Mermaid diagrams have **Preview image**, **View source** and source-copy control
 
 ### Roles, reasoning and compaction
 
-In **System roles**, choose, create, rename or edit a role profile. Literature Reading and Study Quiz are supplied initially with English prompt text; Study Quiz starts with three questions. Unedited legacy Study Quiz presets upgrade to English, while edited prompts and existing conversations keep their saved text. Custom prompts replace the built-in reading role while preserving fixed tool, read-only and math/diagram formatting rules. The selected role applies to new sessions; existing conversations keep their saved role.
+In **System roles**, choose, create, rename or edit a role profile. Literature Reading and Study Quiz are supplied initially with English prompt text; Study Quiz starts with three questions. Unedited legacy Study Quiz presets upgrade to English, while edited prompts and existing conversations keep their saved text. Custom prompts replace the built-in reading role while preserving fixed tool, read-only and math/diagram formatting rules. Click the role name beside the session selector to choose a saved role for the current conversation. Global edits never automatically refresh that snapshot. New conversations inherit the current role; models still use the global default.
 
-Click the effort label to cycle **Off / Low / High / XHigh / Max**, or use the reasoning-effort command. The default is **High**. This changes the next question; actual support depends on the provider. Readable reasoning is shown when the API returns it. New questions show thoughts and individual tool calls in an ordered process list. The list opens during generation while each thought and tool detail stays collapsed. Click a thought to read its Markdown or copy the complete source; tool details retain their recorded parameters, paths and result summaries. Long lists scroll internally, and successful completion folds the process while keeping the answer visible. Switching sessions or restarting resets historical disclosures. Older conversation records remain readable without migration.
+Click the effort label to open two lists: same-protocol saved models and **Off / Low / High / XHigh / Max** effort. The label itself continues to show only effort. Duplicate model names include `connection name · model`. You can also use the reasoning-effort command. The default is **High**. This changes the next question; actual support depends on the provider. Readable reasoning is shown when the API returns it. New questions show thoughts and individual tool calls in an ordered process list. The list opens during generation while each thought and tool detail stays collapsed. Click a thought to read its Markdown or copy the complete source; tool details retain their recorded parameters, paths and result summaries. Long lists scroll internally, and successful completion folds the process while keeping the answer visible. Switching sessions or restarting resets historical disclosures. Older conversation records remain readable without migration.
 
 Type `/` in the input for actions including `/compact` and `/web_search`. Automatic or manual compaction shortens the context sent to the model without deleting local conversation history. Tracked files remain available to the allowed full-file tool. Unsent search/effort choices stay in memory and do not survive a plugin restart.
+
+### Withdraw and edit
+
+Right-click the last user message and choose **Withdraw last turn and edit**.
+The whole turn, including its answer, thoughts and tools, leaves active history;
+the original question, selections and images return to the input for manual
+resubmission. Failed/stopped turns are eligible. Clear that restored draft to
+withdraw the preceding turn. Withdrawal is disabled while generating/compacting,
+when a new draft or pending attachment exists, or when an older turn lacks the
+original-draft metadata. Current role/model and billed token totals are retained.
+Manual retries use the current role/model.
+
+Switching models/providers may rebuild portable history and require compaction
+on the next send. An incompatible history rejects the switch without changing
+the selection. Older sessions remain readable; the first explicit role/model
+switch or withdrawal upgrades that session’s format, which older plugin versions
+cannot reopen. Export and preserved copies retain the edit history.
 
 ### Images
 

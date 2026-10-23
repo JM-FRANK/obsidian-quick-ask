@@ -1,5 +1,5 @@
 const { DEFAULT_TOOL_CONCURRENCY, normalizeToolConcurrency } = require('./tool-scheduler');
-const { normalizeProfiles, applyProfileAction } = require("./profiles");
+const { normalizeProfiles, applyProfileAction, activeProfile } = require("./profiles");
 const { normalizeSearchSettings } = require("./web-search");
 const { DEFAULT_LANGUAGE, LANGUAGES, t } = require("./i18n");
 const { DEFAULT_CONTEXT_WINDOW_TOKENS, CONNECTION_FIELDS, normalizeProviderProfiles, providerValues, providerPatch, activeProvider } = require('./provider-profiles');
@@ -174,6 +174,8 @@ function sessionConfigSnapshot(settings, { createdAt } = {}) {
   const values = normalizeQuickAskSettings(settings);
   const provider = activeProvider(values);
   return {
+    systemProfileId: activeProfile(values).id,
+    systemProfileName: activeProfile(values).name,
     providerProfileId: provider.id,
     providerSearchMode: provider.searchMode,
     protocol: values.protocol,
@@ -197,6 +199,9 @@ function redactQuickAskSettings(settings) {
       providerProfileId: settings.providerProfileId,
       providerSearchMode: settings.providerSearchMode === 'independent' ? 'independent' : 'mixed',
     } : {}),
+    ...(Number.isInteger(settings?.configurationVersion) ? { configurationVersion: settings.configurationVersion } : {}),
+    ...(typeof settings?.systemProfileId === "string" ? { systemProfileId: settings.systemProfileId, systemProfileName: settings.systemProfileName ?? null } : {}),
+    ...(Object.hasOwn(settings ?? {}, "providerProfileName") ? { providerProfileName: settings.providerProfileName } : {}),
     enable: values.enable,
     keepCachedImages: values.keepCachedImages,
     display: { ...values.display },
