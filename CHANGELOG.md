@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Address CSS review warnings by replacing `!important` with scoped selector specificity and styling MathJax containers through their generated class.
 - Resolve document image links to exact paths without substituting a same-named image when the target is missing, and reject unreadable image contents.
 - Handle empty session configuration before an existing conversation has loaded.
 - Account independent provider-search usage without treating its input tokens as the main conversation's context occupancy.

@@ -207,11 +207,12 @@
 .scholar-quick-ask-math-scrollbar::-webkit-scrollbar-thumb { background: transparent; border: 0; border-radius: 2px; }
 .scholar-quick-ask-visual.is-math:is(:hover, :focus-within) > .scholar-quick-ask-math-scrollbar::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-muted) 28%, transparent); }
 .scholar-quick-ask-visual.is-math .math { display: block; width: max-content; min-width: 100%; overflow: visible; }
-.scholar-quick-ask-visual.is-math mjx-container { overflow: visible; }
-.scholar-quick-ask-visual.is-math mjx-container[display="true"] { margin: 0; }
+/* MathJax adds this class to its generated container for both output modes. */
+.scholar-quick-ask-visual.is-math .MathJax { overflow: visible; }
+.scholar-quick-ask-visual.is-math .MathJax[display="true"] { margin: 0; }
 .scholar-quick-ask-visual.is-math:not(.is-source) { padding-bottom: 0; }
 .scholar-quick-ask-visual.is-math:not(.is-source) > .scholar-quick-ask-visual-toolbar > .scholar-quick-ask-visual-copy { display: none; }
-.scholar-quick-ask-visual pre > .copy-code-button { display: none !important; }
+.scholar-quick-ask-view .scholar-quick-ask-message-body .scholar-quick-ask-visual pre > button.copy-code-button { display: none; }
 .scholar-quick-ask-visual.is-code { border-radius: var(--radius-s); background: var(--code-background); }
 .scholar-quick-ask-message-body .scholar-quick-ask-visual-rendered > pre { margin: 0; padding: 12px; }
 .scholar-quick-ask-visual.is-table table { border-collapse: collapse; min-width: 100%; width: max-content; margin: 0; }
@@ -233,7 +234,8 @@
   -webkit-user-select: text;
 }
 .scholar-quick-ask-visual-error { display: block; color: var(--text-muted); font-size: var(--font-ui-smaller); }
-.scholar-quick-ask-visual [hidden] { display: none !important; }
+/* Outrank the owned action buttons and source/rendered display declarations. */
+.scholar-quick-ask-view .scholar-quick-ask-visual [hidden] { display: none; }
 
 .scholar-quick-ask-message-user {
   --scholar-bubble-surface: color-mix(in oklch, var(--scholar-user-bubble-tint, var(--color-blue)) 16%, var(--scholar-bubble-base));
