@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.6 — Image tools, ordered process views and faster history
+
+### Added
+
+- Let the model request authorized images with `get-image`, including exact image paths and image links from Markdown documents already sent to the conversation. Tool results remain available for active-history replay; session logs retain paths rather than image bytes.
+- Show reasoning and individual tool calls in an ordered, collapsible process view, with expandable call details, lazy Markdown rendering and a shared scroll area. Successful turns collapse the process while keeping the final answer visible; older session logs remain readable.
+- Add image-viewer zoom and bounded panning, with finer wheel and keyboard adjustments and a 20% minimum scale.
+- Add formula and Mermaid source views, diagram previews, and shared code/table copy controls.
+
+### Changed
+
+- Initially render the latest eight conversation turns and load earlier history on demand. Batch formula measurements to reduce long-history rendering work; deleting a session selects the remaining session with the most recent content activity.
+- Run local tools concurrently with one queue shared across sessions. The concurrency setting defaults to 3 and supports 1–10; remove per-question call and continuation limits. Tool failures remain independent, and results return in model-call order.
+- Keep local read tools available alongside provider search. Choose mixed or independent provider search per connection; independent mode sends only the query to a search-only child request and returns its evidence to the conversation, without automatically switching services or modes.
+- Describe historical selection positions in words and Han characters, and refine answer-format instructions for new requests.
+- Keep generated installation bundles out of source control. Release builds continue to provide the three Obsidian installation files with embedded license notices and source provenance.
+
+### Fixed
+
+- Resolve document image links to exact paths without substituting a same-named image when the target is missing, and reject unreadable image contents.
+- Handle empty session configuration before an existing conversation has loaded.
+- Account independent provider-search usage without treating its input tokens as the main conversation's context occupancy.
+
+### Validation and upgrade notes
+
+- The synchronized feature snapshot passed 47 upstream core test files, 9 distribution checks and 693 standalone tests, with matching standalone build output. Release metadata and artifacts are checked again during release preparation. User-owned UI and provider acceptance remain tracked separately where still open.
+- Version 1.0.6 requires Obsidian 1.13.7 or later on desktop. Existing session logs are not rewritten. Image inputs still send once by default; later image retrieval requires a model tool call within the authorized image/document scope.
+
 ## 1.0.5 — Model connections, provider search and selection history
 
 ### Added
