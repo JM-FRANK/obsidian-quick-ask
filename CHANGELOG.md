@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.1.0 — Session editing and explicit configuration switching
+
+This feature set is first available as **1.1.0-beta.1**, a GitHub pre-release for testing. The installation manifest uses numeric version **1.1.0**; the stable branch and Latest release remain **1.0.6**.
+
+### Added
+
+- Withdraw the last complete conversation turn, including its answer, reasoning and tools, and restore the original question, selections and image paths for editing and manual resubmission. Failed/stopped turns are eligible; after clearing the recovered draft and attachments, earlier turns can be withdrawn in sequence.
+- Choose an existing saved role for the current conversation from the header. New conversations inherit that role, while their model still uses the global default.
+- Choose another saved model/provider with the same request protocol. Clicking the existing effort label opens model and effort lists; the label continues to show only effort. Duplicate model IDs include the connection name.
+
+### Changed
+
+- Persist concrete session configuration and use current selections for manual retries. Automatic retries, tools and compaction retain their in-flight configuration.
+- Validate portable history before switching models/providers; incompatible history rejects the switch. Rebuilding from the complete local prefix may require compaction on the next send.
+- Keep cumulative reported turn and compaction usage when withdrawing history; recalculate only the effective context occupancy and permissions.
+
+### Fixed
+
+- Align process/tool disclosures with the assistant answer's outer edges without narrowing nested rows.
+- Display a legacy session's role name when its saved prompt uniquely matches an existing profile. Matching is cached on load and never changes saved prompts or model requests.
+
+### Preview installation and compatibility
+
+- Download `main.js`, `manifest.json` and `styles.css` from this exact preview release and replace the three files in the existing `quick-ask` plugin folder, then reload the plugin. The preview is not published as the normal numeric stable tag.
+- Requires desktop Obsidian 1.13.7 or later. Existing session logs remain readable. Withdrawal is disabled for older turns without complete original-draft metadata.
+- The first explicit role/model switch or withdrawal upgrades the affected session to a format older plugin versions cannot reopen. Back up conversation data before trying the preview if you intend to downgrade.
+- Shared-core tests, build/provenance checks and offline real-Vault runtime tests passed during implementation; compatibility with every provider is not implied. Visual interactions remain part of preview feedback.
+
 ## 1.0.6 — Image tools, ordered process views and faster history
 
 ### Added

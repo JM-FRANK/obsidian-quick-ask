@@ -26,6 +26,14 @@ Review, commit and push the synchronized source, metadata and provenance. Genera
 
 For GitHub-based synchronization, configure `UPSTREAM_REPOSITORY` and read credentials if the upstream is private. Run **Pull Quick Ask from upstream** with a full commit SHA; it verifies the generated tree before creating a PR. Until the upstream has a remote repository, use local synchronization. A PR generated with GITHUB_TOKEN may not trigger another workflow, so the sync job performs its own tests.
 
+## Preview releases
+
+Use tags such as `1.1.0-beta.1`, `1.1.0-beta.2`, then `1.1.0-rc.1` before the stable `1.1.0`. The [Obsidian manifest](https://docs.obsidian.md/Reference/Manifest) keeps numeric version `1.1.0`; Git tags and GitHub's pre-release flag distinguish candidates.
+
+Prepare preview metadata on an upstream release branch and synchronize it to downstream `preview/1.1.0`. Keep downstream `main` at the last stable manifest version: the community installer looks for the numeric tag matching that file, so a preview branch must not advertise an unpublished stable version on `main`.
+
+Dispatch **Prepare Quick Ask release** on that preview branch with `release_tag=1.1.0-beta.1` and `prerelease=true`. The workflow validates/builds/tests/attests the exact snapshot, then prepares a draft with the pre-release flag and `latest=false`. After reviewing its three installation assets and checksums, publish that draft while retaining both flags. Published candidates are never overwritten; use the next candidate tag. Local preparation supports `npm run release:draft -- --tag 1.1.0-beta.1 --prerelease`, but still requires the public workflow for attestations.
+
 ## Prepare a release
 
 Build locally, commit the synchronized source snapshot, then run `npm run release:check`. Use the **Prepare Quick Ask release** workflow to rebuild, test and attest the exact installation files before uploading them to a draft Release. A local `npm run release:draft` is useful for preparation, but it does not generate a GitHub attestation and its draft is explicitly marked accordingly.
