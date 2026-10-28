@@ -2,6 +2,14 @@
 
 Quick Ask is maintained in Scholar Workbench. The standalone repository is a generated distribution: its feature source, settings UI, translations, styles, release metadata, documentation and workflows are synchronized from an upstream commit.
 
+## Release lines
+
+Upstream `main` maintains stable 1.0.x code and exports only to downstream `main`. Upstream `next/1.1` owns session editing and other preview features, and exports only to downstream `preview/1.1.0`. Shared fixes land on the stable source line first and are then integrated into the preview source line; preserve each line’s version metadata. Never develop feature implementations downstream.
+
+Stable sessions use schema 1/2. Preview session editing can upgrade an affected session to schema 3/4, which stable builds cannot open. QA-045 does not change these formats. Keep backups before trying preview edits if downgrade is intended.
+
+The existing `release/quick-ask-1.1.0-beta.1` upstream branch is a historical candidate; ongoing preview work uses `next/1.1`. Released tags are not moved.
+
 ## Update and synchronize
 
 In the main Scholar Workbench checkout, update the feature and release notes. To update all version files together:
@@ -30,7 +38,7 @@ For GitHub-based synchronization, configure `UPSTREAM_REPOSITORY` and read crede
 
 Use tags such as `1.1.0-beta.1`, `1.1.0-beta.2`, then `1.1.0-rc.1` before the stable `1.1.0`. The [Obsidian manifest](https://docs.obsidian.md/Reference/Manifest) keeps numeric version `1.1.0`; Git tags and GitHub's pre-release flag distinguish candidates.
 
-Prepare preview metadata on an upstream release branch and synchronize it to downstream `preview/1.1.0`. Keep downstream `main` at the last stable manifest version: the community installer looks for the numeric tag matching that file, so a preview branch must not advertise an unpublished stable version on `main`.
+Prepare preview metadata on upstream `next/1.1` and synchronize it to downstream `preview/1.1.0`. Keep downstream `main` at the last stable manifest version: the community installer looks for the numeric tag matching that file, so a preview branch must not advertise an unpublished stable version on `main`.
 
 Dispatch **Prepare Quick Ask release** on that preview branch with `release_tag=1.1.0-beta.1` and `prerelease=true`. The workflow validates/builds/tests/attests the exact snapshot, then prepares a draft with the pre-release flag and `latest=false`. After reviewing its three installation assets and checksums, publish that draft while retaining both flags. Published candidates are never overwritten; use the next candidate tag. Local preparation supports `npm run release:draft -- --tag 1.1.0-beta.1 --prerelease`, but still requires the public workflow for attestations.
 

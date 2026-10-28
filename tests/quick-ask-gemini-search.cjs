@@ -12,6 +12,15 @@ function fold(payload) {
   return { state, events };
 }
 
+test('native Gemini preserves image modality counts for occupancy calibration', () => {
+  const promptTokensDetails = [{ modality: 'TEXT', tokenCount: 100 }, { modality: 'IMAGE', tokenCount: 258 }];
+  const { state } = fold(response({}, { usageMetadata: { promptTokenCount: 358, candidatesTokenCount: 10,
+    totalTokenCount: 368, promptTokensDetails } }));
+  assert.deepEqual(state.usageSamples[0].usage.promptTokensDetails, promptTokensDetails);
+  assert.equal(require('../src/quick-ask/occupancy').imageUsage(state.usageSamples[0].usage), 258);
+  assert.equal(require('../src/quick-ask/occupancy').inputUsage(state.usageSamples[0].usage), 358);
+});
+
 test('Gemini search converts the complete Chat conversation, images and historical tool batches without mutation', () => {
   const messages = [
     { role: 'system', content: 'System instructions' },

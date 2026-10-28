@@ -257,7 +257,7 @@ for (const protocol of ['responses', 'chat-completions']) {
     }
     assert.match(JSON.stringify(continuation), new RegExp(Buffer.from(bytes).toString('base64')));
     assert.equal(JSON.stringify(requests[3]).includes('data:image'), true, 'ordinary tool continuation retains the image result');
-    assert.equal(f.conversation.stateFor(id).occupancyAnchor, null);
+    assert.equal(f.conversation.snapshot(id).occupancy.imagesIncluded, 1);
     assert.equal(JSON.stringify(f.conversation.snapshot(id).items).includes('data:image'), false);
     const priorReads = reads;
     assert.equal((await f.conversation.send(id, 'Plain followup')).status, 'complete');
@@ -891,11 +891,11 @@ test('a rejected independent key returns its error to the model without switchin
  assert.equal(f.network.requests.some(r=>r.url.includes('duckduckgo')),false);
 });
 
-function chatResponse(message = { role: 'assistant', content: 'CC answer' }) {
+function chatResponse(message = { role: 'assistant', content: 'CC answer' }, usage = { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 }) {
   const data = [
     { id: 'cc-fixture', choices: [{ index: 0, delta: message, finish_reason: null }] },
     { id: 'cc-fixture', choices: [{ index: 0, delta: {}, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] },
-    { id: 'cc-fixture', choices: [], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } },
+    { id: 'cc-fixture', choices: [], usage },
   ];
   return { status: 200, body: (async function* () {
     for (const value of data) yield `data: ${JSON.stringify(value)}\n\n`;
@@ -1313,7 +1313,7 @@ for (const protocol of ['responses', 'chat-completions']) {
     assert.equal(user.content[0].type, protocol === 'responses' ? 'input_image' : 'image_url');
     const records = f.sessionStore.records.get(id);
     assert.deepEqual(f.conversation.stateFor(id).turn.images, [], 'settled turns release transient image bytes');
-    assert.equal(f.conversation.stateFor(id).occupancyAnchor, null, 'image-inclusive usage cannot anchor image-free next requests');
+    assert.equal(f.conversation.snapshot(id).occupancy.source, undefined, 'without a vision subtotal the one-shot image usage cannot calibrate image-free replay');
     assert.equal(JSON.stringify(records).includes('data:image'), false);
     assert.equal(JSON.stringify(records).includes('base64'), false);
     const { conversationFromRecords } = require('../src/quick-ask/conversation-messages');
@@ -1893,4 +1893,61 @@ for(const defaultEnabled of [false,true]) test(`search state before loading an o
   assert.equal(f.conversation.nextSearchRoute(id).kind,defaultEnabled?'provider-search':'off');
   assert.deepEqual(await f.conversation.recover(id),{status:'clean'});
   assert.equal(f.network.requests.length,0);
+});
+
+for (const protocol of ['responses', 'chat-completions']) {
+  test(`${protocol}: calibrated committed occupancy survives reload and ignores rejected drafts`, async () => {
+    const f = makeConversation({ settings: { protocol, contextWindowTokens: null },
+      script: () => protocol === 'responses' ? sseResponse(streamedTurn()) : chatResponse() });
+    const id = await newSession(f.sessionStore, f.conversation, { ...f.settings, protocol });
+    const header = JSON.stringify(f.sessionStore.logs.get(id)[0]);
+    assert.equal((await f.conversation.send(id, 'First')).status, 'complete');
+    const live = f.conversation.snapshot(id).occupancy;
+    assert.equal(live.source, 'provider');
+    assert.equal(live.estimated, true);
+    assert.ok(live.tokens < f.conversation.stateFor(id).occupancyAnchor.localTokens, 'larger heuristic does not override provider input');
+    const calls = f.network.requests.length;
+    f.conversation.forget(id);
+    await f.conversation.load(id);
+    assert.deepEqual(f.conversation.snapshot(id).occupancy, live);
+    assert.equal(f.network.requests.length, calls, 'replay has no count or generation requests');
+    const state = f.conversation.stateFor(id);
+    const prospective = await f.conversation.pricePendingRequest(state, { question: 'DRAFT '.repeat(10000), additions: [] });
+    assert.ok(prospective.occupancy.tokens > live.tokens);
+    assert.deepEqual(f.conversation.snapshot(id).occupancy, live, 'draft pricing does not replace committed display');
+    assert.equal(JSON.stringify(f.sessionStore.logs.get(id)[0]), header);
+  });
+}
+
+test('legacy anchors replay without rewriting logs and upgrade only on a new response', async () => {
+  const f = makeConversation();
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  await f.conversation.send(id, 'Old question');
+  const terminal = f.sessionStore.records.get(id).find(record => record.kind === 'turn/finished');
+  terminal.payload.occupancyAnchor = { inputTokens: 98765 };
+  const original = JSON.stringify(f.sessionStore.records.get(id));
+  f.conversation.forget(id);
+  await f.conversation.load(id);
+  assert.equal(f.conversation.snapshot(id).occupancy.estimated, true);
+  assert.equal(f.conversation.snapshot(id).occupancy.source, undefined);
+  assert.equal(JSON.stringify(f.sessionStore.records.get(id)), original);
+  assert.equal((await f.conversation.send(id, 'New question')).status, 'complete');
+  assert.equal(f.conversation.stateFor(id).occupancyAnchor.version, 1);
+});
+
+test('CC image subtotals remove one-shot vision input without double-counting cache', async () => {
+  const bytes = Uint8Array.from([137,80,78,71,13,10,26,10,1]);
+  const f = makeConversation({ settings: { protocol: 'chat-completions' },
+    imageSource: { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes },
+    script: () => chatResponse(undefined, { prompt_tokens: 3000, completion_tokens: 5, total_tokens: 3005,
+      prompt_tokens_details: { cached_tokens: 500, image_tokens: 2000 } }),
+  });
+  const id = await newSession(f.sessionStore, f.conversation, f.settings);
+  assert.equal((await f.conversation.send(id, 'Look', { images: ['fig.png'] })).status, 'complete');
+  const live = f.conversation.snapshot(id);
+  assert.ok(live.occupancy.tokens >= 1000 && live.occupancy.tokens < 1100);
+  assert.equal(live.turnUsage.input, 3000, 'billing retains vision input exactly once');
+  f.conversation.forget(id);
+  await f.conversation.load(id);
+  assert.deepEqual(f.conversation.snapshot(id).occupancy, live.occupancy);
 });

@@ -7,6 +7,7 @@ const { imagePaths: normalizeImagePaths } = require("./images");
 const { normalizeReasoningEffort } = require("./reasoning");
 const { protocolFor, messageText, isToolOutput, toolOutputId, truncateOutput, callsFromItem } = require("./protocol");
 const { createImageToolResults } = require('./image-tool-results');
+const { occupancyAnchor, calibratedOccupancy } = require('./occupancy');
 const { toolHistory, toolSummary, parameters: toolParameters, updateToolGroups, sourceSummary } = require('./tool-history');
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, responseSuggestions, normalizeSources, citedAnswer } = require("./web-search");
 const { createSearchClient } = require("./search-client");
@@ -17,7 +18,7 @@ const {
   streamAttempt, createRetryPolicy, normalizeError,
   isResponsesFunctionCall,
   isResponsesWebSearchCall,
-  parseToolArguments, isResponsesStateUnsupported, responsesUsageInputTokens,
+  parseToolArguments, isResponsesStateUnsupported,
 } = require("./transport");
 const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, getFullFileTool } = require("./prompt-renderer");
 const { createContextProjection } = require('./context-projection');
@@ -194,6 +195,7 @@ function createConversation(options) {
     state.occupancyAnchor = null;
     state.lastPrice = null;
     state.lastOccupancy = null;
+    state.committedPriceCache = null;
     state.lastResponseId = null;
     state.turn = null;
     for (const record of parsed.records ?? []) {
@@ -216,7 +218,7 @@ function createConversation(options) {
     for (const file of trackerFor(sessionId).trackedFiles?.() ?? []) trackerFor(sessionId).modifiedFile?.(file.path);
     // Replay must never contact a provider, even near capacity. Price only the
     // restored active generation after the tracked files have been restored.
-    priceLocalRequest(state, { question: "", additions: [] });
+    committedPrice(state);
     state.reloadRequired = false;
     return { state, parsed };
   }
@@ -306,7 +308,9 @@ function createConversation(options) {
           state.usage = createTurnUsage();
           state.usageSamples = [];
           recordUsage(state, payload.usageSamples);
-          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor;
+          // Legacy anchors have no matching request baseline. Read the log as
+          // before, but estimate until the next provider sample can calibrate.
+          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor?.version === 1 ? payload.occupancyAnchor : null;
         }
         state.sessionUsage.addTurn(state.usage.totals());
         if (state.turn && state.turn.turnId === payload.turnId) {
@@ -331,7 +335,7 @@ function createConversation(options) {
     if (!staged.continuation && !staged.accepted && staged.images?.length) {
       turn[turn.length - 1] = protocolFor(state.config).imageMessage(staged.question, staged.images);
     }
-    if (state.storedState && state.lastResponseId) {
+    if (state.storedState && state.lastResponseId && !staged.localReplay) {
       // Server state is preferred: send only the new input.
       return { input: Array.isArray(turn) ? turn : staged.toolContinuation ?? [], previousResponseId: state.lastResponseId };
     }
@@ -421,7 +425,10 @@ function createConversation(options) {
     const projected = await materializeToolImages(state, request.input, {
       pendingImages: !staged.continuation && !staged.accepted ? staged.images ?? [] : [], signal,
     });
-    return { body: buildBody(state, staged, { ...request, input: projected.items }), hasImages: projected.hasImages };
+    const local = priceLocalRequest(state, { ...staged, inputItems: state.storedState ? null : projected.items });
+    local.measurement.imageKeys = projected.imageKeys;
+    return { body: buildBody(state, staged, { ...request, input: projected.items }), hasImages: projected.hasImages,
+      measurement: local.measurement };
   }
 
   function resolveApiKey(state) {
@@ -451,35 +458,40 @@ function createConversation(options) {
 
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
-  function priceLocalRequest(state, { question, additions, rendererVersion = RENDERER_VERSION }) {
+  function priceLocalRequest(state, { question = "", additions = [], rendererVersion = RENDERER_VERSION, inputItems = null, ...staged }) {
     rendererVersion = RENDERER_VERSION;
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
-    const items = state.compactedSurface ? activeSurface(state) : state.items;
+    const items = inputItems ?? requestInput(state, { question, additions, rendererVersion, ...staged, localReplay: true }).input;
+    const imageKeys = state.imageToolResults.keys(items);
     const price = priceProspectiveRequest({
       instructions: buildInstructions({ rendererVersion, customSystemPrompt: state.config?.systemPrompt ?? "" }),
       tools: toolsFor(state, rendererVersion),
       items: state.contextProjection.items(items),
-      additions: additions.length ? renderTurn({ mutations: additions, question: "", userMessage: protocolFor(state.config).userMessage, rendererVersion }).slice(0, -1) : [],
-      question,
       reserveTokens: budget.configured ? RESERVE : 0,
     });
-    // The reserve is included in price.total once. Occupancy describes input,
-    // and a previous provider sample must not hide newly added local content.
     const estimatedInput = price.total - price.components.reserve;
-    let occupancy = contextOccupancy({
-      anchor: state.occupancyAnchor,
-      prospectiveTokens: estimatedInput,
-    });
-    if (estimatedInput > occupancy.tokens) occupancy = { tokens: estimatedInput, exact: false, estimated: true };
-    state.lastPrice = price;
-    state.lastOccupancy = occupancy;
-    return { settings, budget, price, occupancy, estimatedInput };
+    const transientImages = !staged.accepted && !staged.continuation ? staged.images?.length ?? 0 : 0;
+    const occupancy = calibratedOccupancy(state.occupancyAnchor, estimatedInput, imageKeys, transientImages);
+    return { settings, budget, price, occupancy, estimatedInput,
+      measurement: { localTokens: estimatedInput, imageKeys, transientImages } };
+  }
+
+  function committedPrice(state) {
+    const references = state.compactedSurface ? JSON.stringify(trackedFileReferences(state)) : null;
+    const key = [state.items.length, state.compactedSurface, state.config, state.requestSearch, references];
+    if (!state.committedPriceCache || key.some((value, index) => value !== state.committedPriceCache.key[index])) {
+      state.committedPriceCache = { key, value: priceLocalRequest(state, {}) };
+    }
+    const local = state.committedPriceCache.value;
+    state.lastPrice = local.price;
+    // Anchors can change without canonical items changing.
+    return { ...local, occupancy: calibratedOccupancy(state.occupancyAnchor, local.estimatedInput, local.measurement.imageKeys) };
   }
 
   async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true, images = [] }) {
-    const local = priceLocalRequest(state, { question, additions, rendererVersion });
-    const { settings, budget, price, estimatedInput } = local;
+    const local = priceLocalRequest(state, { question, additions, rendererVersion, images });
+    const { settings, budget, price } = local;
     let { occupancy } = local;
     if (!budget.configured) return { blocked: false, needsCompaction: false, price, occupancy };
 
@@ -497,12 +509,11 @@ function createConversation(options) {
         exactInput = exact.inputTokens;
         state.exactInputTokens = exactInput;
         occupancy = contextOccupancy({ anchor: { inputTokens: exactInput } });
-        state.lastOccupancy = occupancy;
       } else if (exact.supported === false) {
         state.inputTokensUnsupported = true;
       }
     }
-    const exceedsCapacity = (exactInput ?? estimatedInput) + RESERVE > budget.capacity;
+    const exceedsCapacity = (exactInput ?? occupancy.tokens) + RESERVE > budget.capacity;
     const pressure = exceedsCapacity || shouldCompact({ occupancyTokens: occupancy.tokens, capacityTokens: budget.capacity });
     // Give a replaceable history prefix a chance to shrink before rejecting
     // the pending question. A first oversized file has no such prefix.
@@ -739,12 +750,11 @@ function createConversation(options) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
       (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId, ...(sample.scope ? { scope: sample.scope } : {}) });
-      const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
-      if (sample.scope !== 'search' && sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length && !state.turn?.hadToolImages) {
-        state.occupancyAnchor = { inputTokens };
+      if (sample.scope !== 'search' && state.turn?.requestMeasurement) {
+        const anchor = occupancyAnchor(sample.usage, state.turn.requestMeasurement);
+        if (anchor) state.occupancyAnchor = anchor;
       }
     }
-    if (state.turn?.imagePaths?.length || state.turn?.hadToolImages) state.occupancyAnchor = null;
   }
 
   function pushProjection(state, projection) {
@@ -875,10 +885,13 @@ function createConversation(options) {
       try {
         const projected = await buildModelBody(state, turn, signal);
         body = projected.body;
+        turn.requestMeasurement = projected.measurement;
         if (projected.hasImages) turn.hadToolImages = true;
       }
       catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
       if (signal?.aborted || !isEnabled()) return await finishTurn(state, turn, 'stopped', { text: turn.text });
+      // Capture before acceptance/output changes canonical history. A sample
+      // from this attempt can only calibrate this exact request surface.
       const result = await streamAttempt({
         protocol: state.requestSearch?.native ? geminiSearchWire : protocolFor(state.config),
         network: environment.network,
@@ -1318,6 +1331,7 @@ function createConversation(options) {
   function snapshot(sessionId) {
     const state = sessionStores.get(sessionId)?.getState().state;
     if (!state) return null;
+    const committed = committedPrice(state);
     return {
       config: state.config ?? null,
       roleDisplayProfile: state.roleDisplayProfile ?? null,
@@ -1335,13 +1349,9 @@ function createConversation(options) {
       nonStreaming: state.nonStreaming,
       items: [...state.items],
       toolGroups: [...(state.toolGroups ?? [])],
-      // Occupancy is recomputed at read time: the latest provider anchor is
-      // exact, and before the first anchor the local estimate stands in.
-      occupancy: contextOccupancy({
-        anchor: state.occupancyAnchor,
-        prospectiveTokens: Math.max(0, (state.lastPrice?.total ?? 0) - (state.lastPrice?.components.reserve ?? 0)),
-      }),
-      price: state.lastPrice ?? null,
+      // Pending drafts/preflight never replace the committed-context display.
+      occupancy: committed.occupancy,
+      price: committed.price,
       turnUsage: state.usage.totals(),
       sessionUsage: state.sessionUsage.total(),
       compaction: { active: Boolean(state.compactedSurface), running: Boolean(state.manualCompacting) },

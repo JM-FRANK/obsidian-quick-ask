@@ -16,13 +16,14 @@ function createImageToolResults() {
       if (item && Array.isArray(paths) && paths.length) references.set(item, [...paths]);
     },
     copy(from, to) { if (references.has(from)) references.set(to, references.get(from)); },
+    keys(items) { return items.flatMap(item => references.get(item) ?? []); },
     async materialize(items, { source, allowlist, protocol, pendingImages = [], signal = null }) {
       const targets = items.filter(item => references.has(item));
-      if (!targets.length) return { items, hasImages: false };
+      if (!targets.length) return { items, hasImages: false, imageKeys: [] };
       const results = new Map(), reads = new Map();
       const failAll = output => {
         for (const item of targets) results.set(item, { error: output });
-        return { items: protocol.imageToolResults(items, results), hasImages: false };
+        return { items: protocol.imageToolResults(items, results), hasImages: false, imageKeys: [] };
       };
       if (signal?.aborted) return failAll('Image read cancelled.');
       // Count image occurrences, not unique source files. The same path in two
@@ -63,7 +64,7 @@ function createImageToolResults() {
       const images = [...results.values()].flatMap(result => result.images ?? []);
       try { validateImageBatch([...pendingImages, ...images]); }
       catch (error) { return failAll(imageReadFailure(error)); }
-      return { items: protocol.imageToolResults(items, results), hasImages: images.length > 0 };
+      return { items: protocol.imageToolResults(items, results), hasImages: images.length > 0, imageKeys: images.map(image => image.path) };
     },
   };
 }

@@ -1127,6 +1127,8 @@ class QuickAskView {
     const list = ui.createEl(panel, "dl", { cls: "scholar-quick-ask-token-detail" });
     ui.createEl(list, "dt", { text: this.t(this.getSettings(), "token.currentContext") });
     ui.createEl(list, "dd", { text: label + (occupancy.exact ? "" : ` (${this.t(this.getSettings(), "token.estimated")})`) });
+    if (occupancy.unknownImages) ui.createEl(list, "dd", { text: this.t(this.getSettings(), "token.unknownImages", { count: occupancy.unknownImages }) });
+    else if (occupancy.imagesIncluded) ui.createEl(list, "dd", { text: this.t(this.getSettings(), "token.imagesIncluded", { count: occupancy.imagesIncluded }) });
     if (capacity) {
       ui.createEl(list, "dt", { text: this.t(this.getSettings(), "token.percent") });
       ui.createEl(list, "dd", { text: formatPercent(ratio) });

@@ -4,6 +4,11 @@
 
 This feature set is first available as **1.1.0-beta.1**, a GitHub pre-release for testing. The installation manifest uses numeric version **1.1.0**; the stable branch and Latest release remain **1.0.6**.
 
+### Changes prepared after 1.1.0-beta.1
+
+- Include QA-045 provider-calibrated context occupancy, shared with the stable 1.0.7 candidate: committed-context display, separate draft capacity checks, image-inclusive provider input totals, explicit unknown-image notices and legacy-log fallback.
+- Continue long-lived preview development on upstream `next/1.1`, exported only to downstream `preview/1.1.0`. The next candidate can use `1.1.0-beta.2`; no new tag or Release is created by this change.
+
 ### Added
 
 - Withdraw the last complete conversation turn, including its answer, reasoning and tools, and restore the original question, selections and image paths for editing and manual resubmission. Failed/stopped turns are eligible; after clearing the recovered draft and attachments, earlier turns can be withdrawn in sequence.
