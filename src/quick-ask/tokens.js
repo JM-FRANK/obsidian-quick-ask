@@ -6,6 +6,7 @@
 // This remains a model-independent estimate, never provider-reported usage.
 
 const { estimateTokenCount } = require("tokenx");
+const { inputUsage, withoutImageBytes } = require('./occupancy');
 
 const {
   responsesUsageInputTokens, responsesUsageOutputTokens, responsesUsageTotalTokens,
@@ -25,6 +26,7 @@ function estimateText(text) {
 // its payload directly rather than in a content array.
 function estimateItem(item) {
   if (!item || typeof item !== "object") return 0;
+  item = withoutImageBytes(item);
   if ((typeof item.role === "string" && !item.type) || item.function) {
     return STRUCTURAL_OVERHEAD_TOKENS + ROLE_OVERHEAD_TOKENS + estimateText(JSON.stringify(item));
   }
@@ -39,6 +41,10 @@ function estimateItem(item) {
   if (typeof item.diff === "string") tokens += estimateText(item.diff);
   if (typeof item.arguments === "string") tokens += estimateText(item.arguments);
   if (typeof item.output === "string") tokens += estimateText(item.output);
+  // Responses vision tool results use a block array instead of a string.
+  if (Array.isArray(item.output)) for (const block of item.output) {
+    if (typeof block?.text === 'string') tokens += STRUCTURAL_OVERHEAD_TOKENS + estimateText(block.text);
+  }
   // Opaque transport payloads (encrypted reasoning, a Compaction Item's
   // encrypted_content) are not readable text, but they still occupy the
   // request, so their text is estimated too (not a guaranteed upper bound).
@@ -143,7 +149,7 @@ function createTurnUsage() {
       const reports = (read) => included.every((usage) => Number.isFinite(read(usage)));
       const totals = {
         attempts: included.length,
-        input: sum(u => u.prompt_tokens ?? responsesUsageInputTokens(u)),
+        input: sum(inputUsage),
         output: sum(u => u.completion_tokens ?? responsesUsageOutputTokens(u)),
         total: sum(responsesUsageTotalTokens),
       };

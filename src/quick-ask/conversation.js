@@ -1,4 +1,3 @@
-const { effectiveRecords, latestTurn, recoverableDraft, restoredDraft, sessionUsage: replaySessionUsage, changedConnection, portableItems, compactionUsage, legacyRoleProfile } = require("./session-editing");
 const { providerSearchMode } = require("./provider-profiles");
 const { runProviderSearch, mixedSearchErrorHint } = require("./provider-search");
 const { PROCESS_VERSION, createTurnProcess, restoreProcess } = require("./turn-process");
@@ -7,6 +6,7 @@ const { imagePaths: normalizeImagePaths } = require("./images");
 const { normalizeReasoningEffort } = require("./reasoning");
 const { protocolFor, messageText, isToolOutput, toolOutputId, truncateOutput, callsFromItem } = require("./protocol");
 const { createImageToolResults } = require('./image-tool-results');
+const { occupancyAnchor, calibratedOccupancy } = require('./occupancy');
 const { toolHistory, toolSummary, parameters: toolParameters, updateToolGroups, sourceSummary } = require('./tool-history');
 const { WEB_SEARCH_TOOL, normalizeSearchSettings, searchRoute, responseSources, responseSuggestions, normalizeSources, citedAnswer } = require("./web-search");
 const { createSearchClient } = require("./search-client");
@@ -17,7 +17,7 @@ const {
   streamAttempt, createRetryPolicy, normalizeError,
   isResponsesFunctionCall,
   isResponsesWebSearchCall,
-  parseToolArguments, isResponsesStateUnsupported, responsesUsageInputTokens,
+  parseToolArguments, isResponsesStateUnsupported,
 } = require("./transport");
 const { renderTurn, renderContextEnvelope, RENDERER_VERSION, buildInstructions, getFullFileTool } = require("./prompt-renderer");
 const { createContextProjection } = require('./context-projection');
@@ -109,12 +109,12 @@ function createConversation(options) {
   }
   function nextSearchRoute(sessionId) {
     const state = stateFor(sessionId);
-    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), { ...state.config, providerSearchMode: (state.config?.configurationVersion ? state.config.providerSearchMode : providerSearchMode(state.config, getSettings()?.quickAsk)) });
+    return searchRoute(searchEnabled(sessionId), normalizeSearchSettings(getSettings()?.quickAsk?.webSearch), { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
   }
   function validateSearchForSend(sessionId, enabled = searchEnabled(sessionId)) {
     const state = stateFor(sessionId);
     const settings = normalizeSearchSettings(getSettings()?.quickAsk?.webSearch);
-    const route = searchRoute(enabled, settings, { ...state.config, providerSearchMode: (state.config?.configurationVersion ? state.config.providerSearchMode : providerSearchMode(state.config, getSettings()?.quickAsk)) });
+    const route = searchRoute(enabled, settings, { ...state.config, providerSearchMode: providerSearchMode(state.config, getSettings()?.quickAsk) });
     const errors = {};
     if (route.kind === "invalid") errors[route.error] = true;
     if (["independent", "provider-api"].includes(route.kind) && !environment.secrets.resolve(route.secretId)?.trim()) errors.searchSecret = true;
@@ -159,11 +159,9 @@ function createConversation(options) {
   }
 
   // Rebuild in-memory state by replaying the durable log.
-  async function load(sessionId, { onParsed = null, editing = false } = {}) {
-    const raw = await sessionStore.readLog(sessionId);
-    const parsed = { ...raw, records: effectiveRecords(raw.records) };
+  async function load(sessionId, { onParsed = null } = {}) {
+    const parsed = await sessionStore.readLog(sessionId);
     const state = stateFor(sessionId);
-    if (state.editing && !editing) throw new Error("Session is being edited");
     if (parsed.missing) throw new Error(`Quick Ask session ${sessionId} does not exist`);
     if (state.activeController || state.turn?.controller) {
       if (onParsed) await onParsed(parsed);
@@ -194,30 +192,23 @@ function createConversation(options) {
     state.occupancyAnchor = null;
     state.lastPrice = null;
     state.lastOccupancy = null;
+    state.committedPriceCache = null;
     state.lastResponseId = null;
     state.turn = null;
     for (const record of parsed.records ?? []) {
       applyRecord(state, record);
     }
-    state.roleDisplayProfile = legacyRoleProfile(state.config, getSettings()?.quickAsk);
     if (state.turn?.processVersion === PROCESS_VERSION) {
       const records = (parsed.records ?? []).filter(record => record.payload?.turnId === state.turn.turnId);
       state.turn.process = createTurnProcess(restoreProcess(records));
     }
-    state.sessionUsage = replaySessionUsage(raw.records ?? []);
-    state.restoredDraft = restoredDraft(raw.records ?? []);
-    state.editableTurn = latestTurn(raw.records ?? []);
     state.toolGroups = toolHistory(parsed.records ?? []);
     if (draftSearch !== undefined) state.searchEnabled = draftSearch;
     if (draftEffort !== undefined) state.reasoningEffort = draftEffort;
     trackerFor(sessionId).restore?.(parsed.records ?? []);
-    // A replay can happen after a configuration edit, without view activation.
-    // Reconcile on the next send even if a modify event preceded that replay.
-    for (const file of trackerFor(sessionId).trackedFiles?.() ?? []) trackerFor(sessionId).modifiedFile?.(file.path);
     // Replay must never contact a provider, even near capacity. Price only the
     // restored active generation after the tracked files have been restored.
-    priceLocalRequest(state, { question: "", additions: [] });
-    state.reloadRequired = false;
+    committedPrice(state);
     return { state, parsed };
   }
 
@@ -225,27 +216,6 @@ function createConversation(options) {
     state.contextProjection.sourceRecord(record);
     const payload = record.payload ?? {};
     switch (record.kind) {
-      case "session/configured":
-        if (payload.portable) {
-          const originals = [...state.items];
-          const migrated = state.contextProjection.items(originals);
-          state.items = portableItems(migrated, state.config.protocol, (_from, to, index) => {
-            state.imageToolResults.copy(originals[index], to);
-          });
-          state.compactedSurface = null;
-          state.compactedItems = [];
-        }
-        state.config = { ...payload.config };
-        if (payload.portable) {
-          state.nonStreaming = false;
-          state.inputTokensUnsupported = false;
-          state.officialUnsupported = false;
-          state.overflowRecoveryDone = false;
-        }
-        state.requestSearch = null;
-        state.requestEffort = null;
-        state.occupancyAnchor = null;
-        break;
       case "session/search-state":
         state.searchEnabled = payload.enabled === true;
         break;
@@ -289,8 +259,6 @@ function createConversation(options) {
         state.turn = {
           turnId: payload.turnId,
           processVersion: payload.processVersion,
-          config: payload.config ?? { ...state.config },
-          editDraft: payload.editDraft,
           question: payload.question ?? "",
           additions: payload.additions ?? [],
           imagePaths: payload.images ?? [],
@@ -306,7 +274,9 @@ function createConversation(options) {
           state.usage = createTurnUsage();
           state.usageSamples = [];
           recordUsage(state, payload.usageSamples);
-          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor;
+          // Legacy anchors have no matching request baseline. Read the log as
+          // before, but estimate until the next provider sample can calibrate.
+          if (Object.hasOwn(payload, "occupancyAnchor")) state.occupancyAnchor = payload.occupancyAnchor?.version === 1 ? payload.occupancyAnchor : null;
         }
         state.sessionUsage.addTurn(state.usage.totals());
         if (state.turn && state.turn.turnId === payload.turnId) {
@@ -331,7 +301,7 @@ function createConversation(options) {
     if (!staged.continuation && !staged.accepted && staged.images?.length) {
       turn[turn.length - 1] = protocolFor(state.config).imageMessage(staged.question, staged.images);
     }
-    if (state.storedState && state.lastResponseId) {
+    if (state.storedState && state.lastResponseId && !staged.localReplay) {
       // Server state is preferred: send only the new input.
       return { input: Array.isArray(turn) ? turn : staged.toolContinuation ?? [], previousResponseId: state.lastResponseId };
     }
@@ -421,7 +391,10 @@ function createConversation(options) {
     const projected = await materializeToolImages(state, request.input, {
       pendingImages: !staged.continuation && !staged.accepted ? staged.images ?? [] : [], signal,
     });
-    return { body: buildBody(state, staged, { ...request, input: projected.items }), hasImages: projected.hasImages };
+    const local = priceLocalRequest(state, { ...staged, inputItems: state.storedState ? null : projected.items });
+    local.measurement.imageKeys = projected.imageKeys;
+    return { body: buildBody(state, staged, { ...request, input: projected.items }), hasImages: projected.hasImages,
+      measurement: local.measurement };
   }
 
   function resolveApiKey(state) {
@@ -451,35 +424,40 @@ function createConversation(options) {
 
   // Price the complete prospective request against the configured capacity and
   // report which pending Context Files occupy the most estimated tokens.
-  function priceLocalRequest(state, { question, additions, rendererVersion = RENDERER_VERSION }) {
+  function priceLocalRequest(state, { question = "", additions = [], rendererVersion = RENDERER_VERSION, inputItems = null, ...staged }) {
     rendererVersion = RENDERER_VERSION;
     const settings = normalizeQuickAskSettings(state.config ?? getSettings()?.quickAsk);
     const budget = capacityBudget(settings.contextWindowTokens, { reserveTokens: RESERVE });
-    const items = state.compactedSurface ? activeSurface(state) : state.items;
+    const items = inputItems ?? requestInput(state, { question, additions, rendererVersion, ...staged, localReplay: true }).input;
+    const imageKeys = state.imageToolResults.keys(items);
     const price = priceProspectiveRequest({
       instructions: buildInstructions({ rendererVersion, customSystemPrompt: state.config?.systemPrompt ?? "" }),
       tools: toolsFor(state, rendererVersion),
       items: state.contextProjection.items(items),
-      additions: additions.length ? renderTurn({ mutations: additions, question: "", userMessage: protocolFor(state.config).userMessage, rendererVersion }).slice(0, -1) : [],
-      question,
       reserveTokens: budget.configured ? RESERVE : 0,
     });
-    // The reserve is included in price.total once. Occupancy describes input,
-    // and a previous provider sample must not hide newly added local content.
     const estimatedInput = price.total - price.components.reserve;
-    let occupancy = contextOccupancy({
-      anchor: state.occupancyAnchor,
-      prospectiveTokens: estimatedInput,
-    });
-    if (estimatedInput > occupancy.tokens) occupancy = { tokens: estimatedInput, exact: false, estimated: true };
-    state.lastPrice = price;
-    state.lastOccupancy = occupancy;
-    return { settings, budget, price, occupancy, estimatedInput };
+    const transientImages = !staged.accepted && !staged.continuation ? staged.images?.length ?? 0 : 0;
+    const occupancy = calibratedOccupancy(state.occupancyAnchor, estimatedInput, imageKeys, transientImages);
+    return { settings, budget, price, occupancy, estimatedInput,
+      measurement: { localTokens: estimatedInput, imageKeys, transientImages } };
+  }
+
+  function committedPrice(state) {
+    const references = state.compactedSurface ? JSON.stringify(trackedFileReferences(state)) : null;
+    const key = [state.items.length, state.compactedSurface, state.config, state.requestSearch, references];
+    if (!state.committedPriceCache || key.some((value, index) => value !== state.committedPriceCache.key[index])) {
+      state.committedPriceCache = { key, value: priceLocalRequest(state, {}) };
+    }
+    const local = state.committedPriceCache.value;
+    state.lastPrice = local.price;
+    // Anchors can change without canonical items changing.
+    return { ...local, occupancy: calibratedOccupancy(state.occupancyAnchor, local.estimatedInput, local.measurement.imageKeys) };
   }
 
   async function pricePendingRequest(state, { question, additions, rendererVersion = RENDERER_VERSION, allowCompaction = true, images = [] }) {
-    const local = priceLocalRequest(state, { question, additions, rendererVersion });
-    const { settings, budget, price, estimatedInput } = local;
+    const local = priceLocalRequest(state, { question, additions, rendererVersion, images });
+    const { settings, budget, price } = local;
     let { occupancy } = local;
     if (!budget.configured) return { blocked: false, needsCompaction: false, price, occupancy };
 
@@ -497,12 +475,11 @@ function createConversation(options) {
         exactInput = exact.inputTokens;
         state.exactInputTokens = exactInput;
         occupancy = contextOccupancy({ anchor: { inputTokens: exactInput } });
-        state.lastOccupancy = occupancy;
       } else if (exact.supported === false) {
         state.inputTokensUnsupported = true;
       }
     }
-    const exceedsCapacity = (exactInput ?? estimatedInput) + RESERVE > budget.capacity;
+    const exceedsCapacity = (exactInput ?? occupancy.tokens) + RESERVE > budget.capacity;
     const pressure = exceedsCapacity || shouldCompact({ occupancyTokens: occupancy.tokens, capacityTokens: budget.capacity });
     // Give a replaceable history prefix a chance to shrink before rejecting
     // the pending question. A first oversized file has no such prefix.
@@ -540,7 +517,7 @@ function createConversation(options) {
   async function compactNow(sessionId) {
     if (!isEnabled()) return { status: "disabled" };
     const state = stateFor(sessionId);
-    if (state.editing || state.preparing || state.turn?.status === "running" || runningTurns() >= MAX_CONCURRENT_TURNS) return { status: "busy" };
+    if (state.preparing || state.turn?.status === "running" || runningTurns() >= MAX_CONCURRENT_TURNS) return { status: "busy" };
     const validation = validateForSend(state);
     if (!validation.valid) return { status: "invalid", errors: validation.errors };
     const controller = createAbortController(environment.network);
@@ -625,7 +602,6 @@ function createConversation(options) {
         pushProjection(state, { kind: "compaction", status: "failed", reason: "no-shrink" });
         return committed;
       }
-      if (result.usage) state.sessionUsage.addTurn(compactionUsage(result.usage));
       applyCompactedSurface(state, committed.checkpoint, retained);
       pushProjection(state, {
         kind: "compaction", status: "committed", reason, usage: result.usage,
@@ -651,7 +627,6 @@ function createConversation(options) {
       pushProjection(state, { kind: "compaction", status: "failed", reason: "no-shrink" });
       return committed;
     }
-    if (summary.usage) state.sessionUsage.addTurn(compactionUsage(summary.usage));
     applyCompactedSurface(state, committed.checkpoint, retained);
     pushProjection(state, {
       kind: "compaction", status: "committed", reason,
@@ -739,12 +714,11 @@ function createConversation(options) {
       sample.attemptId ??= attemptId;
       state.usage.record(sample, { attemptId: sample.attemptId });
       (state.usageSamples ??= []).push({ source: sample.source, usage: sample.usage, attemptId: sample.attemptId, ...(sample.scope ? { scope: sample.scope } : {}) });
-      const inputTokens = sample.usage?.prompt_tokens ?? responsesUsageInputTokens(sample.usage);
-      if (sample.scope !== 'search' && sample.usage && Number.isFinite(inputTokens) && !state.turn?.imagePaths?.length && !state.turn?.hadToolImages) {
-        state.occupancyAnchor = { inputTokens };
+      if (sample.scope !== 'search' && state.turn?.requestMeasurement) {
+        const anchor = occupancyAnchor(sample.usage, state.turn.requestMeasurement);
+        if (anchor) state.occupancyAnchor = anchor;
       }
     }
-    if (state.turn?.imagePaths?.length || state.turn?.hadToolImages) state.occupancyAnchor = null;
   }
 
   function pushProjection(state, projection) {
@@ -752,12 +726,11 @@ function createConversation(options) {
   }
 
   // One user turn: durable pending state, then the streamed attempt.
-  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION, images = [], editDraft = null } = {}) {
+  async function send(sessionId, question, { signal = null, additions = null, webSearch = undefined, webSearchRevision = undefined, reasoning = undefined, rendererVersion = RENDERER_VERSION, images = [] } = {}) {
     const state = stateFor(sessionId);
     // All asynchronous phases resolve only their owning session's tracker.
     if (!isEnabled()) return { status: "disabled" };
-    if (state.reloadRequired) return { status: "failed", accepted: false, error: { code: "SESSION_RELOAD", message: "Reload this conversation before sending." } };
-    if (state.editing || state.preparing || (state.turn && state.turn.status === "running")) {
+    if (state.preparing || (state.turn && state.turn.status === "running")) {
       return { status: "busy", error: normalizeError({ kind: "protocol", message: "This session already has a running turn" }) };
     }
     if (runningTurns() >= MAX_CONCURRENT_TURNS) {
@@ -817,10 +790,10 @@ function createConversation(options) {
       state.usage = createTurnUsage();
       state.usageSamples = [];
       state.pendingMutations = stagedAdditions;
-      const turn = { turnId, config: { ...state.config }, editDraft, processVersion: PROCESS_VERSION, process: createTurnProcess(), question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
+      const turn = { turnId, processVersion: PROCESS_VERSION, process: createTurnProcess(), question, imagePaths: paths, images: preparedImages, additions: stagedAdditions, status: "running", text: "", reasoning: "", responseId: null, controller, searchSources: [], searchStatuses: [], searchSettings, searchEnabled: enabled, reasoningEffort: effort, rendererVersion };
       state.turn = turn;
       state.contextProjection.beginTurn(stagedAdditions, rendererVersion);
-      state.editableTurn = await sessionStore.append(sessionId, "turn/started", { turnId, config: { ...state.config }, ...(recoverableDraft(editDraft) ? { editDraft } : {}), processVersion: PROCESS_VERSION, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, searchExecution: selectedSearch.kind === 'provider-search' ? 'independent' : 'mixed', nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
+      await sessionStore.append(sessionId, "turn/started", { turnId, processVersion: PROCESS_VERSION, question, ...(paths.length ? { images: paths } : {}), additions: stagedAdditions, webSearch: enabled, searchExecution: selectedSearch.kind === 'provider-search' ? 'independent' : 'mixed', nextSearchEnabled: searchSettings.defaultEnabled ? enabled : false, reasoningEffort: effort, rendererVersion });
       // Read the current toggle here so a manual change made during preflight
       // cannot be overwritten by consuming this question's one-shot permission.
       if ((state.searchRevision ?? 0) === searchRevision) {
@@ -875,10 +848,13 @@ function createConversation(options) {
       try {
         const projected = await buildModelBody(state, turn, signal);
         body = projected.body;
+        turn.requestMeasurement = projected.measurement;
         if (projected.hasImages) turn.hadToolImages = true;
       }
       catch (error) { return await finishTurn(state, turn, "failed", { error: normalizeError(error) }); }
       if (signal?.aborted || !isEnabled()) return await finishTurn(state, turn, 'stopped', { text: turn.text });
+      // Capture before acceptance/output changes canonical history. A sample
+      // from this attempt can only calibrate this exact request surface.
       const result = await streamAttempt({
         protocol: state.requestSearch?.native ? geminiSearchWire : protocolFor(state.config),
         network: environment.network,
@@ -1220,7 +1196,6 @@ function createConversation(options) {
     if (!turn.accepted) trackerFor(state.sessionId).rejectTurn();
     await sessionStore.append(state.sessionId, "turn/finished", {
       turnId: turn.turnId,
-      config: turn.config ?? state.config,
       state: status,
       usageSamples: state.usageSamples ?? [],
       occupancyAnchor: state.occupancyAnchor,
@@ -1318,12 +1293,9 @@ function createConversation(options) {
   function snapshot(sessionId) {
     const state = sessionStores.get(sessionId)?.getState().state;
     if (!state) return null;
+    const committed = committedPrice(state);
     return {
       config: state.config ?? null,
-      roleDisplayProfile: state.roleDisplayProfile ?? null,
-      editableTurn: state.editableTurn ?? null,
-      restoredDraft: state.restoredDraft ?? null,
-      turnConfig: state.turn?.config ?? state.config,
       status: state.preparing ? "running" : state.turn?.status ?? "idle",
       text: state.turn?.text ?? "",
       reasoning: state.turn?.reasoning ?? "",
@@ -1335,64 +1307,13 @@ function createConversation(options) {
       nonStreaming: state.nonStreaming,
       items: [...state.items],
       toolGroups: [...(state.toolGroups ?? [])],
-      // Occupancy is recomputed at read time: the latest provider anchor is
-      // exact, and before the first anchor the local estimate stands in.
-      occupancy: contextOccupancy({
-        anchor: state.occupancyAnchor,
-        prospectiveTokens: Math.max(0, (state.lastPrice?.total ?? 0) - (state.lastPrice?.components.reserve ?? 0)),
-      }),
-      price: state.lastPrice ?? null,
+      // Pending drafts/preflight never replace the committed-context display.
+      occupancy: committed.occupancy,
+      price: committed.price,
       turnUsage: state.usage.totals(),
       sessionUsage: state.sessionUsage.total(),
       compaction: { active: Boolean(state.compactedSurface), running: Boolean(state.manualCompacting) },
     };
-  }
-
-  function canEdit(sessionId) {
-    const state = stateFor(sessionId);
-    return isEnabled() && Boolean(state.config) && !state.reloadRequired && !state.editing && !state.preparing &&
-      !state.activeController && !state.manualCompacting && state.turn?.status !== "running";
-  }
-
-  async function editSession(sessionId, operation) {
-    if (!canEdit(sessionId)) return { status: "busy" };
-    const state = stateFor(sessionId);
-    state.editing = true;
-    let committed = false;
-    try {
-      const { parsed } = await load(sessionId, { editing: true });
-      if (!isSupportedSession(parsed) || parsed.running) throw new Error("Session unavailable");
-      const action = operation(parsed, state);
-      await sessionStore.commitEdit(sessionId, action.kind, action.payload, { nextSeq: parsed.nextSeq });
-      committed = true;
-      await load(sessionId, { editing: true });
-      pushProjection(state, { kind: "session-edited", action: action.kind });
-      return { status: "committed", draft: action.payload.draft ?? null };
-    } catch (error) {
-      if (committed) state.reloadRequired = true;
-      return { status: "failed", error: { code: committed ? "SESSION_RELOAD" : error.message === "HISTORY_INCOMPATIBLE" ? "HISTORY_INCOMPATIBLE" : "SESSION_EDIT" } };
-    } finally { state.editing = false; }
-  }
-
-  async function configure(sessionId, patch) {
-    return editSession(sessionId, (_parsed, state) => {
-      const config = { ...state.config, ...patch, configurationVersion: (state.config.configurationVersion ?? 0) + 1 };
-      if (config.protocol !== state.config.protocol) throw new Error("HISTORY_INCOMPATIBLE");
-      const portable = changedConnection(state.config, config);
-      if (portable) portableItems(state.contextProjection.items(state.items), config.protocol);
-      const validation = validateQuickAskSettings(normalizeQuickAskSettings(config));
-      if (Object.hasOwn(patch, "model") && (!validation.valid || !environment.secrets.resolve(config.secretId))) throw new Error("Invalid connection");
-      return { kind: "session/configured", payload: { config, portable } };
-    });
-  }
-
-  async function withdraw(sessionId, { hasDraft = false } = {}) {
-    if (hasDraft) return { status: "draft" };
-    return editSession(sessionId, parsed => {
-      const turn = latestTurn(parsed.records);
-      if (!turn || !recoverableDraft(turn.payload?.editDraft)) throw new Error("Original draft unavailable");
-      return { kind: "session/withdrawn", payload: { turnId: turn.payload.turnId, draft: turn.payload.editDraft } };
-    });
   }
 
   // Permanently switch this session from server-side chaining to local replay.
@@ -1403,7 +1324,6 @@ function createConversation(options) {
   }
 
   return {
-    canEdit, configure, withdraw,
     refreshToolConcurrency: () => toolExecutor.refreshConcurrency?.(),
     suspend() {
       for (const store of sessionStores.values()) {

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.7 — Provider-calibrated context occupancy
+
+### Changed
+
+- Prefer provider-reported input tokens tied to the exact request baseline; estimate only later additions/removals instead of taking the larger whole-context heuristic.
+- Display committed context independently of unsent drafts; check the full prospective request separately before sending.
+- Include retained tool-image input through provider totals, preserve Gemini image modality details, and mark unknown image occupancy as incomplete. Do not count image bytes as text or add cache/image subtotals twice.
+- Keep old session logs unchanged and readable; unavailable legacy calibration falls back to local estimates until a new response supplies usage.
+
+### Stable-line scope
+
+- This stable candidate does not include preview-only turn withdrawal or in-conversation role/model switching. Stable session formats remain schema 1/2; preview-edited schema 3/4 sessions require the preview line.
+- Existing 1.0.6 and 1.1.0-beta.1 releases are unchanged. This version is prepared locally, not published by the branch reorganization.
+- Automated logic/build/export checks do not replace user-owned UI or live-provider acceptance.
+
 ## 1.0.6 — Image tools, ordered process views and faster history
 
 ### Added

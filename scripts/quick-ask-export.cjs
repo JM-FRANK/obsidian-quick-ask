@@ -11,6 +11,9 @@ function exportQuickAsk({ source, ref, out, worktree = false }) {
   const read = name => worktree ? fs.readFileSync(path.join(source, name)) : git(['show', `${commit}:${name}`]);
   if (worktree) {
     for (const directory of ['src/quick-ask', 'release/quick-ask']) {
+      // Rebuild this allowlist from disk, including deletions since the selected
+      // commit (for example preview-only modules removed from stable main).
+      for (const name of available) if (name.startsWith(`${directory}/`)) available.delete(name);
       const walk = folder => {
         for (const entry of fs.readdirSync(path.join(source, folder), { withFileTypes: true })) {
           if (entry.name === 'node_modules') continue;

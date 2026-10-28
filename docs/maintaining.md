@@ -2,6 +2,14 @@
 
 Quick Ask is maintained in Scholar Workbench. The standalone repository is a generated distribution: its feature source, settings UI, translations, styles, release metadata, documentation and workflows are synchronized from an upstream commit.
 
+## Release lines
+
+Upstream `main` maintains stable 1.0.x code and exports only to downstream `main`. Upstream `next/1.1` owns session editing and other preview features, and exports only to downstream `preview/1.1.0`. Shared fixes land on the stable source line first and are then integrated into the preview source line; preserve each line’s version metadata. Never develop feature implementations downstream.
+
+Stable sessions use schema 1/2. Preview session editing can upgrade an affected session to schema 3/4, which stable builds cannot open. QA-045 does not change these formats. Keep backups before trying preview edits if downgrade is intended.
+
+The existing `release/quick-ask-1.1.0-beta.1` upstream branch is a historical candidate; ongoing preview work uses `next/1.1`. Released tags are not moved.
+
 ## Update and synchronize
 
 In the main Scholar Workbench checkout, update the feature and release notes. To update all version files together:

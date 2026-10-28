@@ -182,7 +182,8 @@ test('a configured capacity is validated against the whole prospective request',
   const snapshot = fixture.conversation.snapshot(id);
   assert.equal(snapshot.price.estimated, true, 'the local price is marked as an estimate');
   assert.equal(snapshot.price.components.reserve, 16384, 'the fixed answer reserve is priced');
-  assert.equal(snapshot.occupancy.exact, true, 'the provider-reported input becomes the exact anchor');
+  assert.equal(snapshot.occupancy.source, 'provider');
+  assert.equal(snapshot.occupancy.estimated, true, 'new assistant output is an estimated addition to the provider input');
 });
 
 test('a request that cannot fit the configured capacity is blocked with its largest contributors', async () => {
@@ -342,12 +343,13 @@ test('session usage folds compaction usage and every settled turn', async () => 
   assert.equal(snapshot.turnUsage.total > 0, true);
 });
 
-test('the occupancy anchor comes from provider usage and stays exact afterwards', async () => {
+test('provider input calibrates occupancy while subsequent output remains estimated', async () => {
   const fixture = makeFixture();
   const id = await start(fixture);
   await fixture.conversation.send(id, 'first');
   const snapshot = fixture.conversation.snapshot(id);
-  assert.equal(snapshot.occupancy.exact, true, 'a provider-reported input becomes the exact anchor');
+  assert.equal(snapshot.occupancy.source, 'provider');
+  assert.equal(snapshot.occupancy.estimated, true);
   assert.equal(snapshot.occupancy.tokens > 0, true);
 });
 
@@ -761,7 +763,7 @@ for (const official of ['supported', 'unsupported', 'chat-completions']) {
       assert.equal((await fixture.conversation.send(id, 'last question')).status, 'complete');
       fixture.network.fetch = fetch;
       const before = fixture.conversation.snapshot(id);
-      assert.equal(before.occupancy.tokens, 244000);
+      assert.ok(before.occupancy.tokens > 244000, 'includes the new assistant output');
       assert.equal((await fixture.conversation.compactNow(id)).status, 'committed');
       const live = fixture.conversation.snapshot(id);
       assert.ok(live.occupancy.tokens < before.occupancy.tokens);
@@ -800,7 +802,8 @@ test('usage after a checkpoint remains authoritative on replay; failed compactio
   assert.equal((await fixture.conversation.compactNow(id)).status, 'failed');
   fixture.conversation.forget(id);
   await fixture.conversation.load(id);
-  assert.deepEqual(fixture.conversation.snapshot(id).occupancy, { tokens: 12000, exact: true, estimated: false });
+  assert.ok(fixture.conversation.snapshot(id).occupancy.tokens > 12000);
+  assert.equal(fixture.conversation.snapshot(id).occupancy.source, 'provider');
   assert.equal(fixture.conversation.snapshot(id).sessionUsage, usage);
 });
 
