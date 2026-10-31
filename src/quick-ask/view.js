@@ -267,7 +267,7 @@ class QuickAskView {
       }
       const body = ui.createEl(bubble, "div", { cls: "scholar-quick-ask-message-body" });
       if (entry.role === "assistant" && entry.settled !== false) {
-        paints.push(ui.renderMarkdown(body, entry.displayText ?? entry.text, entry.sourcePath ?? "").catch(() => {
+        paints.push(ui.renderMarkdown(body, entry.displayText ?? entry.text, entry.sourcePath ?? "", { previewImages: true }).catch(() => {
           if (generation !== this.historyGeneration) return;
           body.style.whiteSpace = "pre-wrap"; ui.setText(body, entry.text);
         }).then(() => {
