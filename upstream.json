@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "upstreamCommit": "cef26250b7488a392ded0ef554634cd19ed9bcdf",
+  "upstreamCommit": "04cedcc62d655f6f1a415b9af3f79b99897376ed",
   "preview": false,
-  "sourceTreeSha256": "455418cc288b0fc9aa7e46ce1f580eae93ab9d976db78a614b4ece90ce34e76a",
+  "sourceTreeSha256": "da332d374b2e36ff4145c69194fba2c3ef7c1ff0a9f0cf3dc189f692f46ef279",
   "files": {
     "release/quick-ask/CHANGELOG.md": "032965a37d6658291b0f28fe54db6f9f3ecc7131924609869b036bd16960b53b",
     "release/quick-ask/LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
@@ -82,7 +82,7 @@
     "src/quick-ask/source-copy.js": "300bd4a5e7afbdb6af5cc9ae01a1766dc4b92d05911ef075d2cb9f4d35eed5e0",
     "src/quick-ask/status-bar-layout.js": "cc4f915b37da071e9b793fa9f95c9e1df8a51c34d52f57b6c35b30ed2737eb07",
     "src/quick-ask/stream-presentation.js": "a38024882af4aa3466392abe603d360b04d8a03c1207e0e633591bb8d44b8967",
-    "src/quick-ask/styles.css": "9dded8b10054a97879bfdb038043ec2a022dbf144fdbc7a3869f8772d560ba59",
+    "src/quick-ask/styles.css": "26679bf1912b73f3f05b9f68ce8872294766bd103ea5ed909df1e97f489118de",
     "src/quick-ask/submission-state.js": "b8389e42239b46d5c5b8babd764d7e058dd6588f0bc73f3bb3a5efbf0dfd45dd",
     "src/quick-ask/tokens.js": "51f3007369206277a0089f325a02098c23e87b898cfc37d4247d0adeb3f2be61",
     "src/quick-ask/tool-history-view.js": "a30a400b0c3be41191cb38dbe66ef924075482cfaae34f7bad5fa0f18f6566fd",
