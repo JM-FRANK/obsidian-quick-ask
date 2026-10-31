@@ -1,18 +1,24 @@
 # Changelog
 
-## 1.0.7 — Provider-calibrated context occupancy
+## 1.0.7 — Context occupancy and answer image previews
+
+### Added
+
+- Click a loaded image in an assistant answer to open the existing image viewer, with zoom, pan and window-local closing behavior. Historical answers and delayed image embeds use the same behavior; image links and stored answer text remain unchanged.
 
 ### Changed
 
 - Prefer provider-reported input tokens tied to the exact request baseline; estimate only later additions/removals instead of taking the larger whole-context heuristic.
 - Display committed context independently of unsent drafts; check the full prospective request separately before sending.
-- Include retained tool-image input through provider totals, preserve Gemini image modality details, and mark unknown image occupancy as incomplete. Do not count image bytes as text or add cache/image subtotals twice.
+- Include retained tool-image input through applicable provider totals without separately extracting, storing or displaying image-token subtotals. Fall back to local text estimates when a previous request's total no longer applies; never count image bytes as text or double-count cached input.
 - Keep old session logs unchanged and readable; unavailable legacy calibration falls back to local estimates until a new response supplies usage.
+- Improve context-occupancy panel layout in narrow sidebars.
+- Clarify fixed output instructions: use double-dollar math delimiters inside Mermaid and quote flowchart labels containing math. Existing answers are not rewritten.
 
 ### Stable-line scope
 
-- This stable candidate does not include preview-only turn withdrawal or in-conversation role/model switching. Stable session formats remain schema 1/2; preview-edited schema 3/4 sessions require the preview line.
-- Existing 1.0.6 and 1.1.0-beta.1 releases are unchanged. This version is prepared locally, not published by the branch reorganization.
+- This release does not include preview-only turn withdrawal or in-conversation role/model switching. Stable session formats remain schema 1/2; preview-edited schema 3/4 sessions require the preview line. No existing session logs are migrated.
+- Requires desktop Obsidian 1.13.7 or later. Existing 1.0.6 and 1.1.0-beta.1 releases are unchanged.
 - Automated logic/build/export checks do not replace user-owned UI or live-provider acceptance.
 
 ## 1.0.6 — Image tools, ordered process views and faster history
