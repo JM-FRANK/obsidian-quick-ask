@@ -15,10 +15,10 @@ const {
 // model. Expected values are literal contracts, including historical golden
 // instructions; none are recomputed using the production renderer.
 
-test('the default rendering keeps the original version 1 bytes and the latest version is 8', () => {
+test('the default rendering keeps the original version 1 bytes and the latest version is 9', () => {
   // Version 1 stays reachable for callers that predate the line-numbering
   // follow-up; new requests select the latest explicitly (QA-007).
-  assert.equal(RENDERER_VERSION, 8);
+  assert.equal(RENDERER_VERSION, 9);
   const legacy = renderTurn({ mutations: [{ kind: 'file', path: 'a.md', text: 'alpha' }], question: 'q', rendererVersion: 1 });
   assert.equal(legacy[0].content[0].text.includes('1 | alpha'), false);
   const latest = renderTurn({ mutations: [{ kind: 'file', path: 'a.md', text: 'alpha' }], question: 'q', rendererVersion: 2 });
@@ -425,7 +425,7 @@ test('opening and manager-driven refresh preserve defaults with eager control ca
 test('renderer 4 appends the requested default role rule and preserves custom roles', () => {
   const sentence = 'Unless explicitly requested by the user, you must not include any line-number-related information in your responses.';
   const { DEFAULT_ROLE_INSTRUCTIONS } = require('../src/quick-ask/prompt-renderer');
-  assert.equal(RENDERER_VERSION, 8);
+  assert.equal(RENDERER_VERSION, 9);
   assert.equal(DEFAULT_ROLE_INSTRUCTIONS, `${expectedRole} ${sentence}`);
   const instructions = buildInstructions({ rendererVersion: 4 });
   assert.ok(instructions.includes(`${expectedRole} ${sentence}`));
@@ -489,6 +489,24 @@ test('renderer 6 uses the compact reference contract while retaining approved fo
   }
 });
 
+
+test('renderer 9 appends only the approved Mermaid math rule for default and custom roles', () => {
+  const { protocolFor } = require('../src/quick-ask/protocol');
+  const rule = 'In Mermaid, use `$$...$$` for math; quote flowchart labels containing math.';
+  for (const customSystemPrompt of ['', 'Custom role.']) {
+    const previous = buildInstructions({ rendererVersion: 8, customSystemPrompt });
+    const current = buildInstructions({ rendererVersion: 9, customSystemPrompt });
+    const suffix = customSystemPrompt ? `\n\n${customSystemPrompt}` : '';
+    assert.equal(current, `${suffix ? previous.slice(0, -suffix.length) : previous}\n${rule}${suffix}`);
+    for (let rendererVersion = 1; rendererVersion <= 8; rendererVersion++) {
+      assert.equal(buildInstructions({ rendererVersion, customSystemPrompt }).includes(rule), false);
+    }
+    for (const protocol of ['responses', 'chat-completions']) {
+      const body = protocolFor({ protocol }).buildRequestBody({ model: 'm', instructions: current, input: [] });
+      assert.equal(protocol === 'responses' ? body.instructions : body.messages[0].content, current);
+    }
+  }
+});
 
 test('renderer 8 writes exactly the approved tool guidance for default and custom roles', () => {
   const imageGuide = "`get-image` is read-only. Use it when you determine that viewing an image is needed. For a direct image path, set sourcePath to null and path to its exact Vault-relative path. For an image link in a Markdown document already sent in this session, set sourcePath to that document's exact Vault-relative path and path to the image link. It cannot search for images or access other images.";

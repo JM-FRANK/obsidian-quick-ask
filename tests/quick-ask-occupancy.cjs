@@ -1,7 +1,7 @@
 // quick-ask-suite: portable
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { inputUsage, imageUsage, occupancyAnchor, calibratedOccupancy } = require('../src/quick-ask/occupancy');
+const { inputUsage, occupancyAnchor, calibratedOccupancy } = require('../src/quick-ask/occupancy');
 const { estimateItem, createTurnUsage } = require('../src/quick-ask/tokens');
 
 test('provider totals include cache once and reject missing/invalid counts', () => {
@@ -29,33 +29,40 @@ test('vision input totals need no separate image subtotal to calibrate retained 
   const anchor = occupancyAnchor({ input_tokens: 3000 }, { localTokens: 1000, imageKeys: ['fig.png'] });
   const result = calibratedOccupancy(anchor, 1050, ['fig.png']);
   assert.equal(result.tokens, 3050);
-  assert.equal(result.imagesIncluded, 1);
   assert.equal(result.estimated, true);
-  assert.equal(calibratedOccupancy(anchor, 1050, ['other.png']).unknownImages, 1);
+  assert.equal(calibratedOccupancy(anchor, 1050, ['other.png']).source, undefined);
   assert.equal(calibratedOccupancy(anchor, 1050).source, undefined);
 });
 
-test('one-shot images can only be removed using a reported image subtotal', () => {
+test('one-shot image requests fall back to text after replay without subtracting subtotals', () => {
   const request = { localTokens: 1000, transientImages: 1 };
-  const known = occupancyAnchor({ prompt_tokens: 3000, prompt_tokens_details: { image_tokens: 2000 } }, request);
-  assert.equal(calibratedOccupancy(known, 1100).tokens, 1100);
-  const unknown = occupancyAnchor({ prompt_tokens: 3000 }, request);
-  assert.equal(calibratedOccupancy(unknown, 1100).source, undefined);
-  assert.equal(calibratedOccupancy(unknown, 1100).tokens, 1100);
-  // New attachments cannot inherit a subtotal from different prior images.
-  assert.equal(calibratedOccupancy(known, 1100, [], 1).unknownImages, 1);
+  const anchor = occupancyAnchor({ prompt_tokens: 3000, prompt_tokens_details: { image_tokens: 2000 } }, request);
+  assert.equal(Object.hasOwn(anchor, 'imageTokens'), false);
+  assert.deepEqual(calibratedOccupancy(anchor, 1100), { tokens: 1100, exact: false, estimated: true });
+  assert.equal(calibratedOccupancy({ ...anchor, imageTokens: 2000 }, 1100).source, undefined,
+    'old image subtotals are ignored without rewriting the anchor');
+  assert.equal(calibratedOccupancy(anchor, 1100, [], 1).source, undefined,
+    'another attachment cannot inherit the previous request total');
 });
 
-test('image details accept compatible and Gemini modalities without counting audio as vision', () => {
-  assert.equal(imageUsage({ input_tokens_details: { image_tokens: 200 } }), 200);
-  assert.equal(imageUsage({ promptTokensDetails: [{ modality: 'IMAGE', tokenCount: 200 }, { modality: 'TEXT', tokenCount: 10 }] }), 200);
-  assert.equal(imageUsage({ promptTokensDetails: [{ modality: 'AUDIO', tokenCount: 200 }] }), null);
+test('image detail fields never alter the provider total or become persisted counters', () => {
+  const request = { localTokens: 1000, imageKeys: ['fig.png'] };
+  const expected = { tokens: 3050, exact: false, estimated: true, source: 'provider' };
+  for (const usage of [
+    { input_tokens: 3000, input_tokens_details: { image_tokens: 2000, cached_tokens: 500 } },
+    { prompt_tokens: 3000, prompt_tokens_details: { image_tokens: 4000 } },
+    { promptTokenCount: 3000, promptTokensDetails: [{ modality: 'IMAGE', tokenCount: 2000 }] },
+  ]) {
+    const anchor = occupancyAnchor(usage, request);
+    assert.equal(Object.hasOwn(anchor, 'imageTokens'), false);
+    assert.deepEqual(calibratedOccupancy(anchor, 1050, ['fig.png']), expected);
+  }
 });
 
-test('unknown images and legacy anchors never masquerade as a complete measured total', () => {
+test('legacy anchors fall back to local estimates without image-specific counters', () => {
   const result = calibratedOccupancy({ inputTokens: 99999 }, 100, ['fig.png']);
   assert.equal(result.tokens, 100);
-  assert.equal(result.unknownImages, 1);
+  assert.deepEqual(result, { tokens: 100, exact: false, estimated: true });
   assert.equal(result.exact, false);
 });
 

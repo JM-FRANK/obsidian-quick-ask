@@ -257,7 +257,7 @@ for (const protocol of ['responses', 'chat-completions']) {
     }
     assert.match(JSON.stringify(continuation), new RegExp(Buffer.from(bytes).toString('base64')));
     assert.equal(JSON.stringify(requests[3]).includes('data:image'), true, 'ordinary tool continuation retains the image result');
-    assert.equal(f.conversation.snapshot(id).occupancy.imagesIncluded, 1);
+    assert.equal(f.conversation.snapshot(id).occupancy.source, 'provider');
     assert.equal(JSON.stringify(f.conversation.snapshot(id).items).includes('data:image'), false);
     const priorReads = reads;
     assert.equal((await f.conversation.send(id, 'Plain followup')).status, 'complete');
@@ -1935,19 +1935,68 @@ test('legacy anchors replay without rewriting logs and upgrade only on a new res
   assert.equal(f.conversation.stateFor(id).occupancyAnchor.version, 1);
 });
 
-test('CC image subtotals remove one-shot vision input without double-counting cache', async () => {
+for (const protocol of ['responses', 'chat-completions']) {
   const bytes = Uint8Array.from([137,80,78,71,13,10,26,10,1]);
-  const f = makeConversation({ settings: { protocol: 'chat-completions' },
-    imageSource: { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes },
-    script: () => chatResponse(undefined, { prompt_tokens: 3000, completion_tokens: 5, total_tokens: 3005,
-      prompt_tokens_details: { cached_tokens: 500, image_tokens: 2000 } }),
+  const imageSource = { stat: async () => ({ size: bytes.length }), readBinary: async () => bytes };
+  function visionAnswer(imageTokens = 2000) {
+    const details = { cached_tokens: 500, ...(imageTokens === null ? {} : { image_tokens: imageTokens }) };
+    return protocol === 'chat-completions'
+      ? chatResponse(undefined, { prompt_tokens: 3000, completion_tokens: 5, total_tokens: 3005, prompt_tokens_details: details })
+      : sseResponse([
+        { type: 'response.created', data: { response: { id: 'vision' } } },
+        { type: 'response.output_text.delta', data: { delta: 'Hello' } },
+        { type: 'response.completed', data: { response: { id: 'vision', usage: {
+          input_tokens: 3000, output_tokens: 5, total_tokens: 3005, input_tokens_details: details,
+        } } } },
+      ]);
+  }
+
+  test(`${protocol}: one-shot image requests discard calibration without persisting image subtotals`, async () => {
+    const f = makeConversation({ settings: { protocol }, imageSource, script: () => visionAnswer() });
+    const id = await newSession(f.sessionStore, f.conversation, f.settings);
+    assert.equal((await f.conversation.send(id, 'Look', { images: ['fig.png'] })).status, 'complete');
+    const live = f.conversation.snapshot(id);
+    assert.ok(live.occupancy.tokens < 3000, 'the current text estimate excludes discarded attachments');
+    assert.equal(live.occupancy.source, undefined);
+    assert.equal(live.turnUsage.input, 3000, 'billing retains vision input exactly once');
+    const anchor = f.conversation.stateFor(id).occupancyAnchor;
+    assert.equal(anchor.transientImages, 1);
+    assert.equal(Object.hasOwn(anchor, 'imageTokens'), false);
+    const calls = f.network.requests.length;
+    f.conversation.forget(id);
+    await f.conversation.load(id);
+    assert.deepEqual(f.conversation.snapshot(id).occupancy, live.occupancy);
+    assert.equal(f.network.requests.length, calls, 'replaying image subtotals stays offline');
   });
-  const id = await newSession(f.sessionStore, f.conversation, f.settings);
-  assert.equal((await f.conversation.send(id, 'Look', { images: ['fig.png'] })).status, 'complete');
-  const live = f.conversation.snapshot(id);
-  assert.ok(live.occupancy.tokens >= 1000 && live.occupancy.tokens < 1100);
-  assert.equal(live.turnUsage.input, 3000, 'billing retains vision input exactly once');
-  f.conversation.forget(id);
-  await f.conversation.load(id);
-  assert.deepEqual(f.conversation.snapshot(id).occupancy, live.occupancy);
-});
+
+  test(`${protocol}: retained-image occupancy uses the provider total and ignores image detail fields`, async () => {
+    const occupancies = [];
+    for (const imageTokens of [null, 2000]) {
+      const f = makeConversation({ settings: { protocol }, imageSource, files: { 'paper.md': '![figure](fig.png)' },
+        script: [() => imageToolResponse(protocol, 'get-image', 'fig.png', 'vision-tool', 'paper.md'),
+          () => visionAnswer(imageTokens), () => visionAnswer(imageTokens)],
+      });
+      f.tracker.allowlist = () => ['paper.md'];
+      const id = await newSession(f.sessionStore, f.conversation, f.settings);
+      assert.equal((await f.conversation.send(id, 'Read the figure')).status, 'complete');
+      const live = f.conversation.snapshot(id);
+      assert.equal(live.occupancy.source, 'provider');
+      assert.ok(live.occupancy.tokens > 2900, 'retained vision input stays in the provider total');
+      assert.equal(Object.hasOwn(f.conversation.stateFor(id).occupancyAnchor, 'imageTokens'), false);
+      assert.deepEqual(f.conversation.stateFor(id).occupancyAnchor.imageKeys, ['fig.png']);
+      occupancies.push(live.occupancy);
+      const records = JSON.stringify(f.sessionStore.records.get(id));
+      const calls = f.network.requests.length;
+      f.conversation.forget(id);
+      await f.conversation.load(id);
+      assert.deepEqual(f.conversation.snapshot(id).occupancy, live.occupancy);
+      assert.equal(f.network.requests.length, calls);
+      assert.equal(JSON.stringify(f.sessionStore.records.get(id)), records, 'replay does not rewrite the log');
+      assert.equal((await f.conversation.send(id, 'Look again')).status, 'complete');
+      assert.match(f.network.requests.at(-1).options.body, /data:image/);
+      assert.equal(f.conversation.snapshot(id).occupancy.source, 'provider');
+    }
+    assert.deepEqual(occupancies[0], occupancies[1], 'image details do not affect the complete provider total');
+    assert.equal(Object.hasOwn(occupancies[1], 'imageTokens'), false);
+  });
+}

@@ -825,7 +825,6 @@ class QuickAskView {
         this.composer?.removeFile?.(path);
         this.saveDraft(); this.renderPending();
       } });
-    if (images.length) ui.createEl(panel, "small", { cls: "scholar-quick-ask-image-budget", text: this.t(this.getSettings(), "images.budget") });
     if (view.showBar) {
       const action = this.t(this.getSettings(), view.expanded ? "context.collapse" : "context.expand");
       const button = ui.createEl(panel, "button", {
@@ -1118,7 +1117,7 @@ class QuickAskView {
       ? `${estimated}${formatTokens(occupancy.tokens)} / ${formatTokens(capacity)}`
       : `${estimated}${formatTokens(occupancy.tokens)}`;
     ui.setTooltip(ring, label, { placement: "top" });
-    const panel = ui.createEl(controls, "div", { cls: "scholar-quick-ask-token-panel" });
+    const panel = ui.createEl(controls, "div", { cls: "scholar-quick-ask-token-panel scholar-quick-ask-occupancy-panel" });
     panel.hidden = true;
     this.roots.occupancyPanel = panel;
     this.roots.occupancyButton = ring;
@@ -1126,9 +1125,10 @@ class QuickAskView {
     ring.setAttribute("aria-expanded", String(!panel.hidden));
     const list = ui.createEl(panel, "dl", { cls: "scholar-quick-ask-token-detail" });
     ui.createEl(list, "dt", { text: this.t(this.getSettings(), "token.currentContext") });
-    ui.createEl(list, "dd", { text: label + (occupancy.exact ? "" : ` (${this.t(this.getSettings(), "token.estimated")})`) });
-    if (occupancy.unknownImages) ui.createEl(list, "dd", { text: this.t(this.getSettings(), "token.unknownImages", { count: occupancy.unknownImages }) });
-    else if (occupancy.imagesIncluded) ui.createEl(list, "dd", { text: this.t(this.getSettings(), "token.imagesIncluded", { count: occupancy.imagesIncluded }) });
+    const contextValue = ui.createEl(list, "dd", { cls: "scholar-quick-ask-context-value" });
+    ui.createEl(contextValue, "span", { text: `${estimated}${formatTokens(occupancy.tokens)}` });
+    if (capacity) ui.createEl(contextValue, "span", { text: `/ ${formatTokens(capacity)}` });
+    if (!occupancy.exact) ui.createEl(contextValue, "small", { text: this.t(this.getSettings(), "token.estimated") });
     if (capacity) {
       ui.createEl(list, "dt", { text: this.t(this.getSettings(), "token.percent") });
       ui.createEl(list, "dd", { text: formatPercent(ratio) });

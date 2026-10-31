@@ -719,6 +719,23 @@
   font-size: var(--font-ui-smaller);
 }
 
+.scholar-quick-ask-occupancy-panel .scholar-quick-ask-token-detail {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+.scholar-quick-ask-occupancy-panel .scholar-quick-ask-token-detail :is(dt, dd) {
+  min-width: 0;
+  margin: 0;
+}
+.scholar-quick-ask-occupancy-panel .scholar-quick-ask-token-detail dt { color: var(--text-muted); }
+.scholar-quick-ask-occupancy-panel .scholar-quick-ask-token-detail dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.scholar-quick-ask-context-value { display: flex; flex-wrap: wrap; justify-content: flex-end; column-gap: 0.3em; }
+.scholar-quick-ask-context-value span { white-space: nowrap; }
+.scholar-quick-ask-context-value small { flex-basis: 100%; color: var(--text-muted); font-size: inherit; }
+
 .scholar-quick-ask-compaction-running,
 .scholar-quick-ask-compaction-divider {
   display: flex;
@@ -984,7 +1001,6 @@
 .scholar-quick-ask-image-missing-label { display: block; flex: 0 0 auto; padding: 0 4px 6px;
   color: var(--text-muted); font-size: var(--font-smallest); line-height: 1.3; text-align: center; }
 .scholar-quick-ask-image-remove { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; padding: 3px; }
-.scholar-quick-ask-image-budget { display: block; color: var(--text-muted); font-size: var(--font-smallest); padding-bottom: 5px; }
 /* Fill the originating Obsidian window; the image alone receives contain
    sizing, so the surrounding region stays the requested dark overlay. */
 .scholar-quick-ask-image-viewer {

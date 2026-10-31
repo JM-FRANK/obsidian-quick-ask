@@ -52,6 +52,35 @@ async function setup(protocol = 'responses') {
 }
 
 for (const protocol of ['responses', 'chat-completions']) {
+  test(`${protocol}: configuration changes invalidate occupancy calibration until the next provider reply`, async () => {
+    const h = await setup(protocol);
+    let runtime = h.runtime;
+    assert.equal((await runtime.send(h.id, 'Start')).status, 'complete');
+    for (const patch of [{ systemPrompt: 'Role B' }, { model: 'two' }]) {
+      assert.equal(runtime.snapshot(h.id).occupancy.source, 'provider');
+      const requests = h.requests.length;
+      assert.equal((await runtime.configure(h.id, patch)).status, 'committed');
+      const changed = runtime.snapshot(h.id).occupancy;
+      assert.equal(runtime.stateFor(h.id).occupancyAnchor, null);
+      assert.equal(changed.source, undefined, 'the previous request cannot calibrate the changed configuration');
+      assert.equal(changed.estimated, true);
+      assert.equal(h.requests.length, requests, 'configuration does not call the provider');
+      const raw = h.files.get(h.store.adapterPathFor(h.id));
+      const reopened = h.makeRuntime();
+      await reopened.load(h.id);
+      assert.deepEqual(reopened.snapshot(h.id).occupancy, changed);
+      assert.equal(reopened.stateFor(h.id).occupancyAnchor, null);
+      assert.equal(h.files.get(h.store.adapterPathFor(h.id)), raw, 'replay does not rewrite the upgraded log');
+      assert.equal(h.requests.length, requests, 'reopening remains offline');
+      assert.equal((await reopened.send(h.id, 'Continue')).status, 'complete');
+      assert.equal(reopened.stateFor(h.id).occupancyAnchor.version, 1);
+      assert.equal(reopened.snapshot(h.id).occupancy.source, 'provider');
+      runtime.forget(h.id);
+      runtime = reopened;
+    }
+    runtime.forget(h.id);
+  });
+
   test(`${protocol}: configuration, retry, withdrawal and reload preserve billing and current choice`, async () => {
     const h = await setup(protocol);
     const original = draft('first [[a.md]]');
