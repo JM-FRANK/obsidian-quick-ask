@@ -733,7 +733,7 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.scholar-quick-ask-context-value { display: flex; flex-wrap: wrap; justify-content: flex-end; column-gap: 0.3em; }
+.scholar-quick-ask-context-value { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 0.3em; }
 .scholar-quick-ask-context-value span { white-space: nowrap; }
 .scholar-quick-ask-context-value small { flex-basis: 100%; color: var(--text-muted); font-size: inherit; }
 
