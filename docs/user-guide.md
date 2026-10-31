@@ -66,7 +66,7 @@ Add **PNG/JPEG/WebP** using `[[`, Vault/external drag and drop, or clipboard pas
 
 Image bytes go only to the first model request of that question. Tool continuations, later questions and compaction do not resend them. Explicit retry rereads the image source. History and exports store paths, not image files; previews show the current source, with a placeholder when it is missing.
 
-External and pasted images are copied into the plugin cache; original Vault images are not. **Keep cached images** defaults to on. Turning it off clears cached images on the next Obsidian reopen, not on plugin reload. Context occupancy uses provider input counts when applicable, including images, plus estimated subsequent changes. Unknown image tokens are marked as an incomplete total. Unsent drafts are excluded from the displayed occupancy and checked separately before sending. Provider-reported usage remains the billing authority.
+External and pasted images are copied into the plugin cache; original Vault images are not. **Keep cached images** defaults to on. Turning it off clears cached images on the next Obsidian reopen, not on plugin reload. Context occupancy uses provider input counts when applicable, including images, plus estimated subsequent changes. Image token subtotals are not tracked or displayed. Unsent drafts are excluded from the displayed occupancy and checked separately before sending. Provider-reported usage remains the billing authority.
 
 ### Web search
 

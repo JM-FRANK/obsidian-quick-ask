@@ -3,8 +3,6 @@ const DEFAULT_LANGUAGE = "en";
 const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
-  "token.unknownImages": "Image token count unavailable for {count} image(s); the displayed total is incomplete.",
-  "token.imagesIncluded": "Includes provider-calibrated input for {count} image(s).",
   "settings.quickAsk.generalGroup": "General",
   "providers.pageTitle": "Model connections",
   "providers.pageDescription": "Manage connection profiles, then select a model and configure its protocol and context window. Applies only to new sessions.",
@@ -94,7 +92,6 @@ const EN = {
   "rendering.diagramFailed": "Diagram could not be rendered. Source is available below.",
   "rendering.tableSourceUnavailable": "Original Markdown table source could not be matched",
   "images.close": "Close image viewer",
-  "images.budget": "Image tokens use provider counts when available; local estimates may be incomplete.",
   "images.keepCache": "Keep cached images",
   "images.keepCacheHelp": "Keep imported and pasted images for history previews. When off, delete cached images the next time Obsidian opens; reloading this plugin does not delete them. Vault images are unaffected.",
   "images.IMAGE_PATH": "Invalid image path: {path}",
@@ -306,8 +303,6 @@ const EN = {
 };
 
 const ZH_CN = {
-  "token.unknownImages": "{count} 张图片的 token 占用未知，当前显示的总量不完整。",
-  "token.imagesIncluded": "已包含服务商校准的 {count} 张图片输入占用。",
   "settings.quickAsk.generalGroup": "常规",
   "providers.pageTitle": "模型连接",
   "providers.pageDescription": "先选择连接配置，再选择模型并设置其协议与上下文窗口。仅对新会话生效。",
@@ -396,7 +391,6 @@ const ZH_CN = {
   "rendering.diagramFailed": "图表渲染失败，可查看并复制下方源码。",
   "rendering.tableSourceUnavailable": "无法匹配此表格的 Markdown 原文",
   "images.close": "关闭图片查看",
-  "images.budget": "图片占用优先采用服务商计数；本地估算可能不完整。",
   "images.keepCache": "保存缓存图片",
   "images.keepCacheHelp": "保留外部及粘贴图片以供历史预览。关闭后，下次重新打开 Obsidian 时删除缓存；插件重载不清理。Vault 原图不受影响。",
   "images.IMAGE_PATH": "图片路径无效：{path}",

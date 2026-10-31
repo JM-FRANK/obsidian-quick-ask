@@ -157,7 +157,6 @@ function eventsFromResponse(payload, state, emit) {
   const usage = payload.usageMetadata;
   if (usage && typeof usage === 'object') {
     const value = { ...(Number.isFinite(usage.promptTokenCount) ? { prompt_tokens: usage.promptTokenCount } : {}),
-      ...(Array.isArray(usage.promptTokensDetails) ? { promptTokensDetails: usage.promptTokensDetails } : {}),
       ...((Number.isFinite(usage.candidatesTokenCount) || Number.isFinite(usage.thoughtsTokenCount)) ? { completion_tokens: (Number.isFinite(usage.candidatesTokenCount) ? usage.candidatesTokenCount : 0) + (Number.isFinite(usage.thoughtsTokenCount) ? usage.thoughtsTokenCount : 0) } : {}),
       ...(Number.isFinite(usage.totalTokenCount) ? { total_tokens: usage.totalTokenCount } : {}),
       ...(Number.isFinite(usage.cachedContentTokenCount) ? { prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount } } : {}),
