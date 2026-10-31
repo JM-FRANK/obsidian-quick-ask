@@ -5,6 +5,17 @@ const { documentImagePath } = require('../src/quick-ask/image-link');
 const { createToolExecutor, GET_IMAGE_TOOL } = require('../src/quick-ask/tool');
 const sourcePath = 'file01/file11/paper.md';
 
+test('identical image names resolve from the exact document; wiki root paths and encoded names stay distinct', () => {
+  for (const directory of ['notes/one', 'notes/two']) {
+    const source = `${directory}/paper.md`;
+    assert.equal(documentImagePath(source, 'assets/figure.png', '![Figure](assets/figure.png)'), `${directory}/assets/figure.png`);
+    assert.equal(documentImagePath(source, '![[assets/figure.png|200]]', '![[assets/figure.png|200]]'), 'assets/figure.png');
+    assert.equal(documentImagePath(source, '../shared/%E5%9B%BE%20%231.png#section',
+      '![Figure](../shared/%E5%9B%BE%20%231.png#section)'), 'notes/shared/图 #1.png');
+    assert.equal(documentImagePath(source, 'assets/a%2520b.png', '![Figure](assets/a%2520b.png)'), `${directory}/assets/a%20b.png`);
+  }
+});
+
 test('image link adapter resolves one exact path for Markdown and wikilinks', () => {
   for (const [text, path, expected] of [
     ['![figure](./attachments/pic01.png)', './attachments/pic01.png', 'file01/file11/attachments/pic01.png'],

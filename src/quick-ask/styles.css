@@ -79,6 +79,7 @@
    paragraphs/lists as blocks; pre-wrap would add HTML whitespace to margins. */
 .scholar-quick-ask-message-assistant { white-space: normal; }
 .scholar-quick-ask-message-assistant.is-streaming { white-space: pre-wrap; }
+.scholar-quick-ask-message-assistant .scholar-quick-ask-message-body img { cursor: zoom-in; }
 .scholar-quick-ask-stream-text { white-space: pre-wrap; }
 .scholar-quick-ask-message-body :is(p, ul, ol, blockquote) {
   margin-block: var(--scholar-chat-paragraph-spacing, 0.65em);

@@ -1,6 +1,7 @@
 const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
+const { answerImagePreview } = require("./answer-image-preview");
 const { createMarkdownVisuals } = require("./markdown-visuals");
 const { createSelectionHover } = require("./selection-hover");
 const { observeStatusBarInset } = require("./status-bar-layout");
@@ -401,7 +402,7 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       setIcon(element, icon) {
         setIcon(element, icon);
       },
-      async renderMarkdown(element, markdown, sourcePath) {
+      async renderMarkdown(element, markdown, sourcePath, { previewImages = false } = {}) {
         const owner = element.closest(".scholar-quick-ask-history") ?? element;
         let components = markdownComponents.get(owner);
         if (!components) { components = new Set(); markdownComponents.set(owner, components); }
@@ -420,6 +421,24 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
         });
         components.add(component);
         component.load();
+        if (previewImages) {
+          // Delegate to the answer root so delayed native image embeds work too.
+          // Capture before the host's image/link handlers open another viewer.
+          component.registerDomEvent(element, 'click', event => {
+            const image = event.target?.closest?.('img');
+            if (!image) return;
+            const preview = answerImagePreview({ active, event, image: {
+              contained: element.contains(image),
+              excluded: !!image.closest('.math, .mermaid, .scholar-quick-ask-visual.is-mermaid'),
+              naturalWidth: image.naturalWidth, currentSrc: image.currentSrc, src: image.src,
+              alt: image.alt, title: image.title,
+            } }, t(language, 'images.preview'));
+            if (!preview) return;
+            event.preventDefault();
+            event.stopPropagation();
+            environment.ui.previewImage(preview.resource, preview.resource, image, preview.label);
+          }, true);
+        }
         if (!markdownProcessorRegistered) {
           plugin.registerMarkdownPostProcessor(section => {
             // Only the exact root passed to our MarkdownRenderer.render call.
