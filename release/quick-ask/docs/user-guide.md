@@ -93,6 +93,8 @@ Provider search supports the configured Responses/Chat Completions route where a
 
 ## Accounts, costs and network use
 
+Opening release notes fetches the installed tag’s public GitHub Release description without sending notes or conversation content. A local update notice can also point you to optional preview releases.
+
 Quick Ask is free and requires no Quick Ask account. Your AI/search provider may require an account, API key or paid credits. Its fees apply separately; an AI chat subscription does not necessarily include API access.
 
 Submitting a question sends prompts, selected passages, referenced file content and effective conversation context to your configured service. Follow-up model/tool calls may send updated or complete contents of previously included files. Counting or compacting model context may also contact that service. When search is enabled, requests can also reach the selected search service. Model discovery sends an authenticated model-list request without note content. Recovery/deletion of older provider-stored responses may contact their configured endpoint.

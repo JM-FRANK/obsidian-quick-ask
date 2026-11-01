@@ -40,7 +40,11 @@ Use tags such as `1.1.0-beta.1`, `1.1.0-beta.2`, then `1.1.0-rc.1` before the st
 
 Prepare preview metadata on upstream `next/1.1` and synchronize it to downstream `preview/1.1.0`. Keep downstream `main` at the last stable manifest version: the community installer looks for the numeric tag matching that file, so a preview branch must not advertise an unpublished stable version on `main`.
 
-Dispatch **Prepare Quick Ask release** on that preview branch with `release_tag=1.1.0-beta.1` and `prerelease=true`. The workflow validates/builds/tests/attests the exact snapshot, then prepares a draft with the pre-release flag and `latest=false`. After reviewing its three installation assets and checksums, publish that draft while retaining both flags. Published candidates are never overwritten; use the next candidate tag. Local preparation supports `npm run release:draft -- --tag 1.1.0-beta.1 --prerelease`, but still requires the public workflow for attestations.
+Dispatch **Prepare Quick Ask release** on that preview branch with `release_tag=1.1.0-beta.1` and `prerelease=true`. The workflow validates/builds/tests/attests the exact snapshot, then prepares a draft with the pre-release flag and `latest=false`. After reviewing its three installation assets and checksums, publish that draft while retaining both flags. Published candidates are never overwritten; use the next candidate tag. Local preparation supports `QUICK_ASK_RELEASE_TAG=1.1.0-beta.1 npm run release:draft -- --tag 1.1.0-beta.1 --prerelease`, but still requires the public workflow for attestations.
+
+## Update notice and release notes
+
+The plugin displays the installed tag's GitHub Release body; maintain detailed notes there, without duplicating them in the plugin. Optional short Markdown notices and the preview invitation are configured in `src/quick-ask/release-notes.js` (`UPDATE_NOTICE`). Stable builds use the manifest version as their tag. For preview builds, set `QUICK_ASK_RELEASE_TAG` to the exact tag (for example `1.1.0-beta.2`) during build and consistency checks; the numeric manifest remains unchanged.
 
 ## Prepare a release
 

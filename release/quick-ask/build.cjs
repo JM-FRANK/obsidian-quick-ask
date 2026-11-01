@@ -9,13 +9,17 @@ const notices = require("./build-notices.cjs")(bundledPackageDirectories);
 const check = process.argv.includes('--check');
 const outIndex = process.argv.indexOf('--out');
 const out = outIndex >= 0 ? path.resolve(process.argv[outIndex + 1]) : path.join(root, 'dist/quick-ask');
+const { releaseTagFor } = require('../../src/quick-ask/release-notes');
+const manifestVersion = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8')).version;
+const releaseTag = releaseTagFor(manifestVersion, process.env.QUICK_ASK_RELEASE_TAG?.trim());
 // Composer state is already compiled into the owned editor bundle. Including
 // its raw factory duplicates it and exposes imports the outer loader cannot use.
 const names = fs.readdirSync(path.join(root, 'src/quick-ask')).filter(name => name.endsWith('.js') && !['composer-view.js', 'composer-state.js'].includes(name))
   .sort().map(name => `src/quick-ask/${name}`);
-names.push('release/quick-ask/settings-store.js', 'release/quick-ask/main.js');
+names.push('release/quick-ask/settings-store.js', 'release/quick-ask/release-notes-ui.js', 'release/quick-ask/main.js');
 const factories = names.map(name => {
-  const source = fs.readFileSync(path.join(root, name), 'utf8');
+  let source = fs.readFileSync(path.join(root, name), 'utf8');
+  if (name === 'src/quick-ask/release-notes.js') source = source.replace('const RELEASE_TAG = null;', `const RELEASE_TAG = ${JSON.stringify(releaseTag)};`);
   // Resolve every static local import at build time, leaving host externals
   // and the composer's separate bundled CodeMirror graph intact.
   const mapped = source.replace(/require\((['"])(\.[^'"]+)\1\)/g, (_match, _quote, id) => {
