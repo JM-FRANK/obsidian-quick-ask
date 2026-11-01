@@ -34,6 +34,10 @@ Review, commit and push the synchronized source, metadata and provenance. Genera
 
 For GitHub-based synchronization, configure `UPSTREAM_REPOSITORY` and read credentials if the upstream is private. Run **Pull Quick Ask from upstream** with a full commit SHA; it verifies the generated tree before creating a PR. Until the upstream has a remote repository, use local synchronization. A PR generated with GITHUB_TOKEN may not trigger another workflow, so the sync job performs its own tests.
 
+## Update notice and release notes
+
+The plugin displays the installed tag's GitHub Release body; maintain detailed notes there, without duplicating them in the plugin. Optional short Markdown notices and the preview invitation are configured in `src/quick-ask/release-notes.js` (`UPDATE_NOTICE`). Stable builds use the manifest version as their tag. For preview builds, set `QUICK_ASK_RELEASE_TAG` to the exact tag (for example `1.1.0-beta.2`) during build and consistency checks; the numeric manifest remains unchanged.
+
 ## Prepare a release
 
 Build locally, commit the synchronized source snapshot, then run `npm run release:check`. Use the **Prepare Quick Ask release** workflow to rebuild, test and attest the exact installation files before uploading them to a draft Release. A local `npm run release:draft` is useful for preparation, but it does not generate a GitHub attestation and its draft is explicitly marked accordingly.

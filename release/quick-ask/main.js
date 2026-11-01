@@ -3,6 +3,7 @@ const { createQuickAsk } = require('../../src/quick-ask/index');
 const { quickAskPage } = require('../../src/quick-ask/settings-ui');
 const { quickAskControlValue, quickAskControlPatch } = require('../../src/quick-ask/settings-controls');
 const { QuickAskSettings } = require('./settings-store');
+const { registerReleaseNotes } = require('./release-notes-ui');
 
 class QuickAskSettingsTab extends PluginSettingTab {
   constructor(app, plugin) {
@@ -48,6 +49,7 @@ module.exports = class QuickAskPlugin extends Plugin {
     this.quickAsk.sync();
     const tab = new QuickAskSettingsTab(this.app, this);
     this.addSettingTab(tab);
+    registerReleaseNotes(this);
     void this.quickAsk.refreshStorageSummary().then(() => tab.update()).catch(error => {
       console.error('Quick Ask: storage summary failed', error);
       new Notice(this.settings.values().language === 'zh-CN' ? '快速提问：无法读取会话存储信息。' : 'Quick Ask: could not read session storage information.');

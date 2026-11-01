@@ -77,6 +77,7 @@
 
 /* Preserve whitespace only for raw text. Markdown already represents its
    paragraphs/lists as blocks; pre-wrap would add HTML whitespace to margins. */
+.scholar-quick-ask-release-notes .markdown-rendered { overflow-wrap: anywhere; }
 .scholar-quick-ask-message-assistant { white-space: normal; }
 .scholar-quick-ask-message-assistant.is-streaming { white-space: pre-wrap; }
 .scholar-quick-ask-message-assistant .scholar-quick-ask-message-body img { cursor: zoom-in; }

@@ -3,6 +3,18 @@ const DEFAULT_LANGUAGE = "en";
 const LANGUAGES = ["en", "zh-CN"];
 
 const EN = {
+  "updates.command": "View release notes",
+  "updates.title": "Quick Ask {version} — What's new",
+  "updates.empty": "This release has no description yet.",
+  "updates.releaseHeading": "Release notes",
+  "updates.releaseLink": "View this release on GitHub",
+  "updates.loading": "Loading release notes…",
+  "updates.failed": "Could not load release notes. View this release on GitHub.",
+  "updates.notPublished": "This release is not publicly available yet.",
+  "updates.previewTitle": "Try the preview version",
+  "updates.previewDescription": "Want to try new features early? Visit GitHub Releases and choose a version marked Pre-release.",
+  "updates.previewCompatibility": "The preview replaces the stable plugin in this vault. Back up your conversations first; sessions edited in the preview may not reopen in the stable version.",
+  "updates.previewLink": "View preview releases",
   "settings.quickAsk.generalGroup": "General",
   "providers.pageTitle": "Model connections",
   "providers.pageDescription": "Manage connection profiles, then select a model and configure its protocol and context window. Applies only to new sessions.",
@@ -303,6 +315,18 @@ const EN = {
 };
 
 const ZH_CN = {
+  "updates.command": "查看更新说明",
+  "updates.title": "Quick Ask {version} 更新说明",
+  "updates.empty": "此 Release 暂无说明。",
+  "updates.releaseHeading": "Release 说明",
+  "updates.releaseLink": "在 GitHub 查看此版本",
+  "updates.loading": "正在加载 Release 说明…",
+  "updates.failed": "未能加载 Release 说明，请前往 GitHub 查看。",
+  "updates.notPublished": "此 Release 尚未公开。",
+  "updates.previewTitle": "尝试预览版",
+  "updates.previewDescription": "想提前体验新功能？可前往 GitHub Releases 下载标记为 Pre-release 的版本。",
+  "updates.previewCompatibility": "预览版会替换当前 Vault 中的稳定版。请先备份会话；在预览版中编辑过的会话可能无法用稳定版打开。",
+  "updates.previewLink": "查看预览版",
   "settings.quickAsk.generalGroup": "常规",
   "providers.pageTitle": "模型连接",
   "providers.pageDescription": "先选择连接配置，再选择模型并设置其协议与上下文窗口。仅对新会话生效。",
