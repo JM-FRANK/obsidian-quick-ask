@@ -32,6 +32,8 @@ function createMarkdownVisuals({ ui, translate, tableSources = () => [], onLayou
     original.before(wrapper);
     const rendered = ui.createEl(wrapper, 'span', { cls: 'scholar-quick-ask-visual-rendered' });
     rendered.appendChild(original);
+    // The host's Pele toolbar also contains SVG icons.
+    const renderedDiagram = () => rendered.querySelector('.mermaid > svg');
     if (kind === 'math') mathOverflow.add(rendered, original);
     // Inline math keeps local overflow handling without introducing controls
     // or reserving space inside the surrounding sentence.
@@ -49,12 +51,12 @@ function createMarkdownVisuals({ ui, translate, tableSources = () => [], onLayou
       const label = translate(show ? 'rendering.viewRendered' : 'rendering.viewSource');
       toggle.setAttribute('aria-label', label);
       ui.setTooltip(toggle, label);
-      if (zoom) zoom.hidden = show || !rendered.querySelector('svg');
+      if (zoom) zoom.hidden = show || !renderedDiagram();
       if (kind === 'math') mathOverflow.refresh();
       onLayout();
     };
     const zoom = mermaid ? button(toolbar, 'zoom-in', 'images.preview', () => {
-      const svg = rendered.querySelector('svg');
+      const svg = renderedDiagram();
       if (svg) ui.previewDiagram(svg, zoom);
     }) : null;
     if (zoom) zoom.hidden = true;
@@ -92,7 +94,7 @@ function createMarkdownVisuals({ ui, translate, tableSources = () => [], onLayou
       toggle.addEventListener('click', () => { userChoice = true; });
       const update = () => {
         if (disposed) return;
-        const ready = !!rendered.querySelector('svg');
+        const ready = !!renderedDiagram();
         error.hidden = !settled || ready;
         if (!ready && settled && !userChoice && !fallback) { fallback = true; displaySource(true); }
         if (ready && fallback && !userChoice) { fallback = false; displaySource(false); }

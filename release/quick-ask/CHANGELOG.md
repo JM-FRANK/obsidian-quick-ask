@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.8 — Release notes and Obsidian 1.15 diagram previews
+
+### Added
+
+- Open the installed version’s release notes from the command palette. Quick Ask also shows the notes once when it detects an upgrade and links to the preview releases.
+
+### Fixed
+
+- Preserve Pele theme colors and MathJax formulas when opening a Mermaid diagram in the viewer on Obsidian 1.15. The viewer opens the full diagram and supports zoom and drag.
+- Hide the duplicate in-diagram zoom buttons in Quick Ask and keep its existing viewer button.
+
+### Compatibility
+
+- Requires desktop Obsidian 1.13.7 or later. Existing conversations remain readable.
+
 ## 1.0.7 — Context occupancy and answer image previews
 
 ### Added

@@ -1,6 +1,7 @@
 const { sanitizeHTMLToDom, AbstractInputSuggest, Component, Keymap, MarkdownView, MarkdownRenderer, Modal, Notice, Platform, TFile, Menu, normalizePath, prepareFuzzySearch, renderMatches, requestUrl, setIcon, setTooltip } = require("obsidian");
 const { t } = require("./i18n");
 const { createImageViewer } = require("./image-viewer");
+const { createDiagramPreview } = require("./diagram-preview");
 const { answerImagePreview } = require("./answer-image-preview");
 const { createMarkdownVisuals } = require("./markdown-visuals");
 const { createSelectionHover } = require("./selection-hover");
@@ -342,22 +343,8 @@ function createQuickAskEnvironment(plugin, { getLanguage = () => "en", canNetwor
       },
       previewDiagram(svg, origin) {
         const doc = origin.ownerDocument;
-        const copy = svg.cloneNode(true);
-        const box = svg.viewBox?.baseVal;
-        if (box?.width > 0 && box?.height > 0) {
-          copy.setAttribute('width', String(box.width));
-          copy.setAttribute('height', String(box.height));
-        }
-        copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        copy.style.maxWidth = 'none';
-        const style = doc.defaultView.getComputedStyle(svg);
-        copy.style.color = style.color;
-        copy.style.backgroundColor = style.getPropertyValue('--background-primary');
-        const serialized = new doc.defaultView.XMLSerializer().serializeToString(copy);
-        // An image resource isolates SVG IDs and disables diagram interactions,
-        // while using exactly the same window-local viewer as image attachments.
-        imageViewer.open({ document: doc, resource: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(serialized)}`,
-          label: t(language, 'rendering.diagram') });
+        const label = t(language, 'rendering.diagram');
+        imageViewer.open({ document: doc, label, ...createDiagramPreview(svg, label) });
       },
       createEl(parent, tag, options = {}) {
         const element = parent.createEl(tag, { cls: options.cls, text: options.text });

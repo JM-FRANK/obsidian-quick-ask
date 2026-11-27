@@ -222,6 +222,8 @@
 .scholar-quick-ask-visual.is-table th { background: var(--background-secondary); font-weight: var(--font-semibold); }
 .scholar-quick-ask-visual.is-mermaid .mermaid { margin: 0; }
 .scholar-quick-ask-visual.is-mermaid svg { display: block; max-width: 100%; height: auto; margin-inline: auto; }
+/* Pele sets the inline display as the diagram resizes. Quick Ask has its own preview button. */
+.scholar-quick-ask-visual.is-mermaid .mermaid > .pele-zoom { display: none !important; }
 .scholar-quick-ask-visual-source {
   display: block;
   max-width: 100%;
@@ -1006,6 +1008,9 @@
   position: absolute; left: 50%; top: 50%; translate: -50% -50%;
   max-width: none; max-height: none; object-fit: contain; display: block;
   user-select: none; touch-action: none; transform-origin: center;
+}
+.scholar-quick-ask-image-viewer-content > iframe {
+  display: block; width: 100%; height: 100%; border: 0; pointer-events: none;
 }
 .scholar-quick-ask-image-viewer-content.is-zoomed { cursor: grab; }
 .scholar-quick-ask-image-viewer-content.is-dragging { cursor: grabbing; }
