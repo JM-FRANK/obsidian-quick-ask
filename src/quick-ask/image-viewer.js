@@ -4,7 +4,7 @@ const { fitImage, constrain, zoomAt, panBy, wheelDelta, stepZoom, wheelZoomAmoun
 
 function createImageViewer({ labelForClose }) {
   const viewers = new Map();
-  function open({ document: doc, resource, label }) {
+  function open({ document: doc, resource, diagram, label }) {
     viewers.get(doc)?.();
     const previous = doc.activeElement;
     const win = doc.defaultView;
@@ -14,11 +14,16 @@ function createImageViewer({ labelForClose }) {
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-label', label);
     overlay.tabIndex = -1;
-    const image = doc.createElement('img');
+    const image = diagram?.surface ?? doc.createElement('img');
     image.className = 'scholar-quick-ask-image-viewer-content';
-    image.src = resource;
-    image.alt = label;
-    image.draggable = false;
+    if (diagram) {
+      image.setAttribute('role', 'img');
+      image.setAttribute('aria-label', label);
+    } else {
+      image.src = resource;
+      image.alt = label;
+      image.draggable = false;
+    }
     const title = doc.createElement('div');
     title.className = 'scholar-quick-ask-image-viewer-title';
     title.textContent = label;
@@ -50,7 +55,7 @@ function createImageViewer({ labelForClose }) {
       if (viewers.get(doc) !== close) return;
       stopMomentum();
       const width = overlay.clientWidth, height = overlay.clientHeight;
-      const fitted = fitImage(width, height, image.naturalWidth, image.naturalHeight);
+      const fitted = fitImage(width, height, diagram?.width ?? image.naturalWidth, diagram?.height ?? image.naturalHeight);
       viewport = { width, height, imageWidth: fitted.width, imageHeight: fitted.height };
       image.style.width = `${fitted.width}px`;
       image.style.height = `${fitted.height}px`;

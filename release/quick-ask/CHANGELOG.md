@@ -2,12 +2,15 @@
 
 ## 1.1.0 — Session editing and explicit configuration switching
 
-This feature set is first available as **1.1.0-beta.1**, a GitHub pre-release for testing. The installation manifest uses numeric version **1.1.0**; the stable branch and Latest release remain **1.0.6**.
+**1.1.0-beta.2** is a GitHub pre-release for testing. Its installation manifest uses numeric version **1.1.0**.
 
-### Changes prepared after 1.1.0-beta.1
+### Changes since 1.1.0-beta.1
 
-- Include QA-045 provider-calibrated context occupancy, shared with the stable 1.0.7 candidate: committed-context display, separate draft capacity checks, image-inclusive provider input totals, explicit unknown-image notices and legacy-log fallback.
-- Continue long-lived preview development on upstream `next/1.1`, exported only to downstream `preview/1.1.0`. The next candidate can use `1.1.0-beta.2`; no new tag or Release is created by this change.
+- Calibrate context occupancy using provider-reported input totals, account for retained tool images in those totals, and check unsent drafts separately. Older logs fall back to local estimates where necessary.
+- Open images in assistant answers in the existing window-local viewer. Improve context-occupancy spacing in narrow sidebars.
+- Ask the model to use double-dollar delimiters for Mermaid formulas and to quote flowchart labels that contain math.
+- View release notes for the exact installed preview from the command palette or after an upgrade.
+- Preserve Pele theme colors and MathJax formulas in Mermaid previews on Obsidian 1.15. Open the full diagram in Quick Ask’s viewer and hide the duplicate in-diagram zoom buttons.
 
 ### Added
 
